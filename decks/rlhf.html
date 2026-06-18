@@ -1,0 +1,1332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RLHF & Alignment — LLM Teaching Decks</title>
+  <meta name="description" content="A reveal.js lecture deck: reward modeling + PPO, DPO, critic-free GRPO, and AI/verifiable feedback (RLAIF, RLVR)." />
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/white.css" id="reveal-theme" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <link rel="stylesheet" href="../assets/deck.css?v=2" />
+
+  <!-- FOUC guard: set deck theme before first paint -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("deck-theme") ||
+          ((window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+        if (t === "dark") document.documentElement.classList.add("deck-dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+
+<!-- ============================================================
+     MODULE 08 · RLHF & ALIGNMENT  ·  reveal slides
+     ============================================================ -->
+
+<!-- ========== 1. TITLE ========== -->
+<section class="deck-title">
+  <div class="logo">∑</div>
+  <p class="kicker">PHASE 2 · TRAINING &amp; ALIGNMENT · MODULE 08</p>
+  <h1>RLHF &amp; Alignment</h1>
+  <p class="subtitle">How human (and AI) preferences turn a fluent-but-feral base model into a helpful, harmless, honest assistant.</p>
+  <p class="keyhint"><kbd>←</kbd><kbd>→</kbd> navigate · <kbd>S</kbd> speaker notes · <kbd>O</kbd> overview · <kbd>F</kbd> fullscreen · append <code>?print-pdf</code> to export</p>
+  <aside class="notes">
+    Welcome. This is the alignment module — the bridge between "a model that predicts text" and "a model you'd actually
+    ship as an assistant." The thesis of the whole lecture: pretraining gives capability, alignment gives <em>behavior</em>.
+    We will build the canonical three-stage RLHF pipeline, then walk the full preference-optimization landscape from
+    InstructGPT-era PPO to DPO to GRPO to verifiable rewards. Tell the audience to press S to open these notes if they
+    follow along, and that everything here is interview-grade — the "why did we move from X to Y" questions get asked constantly.
+  </aside>
+</section>
+
+<!-- ========== 2. ROADMAP ========== -->
+<section>
+  <section>
+    <p class="kicker">Roadmap</p>
+    <h2>What we'll land today</h2>
+    <div class="callout"><span class="t">📋 Roadmap</span> ~18 min of doc compressed into a teach-from deck.</div>
+    <ul>
+      <li class="fragment">The <strong>3-stage pipeline</strong>: SFT → reward model → RL</li>
+      <li class="fragment">Preference data &amp; the <strong>Bradley-Terry</strong> model</li>
+      <li class="fragment"><strong>PPO RLHF</strong> with a KL leash to a frozen reference</li>
+      <li class="fragment">The shortcuts: <strong>DPO</strong>, the DPO zoo, critic-free <strong>GRPO</strong></li>
+      <li class="fragment"><strong>RLAIF / Constitutional AI</strong> &amp; <strong>RLVR</strong> (verifiable rewards)</li>
+      <li class="fragment">The failure modes: <strong>reward hacking, Goodhart, length bias, the alignment tax</strong></li>
+    </ul>
+    <aside class="notes">
+      Set expectations: this is a landscape lecture. The single biggest idea to walk away with is that all of these methods
+      are solving the <em>same</em> KL-constrained objective — they just trade off online exploration against engineering
+      simplicity. PPO is the expressive-but-heavy original; DPO collapses it into one loss; GRPO is the modern reasoning
+      engine. Promise them we'll end with the pitfalls, because that's where the interview points actually are.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Roadmap</p>
+    <h2>The six core ideas</h2>
+    <div class="flow">
+      <span class="box accent">Learn taste</span>
+      <span class="arrow">→</span>
+      <span class="box">Optimize it</span>
+      <span class="arrow">→</span>
+      <span class="box green">Keep a leash</span>
+    </div>
+    <ul>
+      <li class="fragment">Humans compare better than they score → <strong>pairwise preferences</strong></li>
+      <li class="fragment">A reward model is a <strong>queryable proxy</strong> for the human panel</li>
+      <li class="fragment">RL pushes the policy toward high reward — under a <strong>KL leash</strong></li>
+      <li class="fragment">Everything fights <strong>Goodhart's law</strong></li>
+    </ul>
+    <aside class="notes">
+      These four bullets are the spine. "Humans compare better than they score" justifies the whole preference-data design.
+      The reward model decouples "what humans like" from "how to optimize it." The KL leash is the single most important
+      safety valve. And Goodhart — optimizing a proxy eventually destroys the thing you cared about — is the antagonist of
+      the entire field. Keep coming back to these.
+    </aside>
+  </section>
+</section>
+
+<!-- ========== 3. WHY IT MATTERS ========== -->
+<section>
+  <section>
+    <p class="kicker">Why it matters</p>
+    <h2>A base model has read the internet — and wants nothing</h2>
+    <ul>
+      <li class="fragment">It can <em>continue</em> text fluently…</li>
+      <li class="fragment">…but next-token prediction never taught it "good answer" vs "plausible continuation"</li>
+      <li class="fragment">Ask a question → it may answer, or autocomplete ten more questions</li>
+      <li class="fragment"><strong>Alignment</strong> bends raw capability toward <strong>H</strong>elpful, <strong>H</strong>armless, <strong>H</strong>onest</li>
+    </ul>
+    <aside class="notes">
+      The motivating problem: pretraining optimizes likelihood of internet text, which contains both brilliant answers and
+      endless garbage. The base model has no notion of what <em>you</em> want. The classic demo: ask GPT-3 base "What is the
+      capital of France?" and it might continue with five more trivia questions, because that's a plausible document. The HHH
+      triad (helpful, harmless, honest) comes from Anthropic. The hard part, stressed in the doc: "good" is a matter of human
+      taste, and you cannot write a loss function for taste — so we have to <em>learn</em> it.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Why it matters · where it fits</p>
+    <h2>Alignment sits after pretraining, before deploy</h2>
+    <div class="mermaid">
+flowchart LR
+  A["Pretraining<br/>capability"] --> B["SFT<br/>format + instructions"]
+  B --> C["RLHF / DPO / GRPO<br/>preferences"]
+  C --> D["Aligned assistant<br/>HHH"]
+</div>
+    <p class="fragment"><em>Capability comes from pretraining. Behavior comes from alignment.</em></p>
+    <aside class="notes">
+      Place alignment in the LLM stack. Pretraining (module 06) buys raw capability — knowledge and reasoning latent in the
+      weights. Fine-tuning/PEFT (module 07) is the machinery. This module is the <em>objective</em>: what behavior do we
+      actually want? A key, slightly counterintuitive point we'll revisit in pitfalls: RLHF mostly <em>re-weights</em>
+      behaviors the model already has rather than teaching new knowledge. Capability vs behavior is the framing.
+    </aside>
+  </section>
+</section>
+
+<!-- ========== 4. INTUITION ========== -->
+<section>
+  <section>
+    <p class="kicker">Intuition</p>
+    <h2>Training a chef</h2>
+    <div class="cols">
+      <div>
+        <ul>
+          <li class="fragment"><strong>SFT</strong> = chef copies recipes from a cookbook (imitation)</li>
+          <li class="fragment"><strong>Reward model</strong> = food critics taste <em>pairs</em> of dishes, say which plate wins → a stand-in critic you query for free</li>
+          <li class="fragment"><strong>RL</strong> = chef experiments; stand-in critic scores each attempt; keep what scores well</li>
+          <li class="fragment"><strong>KL leash</strong> = a manager stops the chef drowning everything in salt just because the critic loves salt</li>
+        </ul>
+      </div>
+      <div>
+        <div class="flow" style="flex-direction:column">
+          <span class="box ghost">Base LM</span>
+          <span class="arrow">↓</span>
+          <span class="box accent">SFT — imitate</span>
+          <span class="arrow">↓</span>
+          <span class="box">Reward model — taste</span>
+          <span class="arrow">↓</span>
+          <span class="box green">RL — maximize r − β·KL</span>
+        </div>
+      </div>
+    </div>
+    <aside class="notes">
+      This analogy carries the whole lecture, so land it cleanly. The crucial subtlety in the "salt" line: a reward model is
+      a <em>proxy</em>. If the critic happens to over-value one feature (salt, or in real life: length, bullet lists,
+      confident tone), an unleashed optimizer will exploit that feature to absurdity. The manager — the KL penalty to the
+      frozen SFT reference — is what keeps the chef cooking real food. We will formalize "salt = reward hacking" later.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Intuition · the canonical pipeline</p>
+    <h2>Three stages, frozen reference at the center</h2>
+    <div class="mermaid">
+flowchart LR
+  A["Base LM<br/>pretrained"] --> B["SFT<br/>imitate demos"]
+  B --> C["Reward model<br/>fit to A wins over B"]
+  C --> D["RL PPO<br/>maximize r minus beta KL"]
+  D --> E["Aligned model<br/>helpful harmless honest"]
+</div>
+    <p class="eqnote fragment">SFT teaches format &amp; instruction-following · the RM encodes human taste · RL optimizes against it under a KL leash to the frozen reference.</p>
+    <aside class="notes">
+      This is Figure 1 from the doc — the canonical InstructGPT recipe. Note the SFT model plays a double role: it's the
+      starting point for RL <em>and</em> it becomes the frozen reference π_ref that the KL leash measures against. Three
+      stages: imitate, encode taste, optimize. Every method we cover is a variation on this skeleton — DPO fuses stages 2+3,
+      GRPO swaps the RL algorithm, RLVR swaps the reward source.
+    </aside>
+  </section>
+</section>
+
+<!-- ========== 5. HOW IT WORKS ========== -->
+<section>
+  <section>
+    <p class="kicker">How it works · Stage 1</p>
+    <h2>SFT — supervised fine-tuning</h2>
+    <ul>
+      <li class="fragment">Collect (prompt, ideal response) <strong>demonstrations</strong></li>
+      <li class="fragment">Fine-tune with ordinary next-token <strong>cross-entropy</strong></li>
+      <li class="fragment">Result: a model that already follows instructions &amp; formats answers</li>
+      <li class="fragment">We start RL <em>from here</em> — RL is a <strong>local</strong> search, it needs a competent start</li>
+      <li class="fragment">The SFT model also becomes the <strong>frozen reference</strong> <code>π_ref</code></li>
+    </ul>
+    <aside class="notes">
+      Why not RL straight from the base model? Because RL improves what the policy already does well but explores poorly —
+      it's a local search. It needs a starting point that already puts probability mass on good answers. SFT provides exactly
+      that. Emphasize the double role again: the SFT checkpoint is both the RL initialization and the frozen reference for the
+      KL penalty. That's a common interview clarification.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Stage 2</p>
+    <h2>Reward modeling — encode the taste</h2>
+    <ul>
+      <li class="fragment">Sample several responses per prompt; humans <strong>rank / compare</strong> them pairwise</li>
+      <li class="fragment">Train a <strong>reward model (RM)</strong>: the SFT model with its LM head swapped for a single scalar "how good?" head</li>
+      <li class="fragment">Fit with the <strong>Bradley-Terry</strong> objective → chosen scores higher than rejected</li>
+      <li class="fragment">The RM is a <strong>cheap, queryable proxy</strong> for the human panel</li>
+    </ul>
+    <aside class="notes">
+      The RM is usually initialized from the SFT model — same backbone, scalar head. Why pairwise comparisons instead of 1–10
+      scores? Humans are far more reliable at "this beats that" than at calibrated absolute ratings, which drift across raters
+      and across days. Bradley-Terry (next section) converts those comparisons into a smooth, differentiable scorer the RL
+      loop can query millions of times for free. The RM is the heart of the "decouple taste from optimization" idea.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Stage 3</p>
+    <h2>RL optimization — text generation as decisions</h2>
+    <ul>
+      <li class="fragment">Policy <code>π_θ</code> generates a response <strong>token by token</strong></li>
+      <li class="fragment">RM scores the <em>finished</em> response → reward is <strong>sparse, sequence-level</strong></li>
+      <li class="fragment">Credit assignment across tokens is hard → that's the <strong>value function + advantages</strong></li>
+      <li class="fragment">Add a <strong>per-token KL penalty</strong> so the policy stays near <code>π_ref</code></li>
+      <li class="fragment">Default algorithm: <strong>PPO</strong> — clipped surrogate keeps each step small &amp; stable</li>
+    </ul>
+    <aside class="notes">
+      The reward arrives only at the end of the sequence — one number for a whole completion. So how do you decide which
+      <em>tokens</em> to reinforce? That's the credit-assignment problem, and it's why we need a learned value function (the
+      critic) plus GAE to spread the sequence reward back over tokens as advantages. The per-token KL penalty is what stops
+      the policy collapsing into degenerate RM-gaming text. Without the leash, the policy quickly finds gibberish that the RM
+      happens to score highly. PPO's clipping is the stability trick — we formalize it in the math section.
+    </aside>
+  </section>
+
+  <!-- ===== MECHANISM ANIMATION SLIDE (MECH) ===== -->
+  <section>
+    <p class="kicker">How it works · the loop</p>
+    <h2>One turn of the RLHF (PPO) loop</h2>
+    <p>Roll out a response, score it with reward minus KL, estimate per-token advantages, take a clipped step — then loop. <em>Press Play, or Step ›.</em></p>
+    <div data-anim="mech-rlhf"></div>
+    <aside class="notes">
+      Walk the seven stages live with the animation. (1) Sample a prompt x matching deployment. (2) The policy π_θ generates
+      a response y — an on-policy rollout, meaning we optimize the model's <em>own</em> current outputs. (3) Now we have a full
+      completion to score. (4) The frozen reward model scores it: r(x,y). (5) Subtract the per-token KL penalty β·KL(π_θ‖π_ref)
+      so it can't drift or reward-hack. (6) A critic plus GAE turn (reward − KL) into per-token advantages A_t — this solves
+      credit assignment. (7) PPO takes a clipped gradient step up the advantage, raising log-probs of high-advantage tokens
+      without moving too far, then loops back. Stress: reference and reward models are frozen; only the policy and critic train.
+      Four models live in memory at once — that's the cost we'll later remove with DPO and GRPO.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · the loop, statically</p>
+    <h2>The PPO-RLHF iteration as a flow</h2>
+    <div class="flow">
+      <span class="box accent">Prompt x</span>
+      <span class="arrow">→</span>
+      <span class="box">π_θ rollout</span>
+      <span class="arrow">→</span>
+      <span class="box">RM r(x,y) − β·KL</span>
+      <span class="arrow">→</span>
+      <span class="box">critic V + GAE → A_t</span>
+      <span class="arrow">→</span>
+      <span class="box green">PPO clipped step</span>
+      <span class="arrow">↺</span>
+      <span class="box ghost">repeat</span>
+    </div>
+    <p class="fragment eqnote">Two newer shortcuts skip parts of this loop:</p>
+    <ul>
+      <li class="fragment"><strong>DPO</strong>: optimal policy <em>is</em> an implicit reward → train directly on pairs. No RM, no rollouts.</li>
+      <li class="fragment"><strong>GRPO</strong>: keep online sampling but throw away the critic — normalize rewards within a <em>group</em>.</li>
+    </ul>
+    <aside class="notes">
+      This is Figure 2. The reference and reward models are frozen; only the policy and critic train. Use this slide as the
+      pivot into the approaches: DPO removes stages 2–3 entirely (no reward model, no rollouts) by showing the optimal policy
+      and the reward are two views of the same thing. GRPO keeps the online rollouts but throws away the critic, estimating
+      advantages by normalizing rewards within a group of completions sampled for the same prompt. We cover all of these next.
+    </aside>
+  </section>
+</section>
+
+<!-- ========== 6. THE APPROACHES (the heart) ========== -->
+<!-- ========== 6. THE APPROACHES (the heart) ========== -->
+<section>
+  <section>
+    <p class="kicker">The approaches</p>
+    <h2>The full preference-optimization landscape</h2>
+    <div class="callout"><span class="t">🗺 Map</span> classic recipe → the workhorse → the shortcuts → SOTA reasoning RL.</div>
+    <ul>
+      <li class="fragment">3-stage pipeline · Bradley-Terry RM · PPO RLHF</li>
+      <li class="fragment">Rejection sampling / best-of-n / RAFT</li>
+      <li class="fragment">DPO &amp; the DPO zoo (IPO · KTO · SimPO)</li>
+      <li class="fragment">GRPO · RLAIF / Constitutional AI · RLVR (ORM vs PRM)</li>
+    </ul>
+    <p class="small muted fragment">For each: what it is, how it works step by step, what it solves, pros/cons, and how it improves on the one before.</p>
+    <aside class="notes">
+      This is the heart of the deck — go deep. Two sub-slides per approach: a summary, then a step-by-step animation. The arc
+      to keep visible: PPO (heavy, on-policy) → DPO (offline, no RM) → GRPO (online again, but critic-free). Then the orthogonal
+      axis of <em>where the reward comes from</em>: human labels → AI labels → verifiable checkers. Nine approaches total,
+      classic → modern → SOTA.
+    </aside>
+  </section>
+
+  <!-- ===================== APPROACH 1 of 9 — 3-stage pipeline ===================== -->
+  <section>
+    <p class="kicker">Approaches · 1 of 9</p>
+    <h3>3-stage pipeline (SFT → RM → RL) <span class="tag classic">classic</span></h3>
+    <p><strong>What:</strong> the original InstructGPT recipe; still the mental model for everything else. <strong>How:</strong> imitate demos (SFT) → fit a reward model to human comparisons → optimize the policy with RL under a KL leash. <strong>Solves:</strong> turns a text-predictor into a model that follows instructions &amp; respects preferences it was never explicitly told.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">Decouples "what humans like" (RM) from "how to optimize it" (RL)</li>
+        <li class="fragment">A reusable RM scores unlimited new samples for free</li>
+        <li class="fragment">Battle-tested — produced ChatGPT / InstructGPT</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Three models in memory + a critic — heavy</li>
+        <li class="fragment">Many moving parts; brittle, hard to reproduce</li>
+        <li class="fragment">RM errors propagate into reward hacking</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> this is the baseline — the skeleton every later method trims a piece off.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2203.02155" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Source: InstructGPT (Ouyang et al., 2022). The big conceptual win is decoupling: the RM captures human taste once, then RL
+      queries it for free against unlimited fresh samples. The cost is operational complexity — three (really four, with the
+      critic) models. Everything that follows is an attempt to keep the win while cutting the cost. Stress the SFT model's double
+      role: RL initialization AND the frozen reference for the KL penalty.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · 3-stage pipeline</p>
+    <h3>3-stage pipeline — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">demos<small>prompt→ideal</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">SFT<small>imitate</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">RM<small>BT on pairs</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">RL + KL<small>optimize</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">aligned<small>HHH</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Stage 1 — collect (prompt, ideal response) demos; SFT with cross-entropy → an instruction-follower.</li>
+      <li class="fragment">Stage 2 — sample responses from SFT; humans compare them pairwise; fit a reward model.</li>
+      <li class="fragment">Stage 3 — RL pushes the policy toward high RM reward, leashed by KL to the frozen SFT reference.</li>
+      <li class="fragment">The SFT checkpoint plays two roles: RL start point <em>and</em> the frozen reference \(\pi_{\text{ref}}\).</li>
+    </ol>
+    <aside class="notes">
+      Walk left to right. SFT consumes demonstrations and produces the policy. The RM consumes pairwise comparisons (sampled from
+      SFT) and produces a scalar scorer. RL consumes both and produces the aligned model. Reference and reward are frozen during
+      RL; only the policy and critic train. Emphasize: RL is a <em>local</em> search, so it needs SFT's competent starting point.
+    </aside>
+  </section>
+
+  <!-- ===================== APPROACH 2 of 9 — Reward modeling (Bradley-Terry) ===================== -->
+  <section>
+    <p class="kicker">Approaches · 2 of 9</p>
+    <h3>Reward modeling via Bradley-Terry <span class="tag modern">modern</span></h3>
+    <p><strong>What:</strong> a model mapping (prompt, response) → scalar reward. <strong>How:</strong> init from the SFT model + a scalar head; train with the Bradley-Terry pairwise loss so the winner outscores the loser by a margin proportional to preference strength. <strong>Solves:</strong> converts noisy, relative human judgments into a smooth differentiable scorer the RL loop queries millions of times.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">Trains from cheap pairwise comparisons, not absolute scores</li>
+        <li class="fragment">One forward pass = a reward on any new text</li>
+        <li class="fragment">Can ensemble multiple RMs for an uncertainty signal</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Identified only up to an additive constant (scale matters, offset doesn't)</li>
+        <li class="fragment">Latches onto spurious features — length, lists, formatting</li>
+        <li class="fragment">Generalizes poorly off-distribution — exactly where RL pushes it</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> this is the engine <em>inside</em> stage 2 — it turns comparisons into a queryable function the whole pipeline depends on.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2009.01325" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Source: Stiennon et al., 2020 (Learning to summarize from human feedback) — proved RM + PPO works for LLMs. The "additive
+      constant" point is interview gold: Bradley-Terry constrains only <em>differences</em> of rewards, so absolute scale is
+      meaningless — that's why PPO uses advantages, not raw rewards. The "off-distribution" con is the seed of reward hacking:
+      RL deliberately pushes the policy where the RM is least reliable.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Reward modeling (Bradley-Terry)</p>
+    <h3>Reward modeling — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">x, y<sub>w</sub>, y<sub>l</sub><small>pair</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">r<sub>θ</sub><small>scalar head</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">r<sub>w</sub> − r<sub>l</sub><small>gap</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">σ(gap)<small>BT prob</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">−log σ<small>RM loss</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Take a labeled triple: prompt \(x\), winner \(y_w\), loser \(y_l\).</li>
+      <li class="fragment">Score each with the RM head → scalars \(r_w, r_l\); the only thing that matters is the gap \(r_w - r_l\).</li>
+      <li class="fragment">Bradley-Terry: \(P(y_w \succ y_l) = \sigma(r_w - r_l)\) — bigger gap = more confident preference.</li>
+      <li class="fragment">Loss \(= -\log\sigma(r_w - r_l)\); minimizing it drives the winner's score above the loser's.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Reward modeling — Bradley-Terry","interval":1900,
+     "nodes":[["x, y_w, y_l","labeled pair"],["r_θ","scalar head"],["r_w − r_l","reward gap"],["σ(gap)","BT preference prob"],["−log σ","loss ↓"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"A human said winner <strong>y_w</strong> beats loser <strong>y_l</strong> for prompt <code>x</code>. We have <em>relative</em> judgments, not scores."},
+       {"on":[1],"done":[0],"cap":"The RM is the SFT model with its LM head swapped for one <strong>scalar</strong> head: <code>r_θ(x,y)</code> scores each response."},
+       {"on":[2],"done":[0,1],"cap":"Only the <strong>gap</strong> <code>r_w − r_l</code> matters — Bradley-Terry is shift-invariant, so reward is fixed only up to a constant."},
+       {"on":[3],"done":[0,1,2],"cap":"Bradley-Terry: <code>P(y_w ≻ y_l) = σ(r_w − r_l)</code>. A larger gap ⇒ a more confident preference."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Minimize <code>−log σ(r_w − r_l)</code>: this <strong>logistic loss</strong> pushes the winner's score above the loser's."}
+     ]}
+    </script></div>
+    <aside class="notes">
+      Press Play to step the widget, or use Step ›. This is logistic regression on the reward gap — and it is <em>exactly</em>
+      the shape that reappears in the DPO loss; that's not a coincidence, it's the whole DPO trick. The RM is initialized from the
+      SFT model so it already understands language and quality; only the scalar head is new. Saturating log-sigmoid means
+      already-correct, high-margin pairs contribute little gradient.
+    </aside>
+  </section>
+
+  <!-- ===================== APPROACH 3 of 9 — PPO RLHF ===================== -->
+  <section>
+    <p class="kicker">Approaches · 3 of 9</p>
+    <h3>PPO RLHF (KL-penalized) <span class="tag modern">modern</span></h3>
+    <p><strong>What:</strong> online RL that optimizes the policy against the RM. <strong>How:</strong> roll out → reward − per-token KL → per-token advantages via critic + GAE → take a <em>clipped</em> policy-gradient step. <strong>Solves:</strong> lets the model improve <em>on-policy</em> on its own generations and explore beyond fixed data, with stability from clipping and a leash from KL.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">On-policy: optimizes the actual deployment distribution</li>
+        <li class="fragment">KL leash directly controls over-optimization</li>
+        <li class="fragment">Most expressive — can exceed the preference data it started from</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Four models in play (policy, critic, RM, reference) — huge memory</li>
+        <li class="fragment">Notoriously unstable; sensitive to whitening, KL estimator, minibatch order</li>
+        <li class="fragment">Needs real RL infrastructure and careful tuning</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> the RM only <em>scores</em>; PPO is what actually <em>moves</em> the policy — the optimizer on top of the scorer.</p>
+    <p class="small"><a href="https://arxiv.org/abs/1707.06347" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Source: Schulman et al., 2017 (PPO). The defining advantage over offline methods is on-policy learning: PPO optimizes the
+      distribution the model actually produces, so it can discover answers better than anything in the preference set. The defining
+      cost: four models in memory and genuine instability. "On-policy" is the phrase to repeat — it's the single capability DPO
+      gives up.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · PPO RLHF</p>
+    <h3>PPO RLHF — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">prompt x<small>sample</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">π<sub>θ</sub> rollout<small>y</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">r − β·KL<small>shaped</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">critic+GAE<small>A<sub>t</sub></small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">clipped step<small>↺</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Sample a prompt; the policy \(\pi_\theta\) generates a response \(y\) token by token (an on-policy rollout).</li>
+      <li class="fragment">RM scores the finished \(y\); subtract a per-token KL penalty \(\beta\,\mathrm{KL}(\pi_\theta\|\pi_{\text{ref}})\).</li>
+      <li class="fragment">Critic + GAE turn (reward − KL) into per-token advantages \(A_t\) — this solves credit assignment.</li>
+      <li class="fragment">Take a <em>clipped</em> gradient step up the advantage; loop. Reference &amp; RM stay frozen.</li>
+    </ol>
+    <aside class="notes">
+      Walk the loop live. (1) Sample a prompt matching deployment. (2) On-policy rollout — we optimize the model's <em>own</em>
+      outputs. (3) RM gives one terminal scalar; the KL penalty is per-token so drift is penalized throughout. (4) The critic
+      provides a baseline and GAE spreads the sequence reward over tokens as advantages. (5) PPO clipping keeps each step small
+      and stable. Four models live in memory at once — that's the cost DPO and GRPO later remove.
+    </aside>
+  </section>
+
+  <!-- ===================== APPROACH 4 of 9 — Rejection sampling / best-of-n / RAFT ===================== -->
+  <section>
+    <p class="kicker">Approaches · 4 of 9</p>
+    <h3>Rejection sampling / best-of-n / RAFT <span class="tag classic">classic</span></h3>
+    <p><strong>What:</strong> use the RM with <em>no RL gradients</em>. <strong>How:</strong> sample <em>n</em> responses, keep the top-scoring one(s) — return it at inference (<em>best-of-n</em>) or SFT the policy on the survivors (<em>rejection-sampling FT / RAFT</em>). <strong>Solves:</strong> captures most of RLHF's quality gain with none of PPO's instability — just filtering + supervised learning.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">Dead simple, stable, easy to debug</li>
+        <li class="fragment">No critic, no policy-gradient bookkeeping</li>
+        <li class="fragment">Best-of-n needs only inference-time compute</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Best-of-n costs n× inference for every query, forever</li>
+        <li class="fragment">Larger n amplifies reward hacking (you pick the most gamed sample)</li>
+        <li class="fragment">Less sample-efficient &amp; less expressive than full RL</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> no critic, no policy-gradient bookkeeping versus PPO — but no on-policy gradient signal either; it only imitates the best samples.</p>
+    <p class="small"><a href="https://huggingface.co/blog/rlhf" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Source: HF TRL best-of-n docs / RAFT. The pragmatic baseline everyone should try first. The subtle con: larger n is
+      <em>not</em> strictly better — bigger n selects the most extreme sample, which is precisely the most reward-hacked one.
+      Best-of-n trades training compute for permanent inference compute; RAFT moves that gain into the weights by SFT-ing on the
+      survivors and iterating.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Rejection sampling / best-of-n / RAFT</p>
+    <h3>Rejection sampling — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">prompt x<small>once</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">sample n<small>y₁…yₙ</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">RM scores<small>rank</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">keep top-k<small>filter</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">return / SFT<small>BoN / RAFT</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Draw \(n\) candidate responses from the current policy for one prompt.</li>
+      <li class="fragment">Score every candidate with the RM (or a verifier) and rank them.</li>
+      <li class="fragment"><strong>Best-of-n:</strong> just return the top-scoring candidate at inference time.</li>
+      <li class="fragment"><strong>RAFT:</strong> instead SFT the policy on the survivors, then iterate — no gradient flows through the reward.</li>
+    </ol>
+    <aside class="notes">
+      Two ways to spend the same samples. Best-of-n is inference-time only: n× cost on every query, forever, but no training. RAFT
+      bakes the gain into the weights — filter, imitate the winners, repeat — so future inference is cheap. Neither differentiates
+      through the reward, which is exactly why they're stable but less expressive than PPO. Larger n surfaces more RM exploits.
+    </aside>
+  </section>
+
+  <!-- ===================== APPROACH 5 of 9 — DPO ===================== -->
+  <section>
+    <p class="kicker">Approaches · 5 of 9</p>
+    <h3>DPO — Direct Preference Optimization <span class="tag sota">SOTA</span></h3>
+    <p><strong>What:</strong> train directly on preference pairs with one classification-style loss. <strong>How:</strong> the optimal RLHF policy <em>is</em> an implicit reward \(\beta\log(\pi_\theta/\pi_{\text{ref}})\); plug it into Bradley-Terry and the RM + partition function <strong>cancel</strong>, leaving a loss over (prompt, chosen, rejected) triples. <strong>Solves:</strong> removes the reward model and the entire RL loop — no critic, no rollouts, no KL controller.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">One model + frozen reference; simple, stable, cheap</li>
+        <li class="fragment">No reward model to train or hack at RL time</li>
+        <li class="fragment">Works on a fixed offline preference dataset</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Offline: suffers when prefs are off the current policy's distribution</li>
+        <li class="fragment">Often drives down log-prob of <em>both</em> chosen and rejected</li>
+        <li class="fragment">Cannot explore beyond the labeled pairs; no on-policy signal</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> same KL-constrained objective as PPO, but solved in closed form — it trades on-policy exploration for offline simplicity and drops the RM entirely.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2305.18290" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Source: Rafailov et al., 2023 (DPO). The "aha": there's a closed-form map between the optimal KL-constrained policy and the
+      reward. Substituting it into Bradley-Terry makes both the reward model and the intractable partition function cancel. The two
+      cons interviewers love: it's offline (no exploration), and it frequently lowers the probability of <em>both</em> responses —
+      because the loss only cares about the gap.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · DPO</p>
+    <h3>DPO — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">(x, y<sub>w</sub>, y<sub>l</sub>)<small>offline pair</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">logπ<sub>θ</sub> &amp; logπ<sub>ref</sub><small>4 log-probs</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">β·log ratio<small>implicit r</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">−log σ(Δ)<small>DPO loss</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">step policy<small>ref frozen</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Take an offline triple; compute sequence log-probs for \(y_w, y_l\) under both \(\pi_\theta\) and frozen \(\pi_{\text{ref}}\).</li>
+      <li class="fragment">Implicit reward \(\hat r(x,y) = \beta\log\frac{\pi_\theta(y\mid x)}{\pi_{\text{ref}}(y\mid x)}\) — the policy <em>is</em> the reward model.</li>
+      <li class="fragment">Margin \(\Delta = \hat r_w - \hat r_l\); the partition function and explicit RM cancel out of the difference.</li>
+      <li class="fragment">Loss \(= -\log\sigma(\Delta)\); backprop through the policy only — the reference is frozen.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"DPO — closed-form collapse","interval":1900,
+     "nodes":[["(x, y_w, y_l)","offline pair"],["log π_θ, log π_ref","4 log-probs"],["β·log ratio","implicit reward"],["Δ = r̂_w − r̂_l","margin; Z cancels"],["−log σ(Δ)","loss ↓"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"Start from a <strong>fixed offline</strong> triple — no rollouts, no reward model, no critic."},
+       {"on":[1],"done":[0],"cap":"Score winner &amp; loser under the trainable policy <code>π_θ</code> and the frozen reference <code>π_ref</code>: four sequence log-probs."},
+       {"on":[2],"done":[0,1],"cap":"The implicit reward is <code>r̂ = β·log(π_θ/π_ref)</code>. The optimal RLHF policy <em>is</em> a reward — no separate RM needed."},
+       {"on":[3],"done":[0,1,2],"cap":"Take the margin <code>Δ = r̂_w − r̂_l</code>. The partition function <code>Z(x)</code> depends only on x, so it <strong>cancels</strong> in the difference."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Same logistic loss as the RM: <code>−log σ(Δ)</code>. Backprop through <code>π_θ</code> only — <code>π_ref</code> is frozen."}
+     ]}
+    </script></div>
+    <aside class="notes">
+      Press Play or Step ›. Put this next to the RM widget: identical sigmoid-of-a-gap, but the "reward" is now the
+      policy-vs-reference log-ratio. Because that ratio <em>is</em> the optimal policy's implicit reward, the explicit RM and the
+      intractable partition function both cancel. β here plays the KL-coefficient role: small β = looser, large β = tighter to the
+      reference. Watch the implicit rewards in practice — that's how you catch the "both go down" pathology.
+    </aside>
+  </section>
+
+  <!-- ===================== APPROACH 6 of 9 — DPO zoo ===================== -->
+  <section>
+    <p class="kicker">Approaches · 6 of 9</p>
+    <h3>DPO zoo — IPO · KTO · SimPO <span class="tag sota">SOTA</span></h3>
+    <p><strong>What:</strong> three targeted fixes for three specific DPO weaknesses.</p>
+    <ul>
+      <li class="fragment"><strong>IPO</strong>: swaps logistic loss for a <em>squared</em> objective targeting a fixed margin → regularizes against overfitting near-deterministic preferences.</li>
+      <li class="fragment"><strong>KTO</strong>: drops pairs; learns from <em>unpaired</em> good/bad labels using a prospect-theory (Kahneman-Tversky) utility.</li>
+      <li class="fragment"><strong>SimPO</strong>: removes the reference model; uses length-normalized average log-prob as the implicit reward + a target-margin term.</li>
+    </ul>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">IPO: robust when preferences are near-deterministic</li>
+        <li class="fragment">KTO: uses cheap thumbs-up/down data, no pairing required</li>
+        <li class="fragment">SimPO: reference-free, length-normalized, simpler &amp; often stronger</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">More knobs (target margins, length norm) to tune</li>
+        <li class="fragment">Reference-free variants can drift further from the base model</li>
+        <li class="fragment">Gains are dataset-dependent; no single winner</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> each patches a DPO flaw — IPO → overfitting 0/1 prefs · KTO → the need for matched pairs · SimPO → the reference-model cost &amp; length bias.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2405.14734" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Sources: SimPO (Meng et al., 2024); IPO (Azar et al., 2023); KTO (Ethayarajh et al., 2024). Frame as three fixes for three
+      DPO weaknesses. IPO targets DPO's tendency to push toward 0/1 preferences. KTO removes matched pairs — thumbs-up/down data
+      is far cheaper. SimPO removes the reference model (saves memory) and length-normalizes to curb length bias. The meta-lesson:
+      no single winner; gains are dataset-dependent.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · DPO zoo</p>
+    <h3>DPO zoo — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">DPO loss<small>baseline</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">IPO<small>squared, margin</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">KTO<small>unpaired ±</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">SimPO<small>no ref, len-norm</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Start from DPO: \(-\log\sigma\big(\beta(\hat r_w - \hat r_l)\big)\) on matched pairs against a frozen reference.</li>
+      <li class="fragment"><strong>IPO</strong> — replace the logistic loss with a squared term targeting a fixed margin, so saturation can't overfit clean 0/1 prefs.</li>
+      <li class="fragment"><strong>KTO</strong> — drop pairing; each example is just good or bad, scored by a prospect-theory utility around a reference point.</li>
+      <li class="fragment"><strong>SimPO</strong> — delete \(\pi_{\text{ref}}\); use length-normalized average log-prob as the reward and add a target margin \(\gamma\).</li>
+    </ol>
+    <aside class="notes">
+      Read each as a one-line diff from DPO. IPO: change the loss <em>shape</em> (squared, fixed margin) to stop saturation-driven
+      overfitting. KTO: change the <em>data</em> (unpaired good/bad) via a Kahneman-Tversky value function — no chosen/rejected
+      pairing. SimPO: change the <em>reward parameterization</em> — drop the reference model entirely, length-normalize, add a
+      target margin. Three different axes of fix; pick by your data and constraints.
+    </aside>
+  </section>
+
+  <!-- ===================== APPROACH 7 of 9 — GRPO ===================== -->
+  <section>
+    <p class="kicker">Approaches · 7 of 9</p>
+    <h3>GRPO — Group Relative Policy Optimization <span class="tag sota">SOTA</span></h3>
+    <p><strong>What:</strong> online RL like PPO but <em>without the value function</em>. <strong>How:</strong> per prompt, sample a <em>group</em> of completions, score them all, use the group's mean/std to normalize each reward into an advantage — every token in a completion shares that completion's advantage. <strong>Solves:</strong> eliminates the critic (half the memory + a major instability source) while keeping on-policy learning.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">No critic → much lighter than PPO, fewer failure modes</li>
+        <li class="fragment">Group baseline = clean, low-variance advantage estimate</li>
+        <li class="fragment">Powered DeepSeekMath &amp; DeepSeek-R1's reasoning gains</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Sensitive to group size; needs many samples per prompt</li>
+        <li class="fragment">Advantage collapses to zero when all samples in a group tie</li>
+        <li class="fragment">Still prone to length/format bias &amp; reward hacking</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> like PPO it's online, but the <em>group mean</em> replaces the learned value baseline — dropping the critic that DPO never had and PPO paid for.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2402.03300" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Source: Shao et al., 2024 (DeepSeekMath, introduces GRPO). The core trick: PPO's critic exists only to provide a baseline for
+      variance reduction. GRPO gets that baseline for free by sampling a group of G completions and using their mean reward as the
+      baseline — no value network. That halves the model count vs PPO. The "all-tie" failure mode is the gotcha: if every sample in
+      a group ties, std = 0 and the advantage is undefined/zero. GRPO pairs beautifully with verifiable rewards, next.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · GRPO</p>
+    <h3>GRPO — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">prompt x<small>one</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">group of G<small>y₁…y_G</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">score all<small>r₁…r_G</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">(rᵢ−mean)/std<small>A_i</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">clipped step<small>no critic</small></span>
+    </div>
+    <ol>
+      <li class="fragment">For one prompt, sample a <em>group</em> of \(G\) completions from the current policy.</li>
+      <li class="fragment">Score all of them — with an RM or a verifier — to get rewards \(r_1,\dots,r_G\).</li>
+      <li class="fragment">Advantage \(A_i = \dfrac{r_i - \mathrm{mean}(r)}{\mathrm{std}(r)}\), shared by every token of completion \(i\). The group mean <em>is</em> the baseline.</li>
+      <li class="fragment">Take a PPO-style clipped step (+ a KL term) — no value network anywhere.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"GRPO — group baseline replaces the critic","interval":1900,
+     "nodes":[["prompt x","one prompt"],["group of G","y₁…y_G"],["score all","r₁…r_G"],["(rᵢ−mean)/std","advantage A_i"],["clipped step","no critic"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"Take a single prompt — ideally one with a <strong>verifiable</strong> answer (math, code)."},
+       {"on":[1],"done":[0],"cap":"Sample a whole <strong>group</strong> of <code>G</code> completions on-policy. The group is what replaces the critic."},
+       {"on":[2],"done":[0,1],"cap":"Score every completion: <code>r₁…r_G</code>. With a verifier these are clean, hack-resistant rewards."},
+       {"on":[3],"done":[0,1,2],"cap":"Standardize within the group: <code>A_i = (r_i − mean) / std</code>. The <strong>group mean is the baseline</strong> — no value network."},
+       {"on":[4],"done":[0,1,2,3],"cap":"PPO-style <strong>clipped</strong> step up the advantage (+ KL). ⚠ If all r_i tie, std = 0 → advantage collapses to zero."}
+     ]}
+    </script></div>
+    <aside class="notes">
+      Press Play or Step ›. The critic in PPO existed only to estimate a baseline for variance reduction; GRPO replaces it with the
+      empirical group mean, standardized by std. That halves the model count. The denominator is the Achilles heel: when every
+      completion ties (all correct or all wrong), std = 0 and the advantage is undefined — common with sparse binary rewards.
+      Mitigations: bigger groups, or filtering all-tie prompts.
+    </aside>
+  </section>
+
+  <!-- ===================== APPROACH 8 of 9 — RLAIF & Constitutional AI ===================== -->
+  <section>
+    <p class="kicker">Approaches · 8 of 9</p>
+    <h3>RLAIF &amp; Constitutional AI <span class="tag modern">modern</span></h3>
+    <p><strong>What:</strong> replace (or augment) human preference labels with a model's own judgments. <strong>RLAIF:</strong> an LLM labels which of two responses is better → preference data at scale. <strong>Constitutional AI:</strong> the model critiques &amp; revises its own answers against a written "constitution" (SL phase), then an AI-preference model drives RL (RLAIF phase). <strong>Solves:</strong> human labels are slow &amp; expensive; AI feedback scales cheaply and targets harmlessness without exposing annotators to toxic content.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">Cheap, fast, scalable label generation</li>
+        <li class="fragment">Constitution makes values explicit &amp; auditable</li>
+        <li class="fragment">Reduces annotator exposure to harmful content</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Inherits &amp; can amplify the judge model's biases</li>
+        <li class="fragment">Risk of self-preference &amp; reward-model collapse</li>
+        <li class="fragment">Needs human validation that AI labels track real preferences</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> orthogonal axis — this changes <em>where preferences come from</em> (AI not humans), not the optimization algorithm underneath.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2212.08073" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Sources: Constitutional AI (Bai et al., 2022) and RLAIF (Lee et al., 2023). The orthogonal axis: this changes <em>where
+      preferences come from</em>, not the optimization algorithm. RLAIF showed AI-generated preferences can match human RLHF.
+      Constitutional AI adds a self-critique-and-revise SL phase against explicit written principles, then RLAIF on top. The honest
+      caveat: AI judges inherit and can amplify their own biases, so validate against a human-labeled holdout.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · RLAIF &amp; Constitutional AI</p>
+    <h3>Constitutional AI — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">constitution<small>written rules</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">critique+revise<small>SL phase</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">AI judges pairs<small>RLAIF labels</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">RM + RL<small>standard loop</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">human holdout<small>validate</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Write a <em>constitution</em>: explicit principles describing desired behavior.</li>
+      <li class="fragment"><strong>SL phase</strong> — the model answers, then critiques &amp; revises its own answer against the constitution; SFT on the revisions.</li>
+      <li class="fragment"><strong>RLAIF phase</strong> — the model generates response pairs; an AI judge picks the more constitution-aligned one → preference data.</li>
+      <li class="fragment">Train an RM on those AI labels and run standard RL; validate AI-vs-human agreement on a human-labeled holdout.</li>
+    </ol>
+    <aside class="notes">
+      Two phases. Phase 1 is supervised: critique-and-revise distills the constitution into the weights. Phase 2 is RLAIF: an AI
+      judge produces the preference labels that drive an ordinary RM + RL loop — the only change from classic RLHF is the
+      <em>label source</em>. Stress the holdout: never validate RLAIF with another AI judge alone; you need human ground truth to
+      trust the labels and catch self-preference.
+    </aside>
+  </section>
+
+  <!-- ===================== APPROACH 9 of 9 — RLVR + ORM vs PRM ===================== -->
+  <section>
+    <p class="kicker">Approaches · 9 of 9</p>
+    <h3>RLVR + ORM vs PRM <span class="tag sota">SOTA</span></h3>
+    <p><strong>What:</strong> RL with <em>verifiable</em> rewards — a programmatic checker, not a learned RM, decides correctness. <strong>How:</strong> for math/code/logic, run the answer through a grader (exact-match, unit tests, a checker) and reward correctness; combine with GRPO. <strong>ORM vs PRM:</strong> an <em>outcome</em> reward model scores only the final answer; a <em>process</em> reward model scores each intermediate step. <strong>Solves:</strong> a ground-truth checker can't be flattered → sidesteps reward-model hacking; PRMs give dense credit on long chains.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">Ground-truth reward → far less reward hacking</li>
+        <li class="fragment">Unlocked emergent reasoning (DeepSeek-R1)</li>
+        <li class="fragment">PRM gives dense per-step signal for long chains</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Only applies where answers are checkable</li>
+        <li class="fragment">PRM step-labels are expensive to collect</li>
+        <li class="fragment">Models still hack graders (degenerate solutions, regex exploits)</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> swaps the <em>reward source</em> — a learned RM (flatterable) for a ground-truth checker (not flatterable); usually paired with GRPO.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2501.12948" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Source: DeepSeek-R1 (DeepSeek-AI, 2025). The key insight: a learned RM can be flattered into high scores, but a ground-truth
+      checker (did the tests pass? is the answer correct?) cannot — so RLVR sidesteps the main reward-hacking pathway. This powered
+      the reasoning-model wave: pure RL against a checker elicited long chain-of-thought and self-correction. ORM = score the final
+      answer; PRM = score each step (denser, but step-labels are expensive). Caveat: models still hack <em>graders</em>.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · RLVR + ORM vs PRM</p>
+    <h3>RLVR — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">prompt<small>math/code</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">model solves<small>CoT + answer</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">grader<small>tests / exact-match</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">ORM vs PRM<small>final vs per-step</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">GRPO<small>optimize</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Pose a prompt with a checkable answer (math with a known result, code with unit tests).</li>
+      <li class="fragment">The model produces a chain-of-thought and a final answer.</li>
+      <li class="fragment">A <em>programmatic grader</em> verifies it — exact-match, unit tests, a logic checker — giving a ground-truth reward.</li>
+      <li class="fragment"><strong>ORM</strong> rewards only the final answer; <strong>PRM</strong> scores each step (dense credit). Feed the reward to GRPO.</li>
+    </ol>
+    <aside class="notes">
+      The reward source is a deterministic checker, not a learned RM, so it can't be flattered — that's the whole point. ORM is
+      cheap (final-answer correctness) but sparse on long chains; PRM scores each reasoning step for dense credit assignment but
+      needs expensive step-level labels (often Monte-Carlo-rollout-derived). Pairs naturally with GRPO's group baseline. Caveat:
+      graders themselves get hacked — degenerate solutions, regex exploits, printing the expected output.
+    </aside>
+  </section>
+
+  <!-- ===== EVOLUTION ANIMATION SLIDE (EVO) — NO fragments here ===== -->
+  <section>
+    <p class="kicker">The approaches · how they evolved</p>
+    <h2>RLHF → DPO → GRPO</h2>
+    <p>From reward-model + PPO loop, to a closed-form loss with no RM, to critic-free group baselines. <em>advance to step through →</em></p>
+    <div data-anim="evo-rlhf"></div>
+    <aside class="notes">
+      The capstone of the approaches section — the evolution animation injects its own A→B→C fragments, so advancing the slide
+      steps it. Narrate: ① RLHF / PPO — train a reward model on preferences, then optimize with PPO + a KL leash. Powerful but
+      heavy: four models in memory, unstable, reward-hackable. ② DPO — skip the reward model and the RL loop; a closed-form
+      classification loss on pairs moves the policy directly. Stable, cheap, offline. ③ GRPO — drop the critic too: a group mean
+      baseline. The engine behind verifiable-reward reasoning models. Each step removes one expensive component while preserving
+      the core preference signal.
+    </aside>
+  </section>
+</section>
+
+<!-- ========== 7. COMPARE ========== -->
+<section>
+  <section>
+    <p class="kicker">Compare</p>
+    <h2>The cheat-sheet</h2>
+    <table class="cmp">
+      <thead><tr><th>Approach</th><th>Core idea</th><th>Cost</th><th>When to use</th><th>Maturity</th></tr></thead>
+      <tbody>
+        <tr class="fragment"><td><strong>PPO RLHF</strong></td><td>On-policy RL vs RM; KL leash; clipped. <em>RM ✔ · critic ✔ · online</em></td><td>Very high</td><td>Have RL infra, want max quality</td><td>Proven (InstructGPT)</td></tr>
+        <tr class="fragment"><td><strong>DPO</strong></td><td>Implicit reward from policy; pairwise loss. <em>RM ✘ · critic ✘ · offline</em></td><td>Low</td><td>Fixed offline prefs, no RL infra</td><td>Widely adopted</td></tr>
+        <tr class="fragment"><td><strong>GRPO</strong></td><td>Online RL, group-normalized advantage, no critic. <em>critic ✘ · online</em></td><td>Med-high</td><td>Reasoning with verifiable rewards</td><td>Current SOTA</td></tr>
+        <tr class="fragment"><td><strong>Rej. sampling / BoN / RAFT</strong></td><td>Sample n, keep best by RM; SFT survivors. <em>RM ✔ · critic ✘</em></td><td>Low-med</td><td>Quick wins, baseline, no RL stack</td><td>Common baseline</td></tr>
+        <tr class="fragment"><td><strong>RLAIF / Const. AI</strong></td><td>LLM generates the labels; revise vs constitution.</td><td>Medium</td><td>Human labels too slow; harmlessness</td><td>Production (Claude)</td></tr>
+        <tr class="fragment"><td><strong>RLVR (verifiable)</strong></td><td>Programmatic checker gives reward; usually + GRPO.</td><td>Medium</td><td>Math, code, logic w/ ground truth</td><td>Frontier (R1, o-series)</td></tr>
+      </tbody>
+    </table>
+    <aside class="notes">
+      This is the interview cheat-sheet — reveal rows one at a time. The three flags to memorize per method: does it need a
+      reward model? a critic? is it online or offline? PPO is all three (RM ✔ critic ✔ online). DPO is none (RM ✘ critic ✘
+      offline). GRPO is online + no critic. RLVR replaces the learned RM with a verifier. If they remember just those flags
+      and the "cost" column, they can reconstruct the trade-offs from first principles.
+    </aside>
+  </section>
+</section>
+
+<!-- ========== 8. THE MATH ========== -->
+<section>
+  <section>
+    <p class="kicker">The math · preferences → reward</p>
+    <h2>Bradley-Terry</h2>
+    <p>Probability that winner <code>y_w</code> beats loser <code>y_l</code> is the sigmoid of their reward gap:</p>
+    $$ P(y_w \succ y_l) = \sigma\big(r(x,y_w) - r(x,y_l)\big) $$
+    <p class="eqnote"><b>\(P(y_w \succ y_l)\)</b> = prob the winner is preferred; <b>\(x\)</b> = prompt; <b>\(r(x,y)\)</b> = scalar RM reward; <b>\(\sigma\)</b> = logistic sigmoid \(1/(1+e^{-z})\). Only the <em>difference</em> matters — \(r\) is identified only up to an additive constant.</p>
+    <aside class="notes">
+      Start here because everything downstream is Bradley-Terry in disguise. The single takeaway: only reward
+      <em>differences</em> matter, so the absolute scale of r is meaningless — which is exactly why PPO works with advantages,
+      not raw rewards, and why two RMs trained on the same data can have wildly different absolute outputs.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math · fit the RM</p>
+    <h2>Reward-model loss</h2>
+    <p>Maximum likelihood on comparisons = minimize the negative log-likelihood of the Bradley-Terry probabilities:</p>
+    $$ \mathcal{L}_{RM} = -\,\mathbb{E}_{(x,y_w,y_l)}\big[\log \sigma\big(r_w - r_l\big)\big] $$
+    <p class="eqnote"><b>\(\mathcal{L}_{RM}\)</b> = RM loss; <b>\(\mathbb{E}\)</b> = average over labeled triples; <b>\(r_w, r_l\)</b> = rewards of winner &amp; loser. Driving this down pushes \(r_w\) above \(r_l\).</p>
+    <aside class="notes">
+      This is just logistic regression on the reward gap. Notice it's <em>exactly</em> the shape we'll see again in the DPO
+      loss — that's not a coincidence, it's the whole DPO trick. If they understand this loss, DPO is a one-line substitution
+      away.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math · the RL objective</p>
+    <h2>KL-penalized RLHF objective</h2>
+    $$ \max_\theta\; \mathbb{E}_{x,\,y\sim\pi_\theta}\big[r(x,y)\big] - \beta\, \mathrm{KL}\!\big(\pi_\theta(\cdot\mid x) \,\|\, \pi_{\text{ref}}(\cdot\mid x)\big) $$
+    <p class="eqnote"><b>\(\pi_\theta\)</b> = trainable policy; <b>\(\pi_{\text{ref}}\)</b> = frozen reference (SFT model); <b>\(\beta\)</b> = KL coefficient (leash strength); <b>\(\mathrm{KL}\)</b> = drift from the reference. Large \(\beta\) = tame but unimprovable; tiny \(\beta\) = over-optimizes &amp; hacks the reward.</p>
+    <aside class="notes">
+      This is <em>the</em> objective of the whole field. Read it aloud: maximize expected reward, minus a penalty for drifting
+      from the reference. β is the single most important hyperparameter — it's the dial between "won't improve" and
+      "reward-hacked." Critically: DPO, as we'll show, has a <em>closed-form solution</em> to this exact objective. PPO solves
+      it iteratively; DPO solves it analytically.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math · PPO</p>
+    <h2>Clipped surrogate</h2>
+    $$ \mathcal{L}^{CLIP} = \mathbb{E}_t\Big[\min\big(\rho_t A_t,\; \mathrm{clip}(\rho_t,\, 1-\epsilon,\, 1+\epsilon)\, A_t\big)\Big],\quad \rho_t = \frac{\pi_\theta(a_t\mid s_t)}{\pi_{\text{old}}(a_t\mid s_t)} $$
+    <p class="eqnote"><b>\(\rho_t\)</b> = new/old policy probability ratio for token \(a_t\); <b>\(A_t\)</b> = advantage (how much better than expected, via GAE); <b>\(\epsilon\)</b> = clip width (~0.2). The clip removes the incentive to move \(\rho_t\) far from 1 — that's PPO's stability trick.</p>
+    <aside class="notes">
+      The clip is the genius of PPO. Without it, a single batch could move the policy arbitrarily far. The min-of-two-terms
+      construction means: once the probability ratio leaves the [1−ε, 1+ε] band in the helpful direction, the gradient is
+      clipped to zero — no incentive to keep pushing. ε ≈ 0.2 is the standard value. This is what makes large policy-gradient
+      steps safe on a giant language model.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math · DPO</p>
+    <h2>The closed-form collapse</h2>
+    <p>Implicit reward \(r(x,y)=\beta\log\frac{\pi_\theta(y\mid x)}{\pi_{\text{ref}}(y\mid x)}\); plug into Bradley-Terry → the whole pipeline becomes one loss:</p>
+    $$ \mathcal{L}_{DPO} = -\,\mathbb{E}_{(x,y_w,y_l)}\Big[\log \sigma\Big(\beta \log \tfrac{\pi_\theta(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \beta \log \tfrac{\pi_\theta(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\Big)\Big] $$
+    <p class="eqnote"><b>\(\pi_\theta(y\mid x)\)</b> = policy sequence log-prob; <b>\(\pi_{\text{ref}}\)</b> = frozen reference's log-prob; <b>\(\beta\)</b> = temperature for how far the policy may deviate. The bracket = the <em>margin</em> between implicit rewards of winner &amp; loser; the partition function and RM both cancel.</p>
+    <aside class="notes">
+      Compare this side-by-side with the RM loss two slides back — identical sigmoid-of-a-gap shape. The only change: the
+      "reward" is now the policy-vs-reference log-ratio. Because that ratio <em>is</em> the optimal policy's implicit reward,
+      the explicit reward model and the intractable partition function both cancel in the derivation. That's why DPO needs no
+      RM and no rollouts. β here plays the same role as the KL coefficient: small β = looser, large β = tighter to the reference.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math · GRPO</p>
+    <h2>Group-normalized advantage</h2>
+    $$ A_i = \frac{r_i - \mathrm{mean}(r_1,\dots,r_G)}{\mathrm{std}(r_1,\dots,r_G)} $$
+    <p class="eqnote"><b>\(A_i\)</b> = advantage shared by every token of completion \(i\); <b>\(r_i\)</b> = its reward; <b>\(G\)</b> = group size (completions per prompt); <b>mean/std</b> over the group. The group is the baseline → no value network. If all \(r_i\) are equal, \(\mathrm{std}=0\) → advantage collapses (the "all-tie" failure).</p>
+    <aside class="notes">
+      This is the entire GRPO idea in one equation. The critic in PPO existed only to estimate a baseline for variance
+      reduction; GRPO replaces it with the empirical mean over a group of completions. Standardizing by std keeps advantages
+      well-scaled. The denominator is also the Achilles heel: when every completion in a group ties (all correct or all wrong),
+      std = 0 and the advantage is undefined — you get no learning signal from that prompt. Mitigations: bigger groups, or
+      filtering all-tie prompts.
+    </aside>
+  </section>
+</section>
+
+<!-- ========== 9. IN CODE ========== -->
+<section>
+  <section>
+    <p class="kicker">In code</p>
+    <h2>Reward-model loss</h2>
+    <pre><code class="language-python" data-trim data-line-numbers>import torch
+import torch.nn.functional as F
+
+def reward_model_loss(r_chosen, r_rejected):
+    # r_chosen, r_rejected: (batch,) scalar rewards from the RM head
+    # maximize log-sigmoid(r_w - r_l)  ->  minimize its negative
+    return -F.logsigmoid(r_chosen - r_rejected).mean()
+
+# toy check: chosen should score higher than rejected
+r_w = torch.tensor([2.0, 0.5, 3.0])
+r_l = torch.tensor([1.0, 1.2, 0.0])   # middle pair is "wrong" -> bigger loss
+print(reward_model_loss(r_w, r_l).item())   # ~0.49</code></pre>
+    <p class="eqnote fragment">It's just a pairwise logistic loss on the chosen-minus-rejected reward gap.</p>
+    <aside class="notes">
+      Point out how tiny this is — the entire RM objective is one line of logsigmoid. The toy check makes it concrete: the
+      middle pair (0.5 vs 1.2) has the rejected scoring higher than the chosen, so it contributes a large loss (1.103) and
+      drags up the mean to ~0.49. The first and third pairs are "correct" and contribute almost nothing.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">In code</p>
+    <h2>DPO loss — same shape</h2>
+    <pre><code class="language-python" data-trim data-line-numbers>import torch.nn.functional as F
+
+def dpo_loss(pi_logp_chosen, pi_logp_rejected,
+             ref_logp_chosen, ref_logp_rejected, beta=0.1):
+    # each arg: (batch,) = sum of token log-probs for that response
+    pi_logratios  = pi_logp_chosen  - pi_logp_rejected      # policy margin
+    ref_logratios = ref_logp_chosen - ref_logp_rejected     # reference margin
+    logits = beta * (pi_logratios - ref_logratios)          # implicit reward margin
+    loss = -F.logsigmoid(logits).mean()
+    # for logging: implicit rewards (detach in practice)
+    chosen_reward   = beta * (pi_logp_chosen  - ref_logp_chosen)
+    rejected_reward = beta * (pi_logp_rejected - ref_logp_rejected)
+    return loss, chosen_reward, rejected_reward</code></pre>
+    <p class="eqnote fragment">Same <code>logsigmoid</code> as the RM — the "reward" is now the policy-vs-reference log-ratio.</p>
+    <aside class="notes">
+      Put this next to the previous slide in your head: same logsigmoid, but the "reward" gap is now (policy margin − reference
+      margin). The four inputs are summed token log-probs for the chosen/rejected under both the policy and the frozen
+      reference. β = 0.1 is the common default. The logged "implicit rewards" are what you'd plot to monitor training — and
+      watching them is how you'd catch the "both go down" pathology we cover in the worked example.
+    </aside>
+  </section>
+</section>
+
+<!-- ========== 10. WORKED EXAMPLE ========== -->
+<section>
+  <section>
+    <p class="kicker">Worked example</p>
+    <h2>One DPO gradient step — the numbers</h2>
+    <p>Summed token log-probs for one triple <code>(x, y_w, y_l)</code>, with \(\beta=0.1\):</p>
+    <ul>
+      <li class="fragment">Policy: \(\log\pi_\theta(y_w) = -5.0\), \(\;\log\pi_\theta(y_l) = -6.0\)</li>
+      <li class="fragment">Reference: \(\log\pi_{\text{ref}}(y_w) = -4.5\), \(\;\log\pi_{\text{ref}}(y_l) = -7.0\)</li>
+      <li class="fragment">Policy log-ratio: \(-5.0 - (-6.0) = +1.0\)</li>
+      <li class="fragment">Reference log-ratio: \(-4.5 - (-7.0) = +2.5\)</li>
+      <li class="fragment">Margin (logit): \(0.1 \times (1.0 - 2.5) = -0.15\)</li>
+      <li class="fragment">Loss: \(-\log\sigma(-0.15) \approx 0.770\)</li>
+    </ul>
+    <aside class="notes">
+      Walk the arithmetic slowly, one fragment per line. The two "ratios" are the within-response margins: how much more the
+      model prefers the winner over the loser. The policy currently separates them by 1.0; the reference separates them by 2.5.
+      So relative to the reference, the policy <em>under</em>-separates the pair → negative logit → loss above log(2)≈0.69.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Worked example · the subtlety</p>
+    <h2>Why both log-probs can fall</h2>
+    <ul>
+      <li class="fragment">Logit is <strong>negative</strong> → policy under-separates the pair (margin 1.0 &lt; reference's 2.5)</li>
+      <li class="fragment">Gradient pushes to <strong>raise</strong> \(\log\pi_\theta(y_w)\) and <strong>lower</strong> \(\log\pi_\theta(y_l)\) until the logit turns positive</li>
+      <li class="fragment">But the loss only cares about the <strong>gap</strong>…</li>
+      <li class="fragment">…so it often widens it by suppressing \(y_l\) <em>faster</em> than it lifts \(y_w\)</li>
+      <li class="fragment"><strong>Result:</strong> absolute prob of the <em>good</em> answer can drop, yet the loss still decreases</li>
+    </ul>
+    <aside class="notes">
+      This is the interviewer's favorite DPO gotcha. The loss is a function of the <em>margin</em>, not of either absolute
+      log-prob. The cheapest way to grow the margin is frequently to crush the rejected response, and the chosen one comes
+      along for the ride downward — just slower. As long as chosen falls slower than rejected, the gap grows and the loss
+      drops, even though P(good answer) decreased. Is it a problem? Sometimes — it can degrade generation quality — which is
+      part of why reference-free and on-policy variants exist.
+    </aside>
+  </section>
+</section>
+
+<!-- ========== 11. WHEN TO USE WHAT ========== -->
+<section>
+  <section>
+    <p class="kicker">When to use what</p>
+    <h2>Decision flow</h2>
+    <div class="mermaid">
+flowchart TD
+  A["What do you have?"] --> B{"RL infra and budget?"}
+  B -->|"yes, want max quality"| C["PPO RLHF"]
+  B -->|"no"| D{"Verifiable checker?"}
+  D -->|"math, code, logic"| E["GRPO plus RLVR"]
+  D -->|"no"| F{"Fixed offline prefs?"}
+  F -->|"yes"| G["DPO"]
+  F -->|"need quick baseline"| H["Rejection sampling, best-of-n"]
+  F -->|"only thumbs up or down"| I["KTO"]
+</div>
+    <aside class="notes">
+      Walk the branches. Top question is always infrastructure: if you have RL infra and budget and want maximum quality,
+      PPO can exceed the preference data because it's on-policy. No infra? Ask whether you have a verifiable checker — if it's
+      math/code/logic with ground truth, GRPO + RLVR is critic-free and hack-resistant. Otherwise, for a fixed offline
+      preference set, DPO is the lowest-friction choice; for a quick stable baseline today, rejection-sampling fine-tuning or
+      best-of-n; for unpaired thumbs-up/down data, KTO. And the rule that applies to ALL branches: always watch a true-reward
+      or win-rate curve versus KL and stop before over-optimization.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">When to use what · the rules</p>
+    <h2>Quick rules</h2>
+    <ul>
+      <li class="fragment"><strong>Offline prefs, limited GPU, no RL infra?</strong> → DPO</li>
+      <li class="fragment"><strong>Max quality + RL infra + budget?</strong> → PPO RLHF</li>
+      <li class="fragment"><strong>Reasoning/math/code with a checker?</strong> → GRPO + RLVR</li>
+      <li class="fragment"><strong>Quick stable baseline today?</strong> → rejection-sampling FT / best-of-n</li>
+      <li class="fragment"><strong>Human labels too slow, or harmlessness?</strong> → RLAIF / Constitutional AI, then validate vs human holdout</li>
+      <li class="fragment"><strong>Thumbs-up/down → KTO · near-deterministic prefs → IPO · save the reference + curb length → SimPO</strong></li>
+      <li class="fragment"><strong>Always:</strong> watch true-reward (or win-rate) vs KL and stop before over-optimization</li>
+    </ul>
+    <aside class="notes">
+      This mirrors the decision flow but lists the variant-level guidance from the doc explicitly. The last bullet is the
+      universal one — independent of algorithm, monitor an independent eval against KL drift and stop early. Over-optimization
+      is the failure that's invisible if you only watch the proxy reward, which is exactly the trap we hit next.
+    </aside>
+  </section>
+</section>
+
+<!-- ========== 12. PITFALLS ========== -->
+<section>
+  <section>
+    <p class="kicker">Pitfalls</p>
+    <h2>People think X… but actually Y</h2>
+    <div class="callout warn"><span class="t">⚠ Pitfall</span> The proxy is not the goal.</div>
+    <ul>
+      <li class="fragment"><strong>Think:</strong> higher reward = better model. <strong>Actually:</strong> beyond some KL, true quality falls while proxy reward rises — <em>Goodhart / over-optimization</em>. Track an independent eval.</li>
+      <li class="fragment"><strong>Think:</strong> RLHF teaches new knowledge. <strong>Actually:</strong> it mostly re-weights behaviors the base already has — the "alignment tax" is capability you can lose.</li>
+      <li class="fragment"><strong>Think:</strong> a verifiable reward can't be hacked. <strong>Actually:</strong> models game graders — degenerate solutions, regex exploits, printing the expected output.</li>
+      <li class="fragment"><strong>Think:</strong> longer answers are genuinely better. <strong>Actually:</strong> that's <em>length bias</em> — a spurious RM correlation; use length penalties / normalization.</li>
+    </ul>
+    <aside class="notes">
+      These are straight from the doc and they're the densest interview territory. Goodhart is the headline: "when a measure
+      becomes a target, it ceases to be a good measure." The alignment-tax point matters — RLHF can trade benchmark capability
+      for helpfulness. Length bias is the most common real-world reward-hack: RMs systematically prefer longer answers, so an
+      unconstrained policy just gets more verbose.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Pitfalls · continued</p>
+    <h2>More misconceptions</h2>
+    <ul>
+      <li class="fragment"><strong>Think:</strong> the RM's absolute scores are meaningful. <strong>Actually:</strong> Bradley-Terry rewards are identified only up to a constant — only differences matter (hence advantages).</li>
+      <li class="fragment"><strong>Think:</strong> DPO and PPO optimize different objectives. <strong>Actually:</strong> DPO solves the same KL-constrained objective in closed form — it just trades exploration for offline simplicity.</li>
+      <li class="fragment"><strong>Think:</strong> RLHF makes a model safe. <strong>Actually:</strong> it often produces <em>shallow</em> refusals that jailbreaks bypass — alignment must be red-teamed, not assumed.</li>
+      <li class="fragment"><strong>Think:</strong> LLM-as-a-judge win rates are objective. <strong>Actually:</strong> judges have position, length &amp; self-preference bias — randomize order, control for length, use multiple judges.</li>
+    </ul>
+    <aside class="notes">
+      The DPO-vs-PPO point is a frequent trap: they are NOT different objectives. DPO is a closed-form solution to the same
+      KL-constrained problem PPO solves iteratively. The safety caveat is important to say out loud — RLHF produces surface
+      refusals, not deep safety; you must red-team. And the LLM-judge biases (position, length, self-preference) are essential
+      if anyone on the team runs automated win-rate evals.
+    </aside>
+  </section>
+</section>
+
+<!-- ========== 13. WHAT'S NEW + PAPERS ========== -->
+<section>
+  <section>
+    <p class="kicker">What's new</p>
+    <h2>From human pairs to verifiable, critic-free RL</h2>
+    <div class="callout whatsnew"><span class="t">🚀 What's new</span> the field moved fast (2023–2025).</div>
+    <ul>
+      <li class="fragment"><strong>DPO became the default</strong> for open-model preference tuning — no RM, no RL loop — spawning IPO/KTO/SimPO</li>
+      <li class="fragment"><strong>GRPO replaced PPO's critic</strong> with a group baseline — half the model count, stabler reasoning RL at scale</li>
+      <li class="fragment"><strong>RLVR (verifiable rewards)</strong> drove the reasoning wave — DeepSeek-R1: pure RL vs a checker elicits long CoT &amp; self-correction</li>
+      <li class="fragment"><strong>PRMs</strong> give dense per-step credit, complementing outcome-only ORMs</li>
+      <li class="fragment"><strong>Constitutional AI / RLAIF</strong> moved scalable AI feedback into production</li>
+    </ul>
+    <aside class="notes">
+      The narrative of the last two years: preference tuning got simpler (DPO), reasoning RL got lighter (GRPO) and
+      hack-resistant (RLVR), and feedback got cheaper (RLAIF). DeepSeek-R1 was the watershed — it showed you don't even need a
+      reward model if you have a correctness checker; the model learns to reason and self-correct from a binary signal.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">What's new · Papers (verified)</p>
+    <h2>The reading list</h2>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2203.02155">Training language models to follow instructions (InstructGPT)</a> <span class="meta">— Ouyang et al., 2022. The SFT → RM → PPO pipeline.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/1707.06347">Proximal Policy Optimization Algorithms (PPO)</a> <span class="meta">— Schulman et al., 2017. The clipped surrogate.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2009.01325">Learning to summarize from human feedback</a> <span class="meta">— Stiennon et al., 2020. RM + PPO proves RLHF for LLMs.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2204.05862">Training a Helpful and Harmless Assistant with RLHF</a> <span class="meta">— Bai et al., 2022. Anthropic's HH setup.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2305.18290">Direct Preference Optimization (DPO)</a> <span class="meta">— Rafailov et al., 2023. RM-free, rollout-free.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2310.12036">A General Theoretical Paradigm… (IPO)</a> <span class="meta">— Azar et al., 2023. Squared loss vs deterministic prefs.</span></div>
+    <aside class="notes">
+      All links are verified from the source doc — do not alter URLs. This first batch is the RLHF/DPO core: InstructGPT (the
+      recipe), PPO (the algorithm), summarization (the proof it works), HH-RLHF (Anthropic's helpful+harmless), DPO (the
+      shortcut), IPO (the first DPO patch).
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">What's new · Papers (cont.)</p>
+    <h2>The reading list — continued</h2>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2402.01306">KTO: Model Alignment as Prospect Theoretic Optimization</a> <span class="meta">— Ethayarajh et al., 2024. Unpaired good/bad labels.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2405.14734">SimPO: Simple Preference Optimization (Reference-Free)</a> <span class="meta">— Meng et al., 2024. Length-normalized DPO variant.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2402.03300">DeepSeekMath (introduces GRPO)</a> <span class="meta">— Shao et al., 2024. Critic-free, group-normalized RL.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2212.08073">Constitutional AI: Harmlessness from AI Feedback</a> <span class="meta">— Bai et al., 2022. Critique-revise SL + RLAIF.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2309.00267">RLAIF: Scaling RLHF with AI Feedback</a> <span class="meta">— Lee et al., 2023. AI prefs match human RLHF.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2210.10760">Scaling Laws for Reward Model Overoptimization</a> <span class="meta">— Gao et al., 2022. The true-vs-proxy curve.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2501.12948">DeepSeek-R1: Incentivizing Reasoning via RL (RLVR)</a> <span class="meta">— DeepSeek-AI, 2025. Verifiable-reward RL elicits reasoning.</span></div>
+    <aside class="notes">
+      Second batch: the DPO zoo (KTO, SimPO), GRPO (DeepSeekMath), the AI-feedback line (Constitutional AI, RLAIF), the
+      over-optimization scaling-laws paper (Gao et al. — the canonical true-vs-proxy reward curve), and the capstone
+      DeepSeek-R1. If someone wants one paper for each big idea: InstructGPT, DPO, DeepSeekMath, DeepSeek-R1.
+    </aside>
+  </section>
+</section>
+
+<!-- ========== 14. PRACTICE ========== -->
+<!-- ========== 14. PRACTICE ========== -->
+<section>
+  <p class="kicker">Practice</p>
+  <h2>Practice — click a question to reveal the answer</h2>
+  <p class="small muted">Full bank: <a href="../../interview-prep/08-rlhf-and-rl-alignment.md">08 · RLHF &amp; RL Alignment</a> — from the answer key, condensed.</p>
+
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Walk through the three canonical RLHF stages (SFT → RM → RL); what does each produce &amp; consume? <span class="diff easy">Easy</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">SFT fine-tunes the base LM on demonstrations → an instruction-follower. Reward modeling trains a scalar RM on pairwise comparisons of SFT outputs. RL (PPO) optimizes the SFT policy against the RM with a KL penalty to the SFT reference. Each stage consumes the previous one's output. <span class="watch">RL trains against the <em>reward model</em>, not raw human labels directly.</span></div></li>
+
+      <li class="qa"><span class="q">What is preference data, and why pairwise comparisons instead of absolute scores? <span class="diff easy">Easy</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">It's human judgments comparing two outputs for the same prompt ("A beats B"). Humans are far more consistent at relative comparisons than at absolute numeric scores, which suffer anchoring, drift, and cross-annotator mismatch. Pairwise data maps cleanly onto Bradley-Terry. <span class="watch">Absolute Likert scores aren't "more informative" — they're noisier and uncalibrated across raters.</span></div></li>
+
+      <li class="qa"><span class="q">What is the reference model, and why add a KL penalty between policy and reference? <span class="diff easy">Easy</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">The reference is the frozen SFT policy (the RL start point). A per-token KL penalty to it is subtracted from the reward, discouraging drift. This prevents collapse into degenerate high-reward-but-incoherent text, preserves fluency, and keeps the policy in the RM's reliable region. <span class="watch">The reference (frozen SFT) is not the critic/value model — different components.</span></div></li>
+    </ul>
+  </section>
+
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Write the Bradley-Terry model &amp; explain how it turns a scalar reward into a preference probability. <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Given scalar reward \(r(x,y)\), the probability \(y_w\) beats \(y_l\) is \( P = \sigma\big(r(x,y_w) - r(x,y_l)\big) \) — a logistic function of the reward <em>difference</em>. Larger gaps mean more confident preferences. <span class="watch">It's logistic in the reward <em>difference</em>; don't drop the sigmoid or write it on raw rewards.</span></div></li>
+
+      <li class="qa"><span class="q">State the reward-model loss and explain each term. <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">The Bradley-Terry NLL: \( \mathcal{L} = -\mathbb{E}_{(x,y_w,y_l)}[\log\sigma(r_w - r_l)] \). \(r_w, r_l\) are RM scores of chosen/rejected; minimizing it pushes the chosen score above the rejected. Log-sigmoid saturates, so easy high-margin pairs contribute little gradient. <span class="watch">It's a ranking/classification loss, not regression-to-scores (MSE).</span></div></li>
+
+      <li class="qa"><span class="q">What happens if the KL coefficient is too low? Too high? Describe each failure mode. <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Too low: the policy drifts far from the reference, over-optimizes the RM (reward hacking), and degenerates into repetitive/gibberish text that scores high but is bad. Too high: the KL penalty dominates, so the policy barely moves from SFT — minimal alignment gain. <span class="watch">Higher coefficient = <em>stronger</em> penalty = <em>less</em> drift (not more).</span></div></li>
+    </ul>
+  </section>
+
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Write the PPO clipped surrogate and explain the clipping parameter ε. <span class="diff hard">Hard</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">\( L^{CLIP} = \mathbb{E}_t[\min(\rho_t A_t,\ \mathrm{clip}(\rho_t, 1-\epsilon, 1+\epsilon)A_t)] \), with ratio \(\rho_t = \pi_\theta/\pi_{\text{old}}\). The clip caps \(\rho_t\); the min makes it a pessimistic bound, killing the incentive to push past the trust region. ε (~0.1–0.2) sets step size. <span class="watch">Without the <code>min</code>, clipping alone wouldn't stop a large step when the ratio overshoots helpfully.</span></div></li>
+
+      <li class="qa"><span class="q">Explain GRPO &amp; how it eliminates PPO's critic. Where does its advantage come from instead? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">GRPO samples a group of \(G\) completions per prompt, scores them, and sets each advantage to its reward standardized within the group: \( A_i = (r_i - \mathrm{mean})/\mathrm{std} \), shared by all its tokens. The group mean is the baseline, so no value network is needed; it still uses a clipped objective. <span class="watch">It still has a baseline — the <em>group mean</em>; it just isn't a separate critic.</span></div></li>
+
+      <li class="qa"><span class="q">Explain DPO's core idea &amp; how it reparameterizes RLHF to drop the explicit reward model. <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">The KL-constrained RLHF objective has a closed-form optimal policy whose reward equals a scaled log-ratio of policy to reference. Substituting that into Bradley-Terry lets you optimize the policy directly on preference pairs with one classification loss — no RM, no RL loop. The policy implicitly <em>is</em> the reward model. <span class="watch">DPO isn't "reward-free" — it has an <em>implicit</em> reward (the log-ratio); it just isn't a separate network.</span></div></li>
+    </ul>
+  </section>
+
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">DPO often lowers log-prob of <em>both</em> chosen and rejected. Why — and is it a problem? <span class="diff hard">Hard</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">DPO optimizes only the relative margin, not absolute likelihoods. The gradient can widen the gap while pushing both log-probs down (rejected faster than chosen) — mass often flows to unseen sequences. It can be a problem: a falling chosen likelihood may degrade fluency. Fixes: add an SFT/NLL term, or use SimPO/CPO. <span class="watch">A growing margin does <em>not</em> mean the chosen response got better — both can drop.</span></div></li>
+
+      <li class="qa"><span class="q">Compare DPO with IPO, KTO, SimPO — what specific weakness does each target? <span class="diff hard">Hard</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">IPO targets DPO's overfitting of near-deterministic prefs via a bounded squared objective. KTO removes the need for paired data — it learns from unpaired thumbs-up/down via a prospect-theory utility. SimPO removes the reference model and uses length-normalized average log-prob plus a target margin (fixing reference cost &amp; length bias). <span class="watch">Don't swap them: KTO = unpaired data; SimPO = reference-free + length-normalized.</span></div></li>
+
+      <li class="qa"><span class="q">Define RLVR. What makes rewards "verifiable," and why does that sidestep reward-model hacking? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">RLVR uses an automatic ground-truth checker as the reward — math with known answers, code that must pass unit tests. Rewards are verifiable when a deterministic checker decides correctness. With no learned, exploitable RM proxy, the reward is much closer to the true objective, so optimizing it improves real performance. <span class="watch">Verifiable ≠ unhackable — weak graders, regexes, and answer-only checks still get gamed.</span></div></li>
+    </ul>
+  </section>
+
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Contrast ORM with PRM. When is process supervision's extra cost justified? <span class="diff hard">Hard</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">An ORM scores only the final answer; a PRM scores each intermediate reasoning step. PRMs give denser credit, pinpoint where reasoning fails, and curb "right answer, wrong reasoning" — but need expensive step-level labels. Justified for hard multi-step tasks (math, complex reasoning) where outcome signal is too sparse; otherwise ORM is cheaper. <span class="watch">PRM doesn't always win — its labeling cost only pays off on genuinely multi-step reasoning.</span></div></li>
+
+      <li class="qa"><span class="q">LLM-as-a-judge win rates: known biases (position, length, self-preference) &amp; how to control them? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Biases: position (favoring a slot), length/verbosity (longer = better), self-preference (its own style), plus format/sycophancy. Controls: randomize and swap A/B order and average both, length-control or report length-matched win-rates, use a different/stronger judge, calibrate vs human labels, average over judges. <span class="watch">A single-order judgment is untrustworthy — position bias alone can flip win-rates.</span></div></li>
+
+      <li class="qa"><span class="q">What is the "alignment tax," and how would you measure capability degradation from RLHF? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">It's the loss in raw capability that alignment training can cause while improving helpfulness/harmlessness — regressions on knowledge, reasoning, or code. Measure it by running held-out capability benchmarks (MMLU, GSM8K, HumanEval) before vs after alignment, alongside helpfulness/safety win-rates. <span class="watch">Measuring only safety/helpfulness gains hides the capability tax you're paying.</span></div></li>
+    </ul>
+  </section>
+</section>
+
+<!-- ========== 15. TAKEAWAYS ========== -->
+<section>
+  <section>
+    <p class="kicker">Takeaways</p>
+    <h2>What to remember</h2>
+    <div class="takeaways"><ul>
+      <li class="fragment"><strong>RLHF = learn the taste, then optimize it.</strong> SFT imitates, a Bradley-Terry RM encodes comparisons, RL pushes toward high reward under a KL leash.</li>
+      <li class="fragment"><strong>PPO</strong> is the expressive-but-heavy workhorse; \(\beta\) is the dial between "unimprovable" and "reward-hacked."</li>
+      <li class="fragment"><strong>DPO</strong> is the shortcut: the optimal policy <em>is</em> an implicit reward → one logistic loss on pairs, trading exploration for simplicity.</li>
+      <li class="fragment"><strong>GRPO</strong> drops the critic via a group baseline — lighter than PPO, the engine behind reasoning RL.</li>
+      <li class="fragment"><strong>RLVR + GRPO</strong> sidestep RM hacking &amp; unlocked emergent reasoning; ORMs score answers, PRMs score steps.</li>
+      <li class="fragment"><strong>Everything fights Goodhart:</strong> reward hacking, length bias, sycophancy, over-optimization vs KL, the alignment tax, judge biases.</li>
+    </ul></div>
+    <aside class="notes">
+      Recap the spine one last time. If they remember six things: (1) learn taste then optimize, (2) PPO + KL leash, (3) DPO
+      = closed-form shortcut, (4) GRPO = critic-free, (5) RLVR = verifiable rewards for reasoning, (6) Goodhart is always the
+      enemy. That's the whole module.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Further reading</p>
+    <h2>Go deeper</h2>
+    <ul>
+      <li class="fragment"><a href="https://huggingface.co/blog/rlhf">Illustrating RLHF</a> — Hugging Face</li>
+      <li class="fragment"><a href="https://magazine.sebastianraschka.com/p/the-state-of-llm-reasoning-model-training">Sebastian Raschka on RLHF, DPO &amp; reasoning RL</a></li>
+      <li class="fragment">Next module → <strong>31 · Synthetic Data</strong></li>
+    </ul>
+    <aside class="notes">
+      Two accessible deep-dives from the doc: the Hugging Face "Illustrating RLHF" post for the visual intuition, and
+      Raschka's piece tying RLHF/DPO to the reasoning-RL wave. Then point them to the next module, Synthetic Data, which
+      connects directly to RLVR and rejection-sampling pipelines.
+    </aside>
+  </section>
+
+  <section class="deck-title">
+    <div class="logo">∑</div>
+    <p class="kicker">MODULE 08 · COMPLETE</p>
+    <h1>Learn the taste. Optimize it. Keep the leash.</h1>
+    <p class="subtitle">RLHF · DPO · GRPO · RLVR — same objective, different trade-offs.</p>
+    <p class="keyhint"><kbd>S</kbd> speaker notes · <kbd>O</kbd> overview · thanks for following along</p>
+    <aside class="notes">
+      Closing line: every method here solves the same KL-constrained preference objective; they differ only in how much
+      machinery they keep. Capability comes from pretraining, behavior comes from alignment — and alignment is a constant
+      fight against Goodhart. Open for questions.
+    </aside>
+  </section>
+</section>
+
+    </div>
+  </div>
+
+  <!-- reveal.js core + plugins + mermaid (CDN), then shared deck runtime -->
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/math/math.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+  <script src="../assets/deck.js?v=2"></script>
+</body>
+</html>

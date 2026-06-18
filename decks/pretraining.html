@@ -1,0 +1,1212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pretraining & Scaling Laws — LLM Teaching Decks</title>
+  <meta name="description" content="A reveal.js lecture deck: self-supervised pretraining objectives (causal LM, MLM, span corruption, UL2, FIM) and scaling laws (Kaplan, Chinchilla, compute-optimal)." />
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/white.css" id="reveal-theme" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <link rel="stylesheet" href="../assets/deck.css?v=2" />
+
+  <!-- FOUC guard: set deck theme before first paint -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("deck-theme") ||
+          ((window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+        if (t === "dark") document.documentElement.classList.add("deck-dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+
+<!-- ===================== SECTION 1 · TITLE ===================== -->
+<section class="deck-title">
+  <div class="logo">∑</div>
+  <p class="kicker">PHASE 2 · TRAINING &amp; ALIGNMENT · MODULE 06</p>
+  <h1>Pretraining &amp; Scaling Laws</h1>
+  <p class="subtitle">How a base model is trained from scratch on web-scale text — the self-supervised objectives that turn raw bytes into a next-token predictor, and the scaling laws that decide how big to make it and how long to train.</p>
+  <p class="keyhint"><kbd>←</kbd><kbd>→</kbd> navigate · <kbd>S</kbd> speaker notes · <kbd>O</kbd> overview · <kbd>F</kbd> fullscreen · append <code>?print-pdf</code> to export</p>
+  <aside class="notes">
+    Welcome. This is module 06 — pretraining and scaling laws. Everything downstream (fine-tuning, RLHF, RAG, agents) starts from a <em>base model</em>, and this deck is about how that base model comes to exist. Two big threads: (1) the self-supervised <strong>objective</strong> — what game we make the model play over trillions of tokens, and (2) the <strong>scaling laws</strong> — the empirical rules that tell us how big to make the model (N parameters) and how many tokens (D) to train on for a given compute budget (C). By the end you should be able to derive C ≈ 6ND on a whiteboard, state Chinchilla's 20-tokens-per-parameter rule, and explain why GPT-3 was undertrained. Press S any time to read my script.
+  </aside>
+</section>
+
+<!-- ===================== SECTION 2 · ROADMAP ===================== -->
+<section>
+  <section>
+    <p class="kicker">Roadmap</p>
+    <h2>What we'll land today</h2>
+    <div class="callout"><span class="t">📋 Agenda (~16 min of core, 30–45 min taught)</span>
+      <ul>
+        <li class="fragment">Self-supervision &amp; the <strong>autoregressive objective</strong></li>
+        <li class="fragment">The landscape of <strong>pretraining objectives</strong> — causal LM, MLM, span corruption, prefix-LM/UL2, FIM</li>
+        <li class="fragment">The <strong>scaling-law cluster</strong> — Kaplan, Chinchilla, over-training, data-constrained, MoE</li>
+        <li class="fragment">The <code>C ≈ 6ND</code> compute budget &amp; MFU</li>
+        <li class="fragment">Data curation · μP · WSD schedule · emergence &amp; the "mirage" debate</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Read the agenda out loud, then preview the spine: we go intuition → mechanism → the approaches (the heart) → compare → math → code → worked example → decision guide → pitfalls → what's new → practice → takeaways. The single most-tested idea is the relationship between compute, parameters, and tokens — so we keep returning to C ≈ 6ND and the Chinchilla ratio. If someone only remembers two things, it should be "next token is its own label" and "scale N and D together, ~20 tokens per param."
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Roadmap</p>
+    <h2>The core ideas to remember</h2>
+    <div class="takeaways"><ul>
+      <li class="fragment"><strong>The text labels itself</strong> — no humans in the loop.</li>
+      <li class="fragment"><strong>Causal LM is the default</strong> — training = inference.</li>
+      <li class="fragment"><strong>Loss is a power law</strong> in N, D, C — and it's predictable.</li>
+      <li class="fragment"><strong>Scale N and D together</strong> (~20 tokens/param), not just N.</li>
+      <li class="fragment"><strong>C ≈ 6ND</strong> is the budgeting workhorse.</li>
+      <li class="fragment"><strong>Over-train for production</strong> — inference cost dominates lifetime cost.</li>
+    </ul></div>
+    <aside class="notes">
+      These six bullets are the deck in miniature. Each one maps to a section. Tell the audience: by the time we close, every one of these should feel obvious. The subtle one is the last — Chinchilla minimizes <em>training</em> compute, but the thing you actually pay for over a model's life is <em>inference</em>, so the modern move is to deliberately over-train a smaller model.
+    </aside>
+  </section>
+</section>
+
+<!-- ===================== SECTION 3 · WHY IT MATTERS ===================== -->
+<section>
+  <section>
+    <p class="kicker">Why it matters</p>
+    <h2>Where pretraining sits in the LLM stack</h2>
+    <div class="flow">
+      <span class="box ghost">Raw web text</span>
+      <span class="arrow">→</span>
+      <span class="box accent">Pretraining<small>this module</small></span>
+      <span class="arrow">→</span>
+      <span class="box">Base model</span>
+      <span class="arrow">→</span>
+      <span class="box">Fine-tune / PEFT</span>
+      <span class="arrow">→</span>
+      <span class="box green">RLHF / aligned chat</span>
+    </div>
+    <ul>
+      <li class="fragment">Pretraining is where the model learns the <strong>shape of language</strong> — grammar, facts, code, reasoning.</li>
+      <li class="fragment">It's the <strong>most expensive</strong> stage — millions of GPU-hours, the bulk of the budget.</li>
+      <li class="fragment">Everything after (SFT, RLHF) only <em>steers</em> a capability that pretraining already created.</li>
+    </ul>
+    <aside class="notes">
+      Frame the economics: pretraining is the foundation everything else stands on, and it's where almost all the compute goes. Fine-tuning and RLHF are comparatively tiny — they reshape behavior but rarely add new raw knowledge. That's why "what data did it see in pretraining" determines so much. Mention that this is also the stage where the scaling-law decisions are irreversible: you commit to a parameter count and a data budget up front, and a single run can cost millions, so you cannot afford to guess the learning rate or the model size.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Why it matters</p>
+    <h2>Why "self-supervised" changed everything</h2>
+    <ul>
+      <li class="fragment">No labels needed — so we can use <strong>all of the internet</strong>, not a small annotated set.</li>
+      <li class="fragment">The bottleneck moves from <em>labeling</em> to <em>compute + data quality</em>.</li>
+      <li class="fragment">One simple game — "predict the hidden token" — scales to trillions of examples for free.</li>
+    </ul>
+    <div class="callout"><span class="t">💡 Key shift</span> Supervised learning needs humans to label every example. Self-supervision derives the label from the data itself, unlocking web-scale training.</div>
+    <aside class="notes">
+      This is the conceptual unlock. Before, the size of a labeled dataset capped how much a model could learn. Self-supervision removes that cap: every token in every document is a free training example. That's why the field pivoted from "collect more labels" to "collect more compute and cleaner data." It's worth saying explicitly that this is why LLMs got so big so fast — the supply of training signal became effectively unlimited.
+    </aside>
+  </section>
+</section>
+
+<!-- ===================== SECTION 4 · INTUITION ===================== -->
+<section>
+  <section>
+    <p class="kicker">Intuition</p>
+    <h2>The flashlight analogy</h2>
+    <div class="cols">
+      <div>
+        <p class="fragment">Imagine reading every book in a giant library with a <strong>flashlight that covers the next word</strong>.</p>
+        <p class="fragment">"The cat sat on the ___" → you guess <em>mat</em>, slide the light right, and check.</p>
+        <p class="fragment">Wrong guesses nudge your mental model; right guesses reinforce it.</p>
+      </div>
+      <div>
+        <p class="fragment">No teacher ever tells you the answer — <strong>the book already contains it</strong>.</p>
+        <p class="fragment">After enough pages you've absorbed spelling, syntax, world facts, and reasoning.</p>
+        <p class="fragment">That's exactly what a base LLM does — billions of times per second.</p>
+      </div>
+    </div>
+    <aside class="notes">
+      Tell this as a story; it's the most memorable framing in the whole deck. The point: there's no labeled dataset, just the corpus, and the "answer" is always the next word that's literally already written. Each prediction error is a learning signal. Played over trillions of tokens, this single game grows a system that can write essays and code. Emphasize that nothing about this is task-specific — grammar, facts, and reasoning all fall out of the same objective because predicting the next word well <em>requires</em> understanding all of those things.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Intuition</p>
+    <h2>The pretraining pipeline</h2>
+    <div class="mermaid">
+flowchart LR
+  A["Raw web text"] --> B["Tokenize"]
+  B --> C["Self-supervised task"]
+  C --> D["Cross-entropy loss"]
+  D --> E["Base model"]
+</div>
+    <p class="small fragment">The label for every token is just the <strong>next</strong> token already in the corpus — no humans in the loop.</p>
+    <aside class="notes">
+      Walk the pipeline left to right. Raw text (Common Crawl, code, books) → tokenize bytes into integer IDs → set up the self-supervised task (predict hidden token(s)) → score guesses against truth with cross-entropy → out pops a base model, which is just a next-token predictor. The crucial node is the third: the "task" is where all the different objectives we'll cover (causal, masked, span) plug in. Everything else in the pipeline is shared.
+    </aside>
+  </section>
+</section>
+
+<!-- ===================== SECTION 5 · HOW IT WORKS ===================== -->
+<section>
+  <section>
+    <p class="kicker">How it works</p>
+    <h2>Causal (autoregressive) language modeling</h2>
+    <p class="fragment">Factorize a sequence left-to-right; predict each token from <em>only</em> the tokens before it:</p>
+    <p class="fragment">$$ p_\theta(x) = \prod_{t} p_\theta(x_t \mid x_{&lt;t}) $$</p>
+    <p class="fragment">Used by <strong>every GPT-style decoder-only model</strong> — GPT-1/2/3, LLaMA, every modern chat base.</p>
+    <aside class="notes">
+      This is the dominant objective. The chain rule of probability lets us factor any sequence's probability into a product of next-token conditionals. The model's whole job is to estimate each p(x_t | x_&lt;t). Three mechanics make this efficient and they're the next three slides: the causal mask, teacher forcing, and cross-entropy loss. Stress that "decoder-only" and "causal LM" go together — the architecture and the objective are matched.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · mechanic 1</p>
+    <h2>The triangular (causal) mask</h2>
+    <ul>
+      <li class="fragment">Inside self-attention, add a mask of <strong>\(-\infty\)</strong> above the diagonal.</li>
+      <li class="fragment">Position \(t\) can attend to positions <strong>\(\le t\)</strong> only.</li>
+      <li class="fragment">If the future leaked in, the task is trivial — the model could just <em>copy the answer</em>.</li>
+      <li class="fragment">And it would be useless at generation time, where the future doesn't exist yet.</li>
+    </ul>
+    <aside class="notes">
+      The mask is what enforces "no peeking." Geometrically, the attention score matrix is n×n; we zero out (well, set to −∞ before softmax) everything above the diagonal so each position only sees itself and earlier positions. Why −∞? Because softmax(−∞) = 0, cleanly removing those connections. The deep reason: at inference we generate left to right and the future genuinely doesn't exist, so training must match that constraint. If we let position t see token t+1, the model learns to cheat and collapses at generation time.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · mechanic 2</p>
+    <h2>Teacher forcing</h2>
+    <ul>
+      <li class="fragment">Feed the <strong>true</strong> tokens as input (not the model's own guesses).</li>
+      <li class="fragment">Predict all <code>n</code> next-tokens in <strong>one parallel forward pass</strong>.</li>
+      <li class="fragment">The label sequence is just the input <strong>shifted left by one</strong>.</li>
+      <li class="fragment">→ train on a whole document at once instead of one token at a time.</li>
+    </ul>
+    <aside class="notes">
+      Teacher forcing is the trick that makes training fast. Instead of generating token by token and feeding back our own (possibly wrong) outputs, we feed the ground-truth sequence and ask the model to predict the shifted version. Because of the causal mask, every position's prediction only depends on earlier ground-truth tokens, so all n predictions are independent given the input and can be computed in a single forward pass. The labels are literally the inputs shifted left by one — predict x2 from x1, x3 from x1x2, and so on. This is why a single pass over a 4096-token document yields ~4096 training signals.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · mechanic 3</p>
+    <h2>Cross-entropy loss</h2>
+    <ul>
+      <li class="fragment">At every position, compare the <strong>predicted distribution</strong> over the vocabulary to the one-hot true next token.</li>
+      <li class="fragment">Sum the <strong>negative log-likelihood</strong> across positions.</li>
+      <li class="fragment">Lower loss = better-calibrated next-token guesses.</li>
+    </ul>
+    <div class="callout"><span class="t">📐 Reported as perplexity</span> Perplexity \(= e^{\mathcal{L}/n}\) — the effective "branching factor" of the model's uncertainty.</div>
+    <aside class="notes">
+      Cross-entropy is just the negative log-probability the model assigned to the correct next token, summed over positions. A confident correct prediction contributes near-zero loss; a confident wrong one contributes a large loss. We typically average over tokens and report perplexity, e^(L/n), because it's interpretable: a perplexity of 10 roughly means the model is as uncertain as if it were choosing uniformly among 10 options at each step. Scaling laws are usually stated in terms of this loss.
+    </aside>
+  </section>
+
+  <section data-auto-animate>
+    <p class="kicker">How it works · the mechanism</p>
+    <h2>Watch next-token prediction step through</h2>
+    <p class="small">The causal window slides one position at a time and the loss accumulates — press Play, or Step through it.</p>
+    <div data-anim="mech-pretraining"></div>
+    <aside class="notes">
+      This is the mechanism animation. Hit Play (or Step) and narrate: at step 1 the context is just "The", and the model predicts "cat"; loss adds −log p(cat). At each step the context grows by one token, the green "predicted" token shifts right, and everything to the right stays greyed out — that's the causal mask hiding the future. The headline insight to say out loud: because the mask makes every position's prediction independent of later tokens, <em>one</em> forward pass over the sequence gives us <em>n</em> separate training signals simultaneously. That's the efficiency that makes web-scale pretraining feasible.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works</p>
+    <h2>Teacher forcing, end to end</h2>
+    <div class="mermaid">
+flowchart LR
+  A["input x1 x2 x3 x4"] --> B["decoder + causal mask"]
+  B --> C["logits per position"]
+  C --> D["shift labels"]
+  D --> E["sum cross-entropy"]
+</div>
+    <p class="small fragment">One forward pass predicts every next token in parallel; labels are the input shifted by one.</p>
+    <aside class="notes">
+      This diagram is the previous animation in static form. Input goes through the masked decoder, producing logits at every position (shape n × vocab). We shift labels (predict x2 x3 x4 x5), then sum cross-entropy. The "decoder + causal mask" box is where each position sees only ≤ itself. Use this slide to recap before we move into the engineering decisions that consume the budget.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works</p>
+    <h2>What actually consumes the budget</h2>
+    <ul>
+      <li class="fragment"><strong>Data curation</strong> — dedup, quality filtering, mixture weights → decides <em>what</em> the model reads.</li>
+      <li class="fragment"><strong>Compute budget</strong> <code>C ≈ 6ND</code> + scaling laws → decides how big <code>N</code> and how many tokens <code>D</code>.</li>
+      <li class="fragment"><strong>Optimizer schedule</strong> — warmup, cosine/WSD decay, μP → decides whether it converges or blows up.</li>
+    </ul>
+    <aside class="notes">
+      The objective is conceptually simple; the hard, expensive engineering is everything around it. Three clusters: (1) data — what goes in determines what comes out; dedup and mixture weights are first-class decisions. (2) Sizing — the scaling laws and the C ≈ 6ND budget. (3) Dynamics — the learning-rate schedule, warmup, and μP, which decide whether your multi-million-dollar run converges smoothly or hits a catastrophic loss spike. We'll cover the objectives next, then the scaling cluster.
+    </aside>
+  </section>
+</section>
+
+<!-- ===================== SECTION 6 · THE APPROACHES ===================== -->
+<!-- ===================== SECTION 6 · THE APPROACHES ===================== -->
+<section>
+  <section>
+    <p class="kicker">The approaches — the heart of the deck</p>
+    <h2>Two families: objectives, then scaling</h2>
+    <p class="lead fragment">First the pretraining <strong>objectives</strong> (what the model predicts), then the <strong>scaling/compute</strong> cluster (how big and how long).</p>
+    <div class="cols">
+      <div class="fragment"><h4>Objectives</h4><ul class="small"><li>Causal LM</li><li>Masked LM (BERT)</li><li>Span corruption (T5)</li><li>Prefix-LM / UL2</li><li>Fill-in-the-Middle</li></ul></div>
+      <div class="fragment"><h4>Scaling</h4><ul class="small"><li>Kaplan laws</li><li>Chinchilla optimal</li><li>Over-training</li><li>Data-constrained</li><li>MoE scaling</li></ul></div>
+    </div>
+    <aside class="notes">
+      Set expectations: this is the longest section and it's what interviewers probe hardest, especially "why did we move from X to Y." We go classic → modern → SOTA in each family. Objectives answer "what game does the model play"; scaling laws answer "how do we spend the compute." Each approach gets a summary slide and a step-by-step animated slide; advance through them to build the picture.
+    </aside>
+  </section>
+
+  <!-- =================== Objective 1: Causal LM =================== -->
+  <section>
+    <p class="kicker">Approaches · 1 of 10</p>
+    <h3>Causal / autoregressive LM <span class="tag modern">the default</span></h3>
+    <p><strong>What:</strong> predict the next token given all previous ones. <strong>How:</strong> decoder-only Transformer + triangular mask + teacher forcing; loss = sum of per-token cross-entropies. <strong>Solves:</strong> generation is <em>native</em> — the training objective equals the inference task.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">Generation = training; no head to bolt on</li>
+        <li class="fragment">Every token = a loss term → dense signal</li>
+        <li class="fragment">Scales predictably (Kaplan/Chinchilla fit it)</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Strictly left-to-right (no future visibility)</li>
+        <li class="fragment">Weaker for bidirectional encoding (NER, classification embeddings)</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> the baseline — every later objective is defined relative to it.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2005.14165" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      This is the baseline; everything else is defined relative to it. The killer property is that the training objective and the inference task are identical — you don't bolt on a classification head, you just sample. Dense signal: every single token gives a gradient. It also scales cleanly, which is why the scaling laws were all fit on causal LMs. The one real weakness is that context is strictly left-to-right, so for pure understanding tasks (named-entity recognition, sentence embeddings) a bidirectional encoder can beat it. Reference: GPT-3, Brown et al. 2020, arXiv 2005.14165.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Causal LM</p>
+    <h3>Causal LM — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">x<sub>1..t</sub><small>context</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">causal mask<small>≤ t only</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">logits<small>over vocab</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">−log p(x<sub>t+1</sub>)<small>loss</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Feed the true tokens; the triangular mask lets position \( t \) see only positions \( \le t \) — no peeking at \( x_{&gt;t} \).</li>
+      <li class="fragment">One parallel forward pass emits logits at <em>every</em> position (teacher forcing).</li>
+      <li class="fragment">Shift labels left by one; score each predicted distribution against the true next token.</li>
+      <li class="fragment">Sum cross-entropy \( \mathcal{L}=-\sum_t \log p_\theta(x_t \mid x_{&lt;t}) \) — one pass over \( n \) tokens gives \( n \) signals.</li>
+    </ol>
+    <aside class="notes">
+      Walk each step. The causal mask is what enforces "no peeking" — it sets attention scores above the diagonal to −∞ so softmax zeroes them. Teacher forcing feeds ground-truth tokens, so all n predictions are independent given the input and computed in a single pass. Labels are the input shifted left by one: predict x2 from x1, x3 from x1x2, and so on. That's why a single pass over a 4096-token document yields ~4096 training signals — the efficiency that makes web-scale pretraining feasible.
+    </aside>
+  </section>
+
+  <!-- =================== Objective 2: Masked LM (BERT) =================== -->
+  <section>
+    <p class="kicker">Approaches · 2 of 10</p>
+    <h3>Masked LM (BERT) <span class="tag classic">bidirectional</span></h3>
+    <p><strong>What:</strong> randomly mask ~15% of tokens, predict them from <em>both</em> sides (BERT, 2018). <strong>How:</strong> encoder with full (non-causal) attention; of masked positions, 80% → <code>[MASK]</code>, 10% random, 10% unchanged (the <strong>80/10/10 split</strong>). <strong>Solves:</strong> rich bidirectional representations for understanding (classification, NER, retrieval embeddings).</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">Bidirectional context → strong encoders</li>
+        <li class="fragment">Great for discriminative / embedding tasks</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Can't generate fluently (not autoregressive)</li>
+        <li class="fragment">Only ~15% of tokens give signal → sample-inefficient</li>
+        <li class="fragment"><code>[MASK]</code> never appears at inference (train/test mismatch)</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> drops the causal mask entirely — attention is bidirectional, so each target sees left <em>and</em> right context. Great encoder, but it can't generate.</p>
+    <p class="small"><a href="https://arxiv.org/abs/1810.04805" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      How it differs from causal LM: BERT drops the causal mask entirely — attention is bidirectional, so each masked position is predicted from both left and right context. That makes it a fantastic encoder but unable to generate fluently. The 80/10/10 split is a classic interview detail: of the 15% chosen positions, 80% become [MASK], 10% become a random token, and 10% are left unchanged. Why? Because [MASK] never appears at fine-tune/inference time, so always using it creates a train/test mismatch; the random and unchanged cases force the model to build a good representation for every token, not just the masked slots. The big inefficiency: only ~15% of tokens contribute loss, versus 100% for causal LM. Reference: Devlin et al. 2018, arXiv 1810.04805.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Masked LM</p>
+    <h3>Masked LM — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">sentence<small>full context</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">pick 15%<small>80/10/10</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">bi-dir encoder<small>both sides</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">predict masked<small>only ~15%</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Sample ~15% of token positions as prediction targets.</li>
+      <li class="fragment">Corrupt them: 80% → <code>[MASK]</code>, 10% → a random token, 10% left unchanged — so the model can't blindly trust the surface token.</li>
+      <li class="fragment">Encode with <em>full</em> attention; every position sees the whole sentence.</li>
+      <li class="fragment">Predict the original token at each target only — loss comes from ~15% of positions, not all of them.</li>
+    </ol>
+    <aside class="notes">
+      Narrate the 80/10/10 rationale step by step: [MASK] never appears at inference, so always masking creates a train/test gap. The 10% random and 10% unchanged force a good representation for every token, and stop the model from assuming the observed token is always correct. Full bidirectional attention is the key contrast with causal LM — but it's exactly why BERT can't generate left-to-right, and why only the ~15% target positions yield a gradient, making it sample-inefficient per sequence.
+    </aside>
+  </section>
+
+  <!-- =================== Objective 3: Span corruption (T5) =================== -->
+  <section>
+    <p class="kicker">Approaches · 3 of 10</p>
+    <h3>Span corruption (T5) <span class="tag modern">denoising</span></h3>
+    <p><strong>What:</strong> mask contiguous <em>spans</em>, reconstruct them as a target sequence (T5, 2019). <strong>How:</strong> each dropped span → a unique <strong>sentinel token</strong> (<code>&lt;X&gt;</code>, <code>&lt;Y&gt;</code>…) in the input; the decoder outputs sentinel-then-span pairs. <strong>Solves:</strong> an encoder-decoder objective that casts <em>everything</em> as text-to-text.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">One text-to-text framing for all tasks</li>
+        <li class="fragment">Shorter targets than full MLM → efficient</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Encoder-decoder adds complexity vs decoder-only</li>
+        <li class="fragment">Less natural for open-ended generation than causal LM</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> masks whole spans (not single tokens) and predicts them seq2seq — shorter targets than MLM, and unifies every task as "text in, text out."</p>
+    <p class="small"><a href="https://arxiv.org/abs/1910.10683" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      How it differs from MLM: instead of masking individual tokens, T5 masks whole contiguous spans and replaces each with a single sentinel token (&lt;X&gt;, &lt;Y&gt;). The decoder then emits the sentinels paired with the original span text. This makes targets much shorter than MLM (you reconstruct only the dropped spans, not the whole sequence) and casts every NLP task into one text-to-text format — translation, summarization, classification all become "text in, text out." The cost is architectural: it's an encoder-decoder, which is heavier than decoder-only and less natural for open-ended generation. Reference: Raffel et al. 2019, arXiv 1910.10683.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Span corruption</p>
+    <h3>Span corruption — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">document<small>thank you for inviting</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">drop spans<small>→ &lt;X&gt; &lt;Y&gt;</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">encoder</span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">decoder<small>&lt;X&gt; span &lt;Y&gt; span</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Pick contiguous spans to corrupt; replace each with a single unique sentinel \( \langle X\rangle, \langle Y\rangle, \ldots \) in the input.</li>
+      <li class="fragment">The encoder reads the corrupted input bidirectionally.</li>
+      <li class="fragment">The decoder generates only the dropped spans, each preceded by its sentinel — the target is short, not the whole sequence.</li>
+      <li class="fragment">Every task (translate, summarize, classify) is framed the same way: text in → text out.</li>
+    </ol>
+    <aside class="notes">
+      Step through the sentinel mechanism: a span like "for inviting me to your" collapses to one &lt;X&gt; token in the input, and the decoder's job is to emit "&lt;X&gt; for inviting me to your &lt;Y&gt; ...". This is the key efficiency win over MLM — targets are short because you only reconstruct what was dropped. And because input and output are both text, T5 casts translation, summarization, and classification into one uniform format. The trade is the encoder-decoder overhead versus a plain decoder-only stack.
+    </aside>
+  </section>
+
+  <!-- =================== Objective 4: Prefix-LM / UL2 =================== -->
+  <section>
+    <p class="kicker">Approaches · 4 of 10</p>
+    <h3>Prefix-LM &amp; UL2 "mixture-of-denoisers" <span class="tag modern">unified</span></h3>
+    <p><strong>What:</strong> <em>Prefix-LM</em> — a prefix attends bidirectionally, the continuation is causal. <em>UL2</em> (2022) trains a <strong>mixture-of-denoisers</strong>. <strong>How:</strong> UL2 mixes <strong>R</strong> (regular short spans, T5-like), <strong>X</strong> (extreme/long-span), <strong>S</strong> (sequential / prefix-LM) with a <em>mode token</em> saying which game. <strong>Solves:</strong> one model good at both understanding <em>and</em> generation.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">One model spans MLM + span + causal strengths</li>
+        <li class="fragment">Mode tokens pick behavior at inference</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">More moving parts; mixing ratios are extra hyperparameters</li>
+        <li class="fragment">Pure decoder-only causal LM won most production stacks</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> instead of one denoiser (T5), it trains a <em>mixture</em> and signals the mode — bidirectional understanding plus causal generation in one model.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2205.05131" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      How it differs from T5: rather than commit to one denoiser, UL2 trains on a mixture and tells the model which mode it's in via a special mode token. R-denoising is short spans (like T5), X-denoising is aggressive long-span corruption, and S-denoising is sequential — essentially prefix-LM / causal generation. Prefix-LM itself is the bridge: the prefix gets bidirectional attention (encoder-like), the continuation is generated causally (decoder-like) in a single stack. The promise is "one model, both skills." The reality, as the cons note, is that the field largely converged on pure decoder-only causal LMs for production because they're simpler and scale just as well. Reference: Tay et al. 2022, arXiv 2205.05131.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Prefix-LM / UL2</p>
+    <h3>Prefix-LM / UL2 — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">mode token<small>[R] [X] [S]</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">prefix<small>bi-directional</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">target<small>causal</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">one model<small>understand + generate</small></span>
+    </div>
+    <ol>
+      <li class="fragment"><strong>Prefix-LM</strong>: the prefix tokens attend to each other freely (encoder-like); generated tokens attend to the full prefix plus prior targets (causal).</li>
+      <li class="fragment"><strong>UL2</strong> prepends a <em>mode token</em> — R (short spans), X (long/extreme spans), S (sequential, i.e. prefix-LM).</li>
+      <li class="fragment">Each batch samples a denoiser; the model learns all three games at once.</li>
+      <li class="fragment">At inference, pick the mode token to switch between understanding and generation behavior.</li>
+    </ol>
+    <aside class="notes">
+      Walk the attention pattern: in prefix-LM, only the prefix is bidirectional, so it's a single decoder stack with a modified mask — encoder-like conditioning on the input, autoregressive generation of the output. UL2 generalizes this: R/X/S denoisers sit on a continuum of span length and masking rate, and a mode token tells the model which one. The headline is "one model, both skills" — but in practice pure decoder-only causal LMs won production because they're simpler and scale just as well. The mixing ratios become extra hyperparameters you have to tune.
+    </aside>
+  </section>
+
+  <!-- =================== Objective 5: FIM =================== -->
+  <section>
+    <p class="kicker">Approaches · 5 of 10</p>
+    <h3>Fill-in-the-Middle (FIM) <span class="tag sota">code</span></h3>
+    <p><strong>What:</strong> teach a causal LM to fill a gap given <em>both</em> a prefix and a suffix (Bavarian et al., 2022) — essential for IDE code completion. <strong>How:</strong> split a doc into <code>prefix / middle / suffix</code>, reorder to <code>&lt;PRE&gt; prefix &lt;SUF&gt; suffix &lt;MID&gt; middle</code> (the PSM layout). <strong>Free:</strong> still plain next-token training — adding FIM doesn't hurt left-to-right ability.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">Enables insertion/infilling (IDE autocomplete)</li>
+        <li class="fragment">"Free": same AR loss, no left-to-right regression</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Needs careful sentinel/format handling</li>
+        <li class="fragment">Mix rate (e.g. 50–90% FIM) is a tuning knob</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> a pure data transform on causal LM — reorder so the suffix precedes the middle, and the same next-token loss learns to infill.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2207.14255" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      How it differs from plain causal LM: a left-to-right model can only continue text to the right — it can't fill a gap in the middle of a file, which is exactly what you need when editing code in an IDE. FIM's trick is purely a data transformation: take a document, cut it into prefix / middle / suffix, and reorder it so the suffix comes before the middle, marked with sentinels (&lt;PRE&gt; &lt;SUF&gt; &lt;MID&gt;). Now the same vanilla next-token objective learns to produce the middle given both sides. The "FIM-for-free" headline result is that mixing in FIM at training time doesn't degrade ordinary left-to-right performance, so you get infilling at no quality cost. The knobs are the format (PSM vs SPM ordering) and the FIM mix rate, typically 50–90%. Reference: Bavarian et al. 2022, arXiv 2207.14255.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · FIM</p>
+    <h3>FIM — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">doc<small>prefix · middle · suffix</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">reorder<small>&lt;PRE&gt;&lt;SUF&gt;&lt;MID&gt;</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">causal LM<small>same AR loss</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">predict middle<small>given both sides</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Take a document and split it into prefix / middle / suffix.</li>
+      <li class="fragment">Reorder to <code>&lt;PRE&gt; prefix &lt;SUF&gt; suffix &lt;MID&gt; middle</code> so the suffix appears <em>before</em> the middle.</li>
+      <li class="fragment">Train with the ordinary causal next-token loss — nothing about the objective changes.</li>
+      <li class="fragment">Apply to a fraction of docs (≈ 50–90%); left-to-right ability is preserved, so infilling is "for free."</li>
+    </ol>
+    <aside class="notes">
+      The whole trick is data reordering. By moving the suffix in front of the middle, the same left-to-right model now conditions on both sides when it reaches the &lt;MID&gt; sentinel — it learns to infill. The "FIM-for-free" result is the headline: mixing it in at ~50–90% doesn't degrade ordinary completion. The two knobs are the layout (PSM vs SPM ordering) and the mix rate. This is what powers IDE autocomplete, where you edit inside a file rather than at the end.
+    </aside>
+  </section>
+
+  <!-- =================== Scaling 1: Kaplan =================== -->
+  <section>
+    <p class="kicker">Approaches · 6 of 10</p>
+    <h3>Kaplan scaling laws <span class="tag classic">2020</span></h3>
+    <p><strong>What:</strong> first big empirical study — test loss falls as a smooth <strong>power law</strong> in N, D, C. <strong>How:</strong> a straight line on a log-log loss-vs-compute plot. <strong>Recommended:</strong> with more compute, make models <em>much bigger</em>, increase data only modestly. <strong>Caveat:</strong> that N-vs-D advice was later shown biased (LR schedule + embedding accounting).</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">First to show clean, predictable power laws</li>
+        <li class="fragment">Justified ever-larger models (→ GPT-3)</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Over-weighted parameters → too little data</li>
+        <li class="fragment">Fixed-length cosine + warmup skewed the exponents</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> shifts from "what game" (objectives) to "how much compute" — and made loss <em>predictable</em> before training.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2001.08361" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Kaplan et al. 2020 (arXiv 2001.08361) was the breakthrough that made loss predictable: you could fit a power law from small runs and forecast a huge model's loss before training it. That predictability is why people felt safe spending GPT-3 money. But the methodology had a flaw — they used a fixed-length cosine schedule and counted embedding parameters in a way that biased the exponents, leading to the conclusion "spend compute mostly on parameters." That advice produced GPT-3, which we'll see was badly undertrained. This sets up the Chinchilla correction.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Kaplan</p>
+    <h3>Kaplan — step by step</h3>
+    <div class="cols" style="grid-template-columns:1.15fr 1fr;align-items:center;gap:.5em 1.4em;">
+      <svg class="sl-graph" viewBox="0 0 520 300" role="img" aria-label="Log-log plot of test loss versus compute: data points fall on a straight power-law line that extrapolates to a forecast.">
+        <!-- axes -->
+        <line class="sl-axis" x1="64" y1="36" x2="64" y2="250"/>
+        <line class="sl-axis" x1="64" y1="250" x2="500" y2="250"/>
+        <polygon class="sl-arrow" points="64,30 59,42 69,42"/>
+        <polygon class="sl-arrow" points="506,250 494,245 494,255"/>
+        <text class="sl-axlab" x="284" y="286" text-anchor="middle">log compute  C  &#8594;</text>
+        <text class="sl-axlab" x="20" y="143" text-anchor="middle" transform="rotate(-90 20 143)">log test loss  L</text>
+        <!-- step 1: data points from small training runs -->
+        <g class="fragment fade-in" data-fragment-index="1">
+          <circle class="sl-pt" cx="110" cy="68"  r="6"/>
+          <circle class="sl-pt" cx="170" cy="103" r="6"/>
+          <circle class="sl-pt" cx="230" cy="124" r="6"/>
+          <circle class="sl-pt" cx="290" cy="158" r="6"/>
+          <circle class="sl-pt" cx="350" cy="184" r="6"/>
+        </g>
+        <!-- step 2: fitted power-law line (straight on log-log) -->
+        <g class="fragment fade-in" data-fragment-index="2">
+          <line class="sl-fit" x1="92" y1="64" x2="404" y2="206"/>
+          <text class="sl-pow" x="150" y="84">L &#8733; C<tspan font-size="11" dy="-6">&#8722;&#945;</tspan></text>
+        </g>
+        <!-- step 3: extrapolate to a huge unseen model -->
+        <g class="fragment fade-in" data-fragment-index="3">
+          <line class="sl-extrap" x1="404" y1="206" x2="478" y2="240"/>
+          <circle class="sl-fore" cx="478" cy="240" r="6.5"/>
+          <text class="sl-note" x="474" y="226" text-anchor="end">forecast a huge model &#8600;</text>
+        </g>
+      </svg>
+      <ol>
+        <li class="fragment" data-fragment-index="1">Train many <strong>small models</strong>, varying params \( N \), data \( D \), compute \( C \).</li>
+        <li class="fragment" data-fragment-index="2">Plot test loss on <strong>log-log</strong> axes — the points fall on a <strong>straight line</strong>: \( L \propto C^{-\alpha} \).</li>
+        <li class="fragment" data-fragment-index="3"><strong>Extrapolate</strong> that line to forecast a giant model's loss <em>before</em> spending the money.</li>
+        <li class="fragment" data-fragment-index="4">Their (later-corrected) advice: with more compute, grow \( N \) <em>faster</em> than \( D \).</li>
+      </ol>
+    </div>
+    <aside class="notes">
+      The power-law insight: each multiplicative increase in compute yields a constant fractional drop in reducible loss, so a straight log-log line lets you extrapolate. That predictability is the real contribution. The flaw is in step 4: a fixed-length cosine schedule (not matched to each run's horizon) plus counting embedding params biased the exponents toward "make it bigger." That recommendation produced GPT-3 — and Chinchilla showed it was wrong.
+    </aside>
+  </section>
+
+  <!-- =================== Scaling 2: Chinchilla (KEY) =================== -->
+  <section>
+    <p class="kicker">Approaches · 7 of 10</p>
+    <h3>Chinchilla compute-optimal <span class="tag sota">~20 tokens/param</span></h3>
+    <p><strong>What:</strong> the corrected result (Hoffmann et al., 2022) — for fixed compute, grow N and D <em>in equal proportion</em> → ~<strong>20 tokens/param</strong>. <strong>How:</strong> swept hundreds of models with properly tuned LR schedules; fit \( L(N,D)=E+A/N^\alpha+B/D^\beta \). <strong>Result:</strong> Chinchilla (70B, 1.4T) beat Gopher (280B) with <em>4× fewer</em> params.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">Smaller, cheaper-to-serve models match bigger ones</li>
+        <li class="fragment">Clean parametric loss law to plan budgets</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">"Optimal" ignores inference cost (training-only)</li>
+        <li class="fragment">Assumes abundant unique data — not always true</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> same power-law philosophy, fixed methodology — matched the LR schedule to each run, so N and D scale almost <em>equally</em>, not parameters-first.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2203.15556" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      How it differs from Kaplan: same power-law philosophy, fixed methodology. By tuning the LR schedule to the run length (not a fixed cosine), Hoffmann et al. found that N and D should scale almost equally — the exponents α≈0.34, β≈0.28 are close enough that the optimal ratio is roughly 20 tokens per parameter. The dramatic proof: Chinchilla, a 70B model on 1.4T tokens, beat the 280B Gopher despite being 4× smaller, just by being trained on the right amount of data. The headline lesson: Kaplan-era models were undertrained — too big for their data budget. Caveats: "optimal" here means training-compute-optimal and ignores inference cost, and it assumes you have enough unique data. Reference: arXiv 2203.15556.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Chinchilla</p>
+    <h3>Chinchilla — step by step</h3>
+    <div class="cols" style="grid-template-columns:1.1fr 1fr;align-items:center;gap:.4em 1.3em;">
+      <svg class="sl-graph" viewBox="0 0 520 280" role="img" aria-label="IsoFLOP curves: for each compute budget loss is U-shaped in model size; the minima trace the compute-optimal frontier where tokens are about 20 times parameters.">
+        <line class="sl-axis" x1="60" y1="30" x2="60" y2="240"/>
+        <line class="sl-axis" x1="60" y1="240" x2="496" y2="240"/>
+        <polygon class="sl-arrow" points="60,24 55,36 65,36"/>
+        <polygon class="sl-arrow" points="502,240 490,235 490,245"/>
+        <text class="sl-axlab" x="280" y="270" text-anchor="middle">model size  N  (log)  &#8594;</text>
+        <text class="sl-axlab" x="18" y="135" text-anchor="middle" transform="rotate(-90 18 135)">loss</text>
+        <g class="fragment fade-in" data-fragment-index="1">
+          <path class="sl-curve" d="M 100 86 Q 150 168 200 86"/>
+          <path class="sl-curve" d="M 188 112 Q 250 204 312 112"/>
+          <path class="sl-curve" d="M 290 142 Q 360 228 430 142"/>
+          <text class="sl-axlab" x="96" y="80" text-anchor="end">small C</text>
+          <text class="sl-axlab" x="436" y="136">large C</text>
+        </g>
+        <g class="fragment fade-in" data-fragment-index="2">
+          <circle class="sl-mark" cx="150" cy="127" r="6"/>
+          <circle class="sl-mark" cx="250" cy="158" r="6"/>
+          <circle class="sl-mark" cx="360" cy="185" r="6"/>
+        </g>
+        <g class="fragment fade-in" data-fragment-index="3">
+          <polyline class="sl-ref" points="130,119 150,127 250,158 360,185 392,196"/>
+          <text class="sl-note" x="300" y="226" text-anchor="middle">optimal frontier &#8594; D &#8776; 20N</text>
+        </g>
+      </svg>
+      <ol>
+        <li class="fragment" data-fragment-index="1">For a <strong>fixed compute budget</strong> (\( C \approx 6ND \)), sweep model size \( N \) — loss is <strong>U-shaped</strong>.</li>
+        <li class="fragment" data-fragment-index="2">The <strong>bottom of each valley</strong> is the best \( N \) for that budget — too small underfits, too big starves on tokens.</li>
+        <li class="fragment" data-fragment-index="3">Connect the minima → the <strong>compute-optimal frontier</strong>: \( N_{\text{opt}}, D_{\text{opt}} \propto C^{0.5} \).</li>
+        <li class="fragment" data-fragment-index="4">Along it \( D/N \approx 20 \) — scale params and tokens <em>together</em>.</li>
+      </ol>
+    </div>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Chinchilla — compute-optimal allocation (10× compute)","nodes":[["10× C","compute"],["N ×3.2","params"],["D ×3.2","tokens"],["D≈20N","ratio"],["L ↓","loss"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"Start with <strong>10× the compute</strong> of a Chinchilla-optimal run. Since <code>C ≈ 6ND</code>, you must split it between params <code>N</code> and tokens <code>D</code>."},
+       {"on":[1],"done":[0],"cap":"<code>N_opt ∝ C^{0.5}</code>, so grow parameters by <strong>√10 ≈ 3.2×</strong> — <em>not</em> 10×."},
+       {"on":[2],"done":[0,1],"cap":"<code>D_opt ∝ C^{0.5}</code>, so grow tokens by the same <strong>3.2×</strong>. Both axes move together."},
+       {"on":[3],"done":[0,1,2],"cap":"The ratio <code>D/N</code> stays pinned near <strong>20 tokens per parameter</strong> — the compute-optimal frontier."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Result: lowest loss for the budget. Pouring all 10× into <em>either</em> N or D alone would waste compute."}
+     ],"interval":2000}
+    </script></div>
+    <aside class="notes">
+      Use the interactive widget: hit Play/Step. With 10× compute you grow both N and D by √10 ≈ 3.2×, keeping D/N near 20. The fix versus Kaplan was matching the LR schedule to each run's horizon so shorter runs weren't penalized. α≈0.34 and β≈0.28 are close enough that the optimum scales the two roughly equally. The proof point: 70B Chinchilla on 1.4T tokens beat 280B Gopher. If someone asks "why 20 tokens/param," it falls out of these exponents. Caveat: this is training-optimal and ignores inference — which motivates over-training next.
+    </aside>
+  </section>
+
+  <!-- =================== Scaling 3: Over-training =================== -->
+  <section>
+    <p class="kicker">Approaches · 8 of 10</p>
+    <h3>Over-training / inference-optimal <span class="tag sota">LLaMA</span></h3>
+    <p><strong>What:</strong> deliberately train a <em>smaller</em> model on <em>far more</em> tokens than Chinchilla-optimal (LLaMA, 2023 — e.g. 7B on 1T+ tokens, ≫ 20×). <strong>Why:</strong> Chinchilla minimizes <em>training</em> compute; a deployed model pays <em>inference</em> cost on every request, forever. <strong>Solves:</strong> total lifetime cost (train + serve) — what actually matters in production.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">Cheaper, faster inference at equal quality</li>
+        <li class="fragment">Smaller weights fit edge / single-GPU deployment</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">More training compute than Chinchilla-optimal</li>
+        <li class="fragment">Diminishing returns — loss keeps falling but slowly</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> Chinchilla minimizes <em>training</em> FLOPs; over-training trades extra training for a permanently cheaper-to-serve model.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2302.13971" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      How it differs from Chinchilla: Chinchilla answers "minimize training FLOPs." But once you deploy, you pay inference cost on every single request for the model's entire life — and that usually dwarfs training. So if a smaller-but-over-trained model can hit the same quality, it's cheaper overall because each inference is cheaper. LLaMA-7B trained on 1T+ tokens is way past the ~140B tokens Chinchilla would prescribe for 7B, and that's intentional. The trade is: you spend more training compute for a model that's permanently cheaper to serve and small enough to fit on one GPU. Returns diminish — loss keeps dropping but slowly — so there's a sweet spot. Reference: Touvron et al. 2023, arXiv 2302.13971.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Over-training</p>
+    <h3>Over-training — step by step</h3>
+    <div class="cols" style="grid-template-columns:1.1fr 1fr;align-items:center;gap:.4em 1.3em;">
+      <svg class="sl-graph" viewBox="0 0 520 280" role="img" aria-label="Test loss versus training tokens: the curve keeps falling but flattens; past the Chinchilla-optimal point, over-training a small model buys a small extra loss drop for a permanently cheaper model to serve.">
+        <line class="sl-axis" x1="64" y1="30" x2="64" y2="238"/>
+        <line class="sl-axis" x1="64" y1="238" x2="496" y2="238"/>
+        <polygon class="sl-arrow" points="64,24 59,36 69,36"/>
+        <polygon class="sl-arrow" points="502,238 490,233 490,243"/>
+        <text class="sl-axlab" x="284" y="268" text-anchor="middle">training tokens  D  (log)  &#8594;</text>
+        <text class="sl-axlab" x="20" y="134" text-anchor="middle" transform="rotate(-90 20 134)">test loss</text>
+        <g class="fragment fade-in" data-fragment-index="1">
+          <path class="sl-curve" d="M 98 64 C 210 150, 300 192, 470 208"/>
+        </g>
+        <g class="fragment fade-in" data-fragment-index="2">
+          <line class="sl-vmark" x1="228" y1="147" x2="228" y2="238"/>
+          <circle class="sl-mark" cx="228" cy="147" r="6"/>
+          <text class="sl-mlab" x="228" y="256" text-anchor="middle">Chinchilla 20:1</text>
+        </g>
+        <g class="fragment fade-in" data-fragment-index="3">
+          <line class="sl-vmark" x1="395" y1="199" x2="395" y2="238"/>
+          <circle class="sl-mark2" cx="395" cy="199" r="6.5"/>
+          <text class="sl-mlab" x="395" y="256" text-anchor="middle">LLaMA &#8811;20:1</text>
+          <text class="sl-note" x="306" y="112" text-anchor="middle">extra tokens: tiny &#916;loss,</text>
+          <text class="sl-note" x="306" y="128" text-anchor="middle">permanently cheaper to serve</text>
+        </g>
+      </svg>
+      <ol>
+        <li class="fragment" data-fragment-index="1">Pick a deliberately <strong>small</strong> \( N \) for cheap serving (e.g. 7B); loss falls fast at first.</li>
+        <li class="fragment" data-fragment-index="2">Stop at the <strong>Chinchilla optimum</strong> (≈20:1, ~140B tokens for 7B) → minimized <em>training</em> compute.</li>
+        <li class="fragment" data-fragment-index="3"><strong>Keep going</strong> — LLaMA-7B saw 1T+ tokens. The loss drop is tiny, but the model stays small.</li>
+        <li class="fragment" data-fragment-index="4">Win at deployment: every request runs the small model, amortizing the extra training over billions of calls.</li>
+      </ol>
+    </div>
+    <aside class="notes">
+      The economics drive every step: training is paid once, inference is paid per request forever, and inference cost scales with parameter count. So pick a small N, then over-train to recover quality. LLaMA-7B on 1T+ tokens is the canonical example — well past Chinchilla-optimal on purpose. Returns diminish (the loss curve flattens), so there's a sweet spot rather than "more is always better." The model also fits on a single GPU / edge device, which Chinchilla-optimal sizing might not.
+    </aside>
+  </section>
+
+  <!-- =================== Scaling 4: Data-constrained =================== -->
+  <section>
+    <p class="kicker">Approaches · 9 of 10</p>
+    <h3>Data-constrained scaling <span class="tag sota">repeat epochs</span></h3>
+    <p><strong>What:</strong> what to do when you've run out of <em>unique</em> tokens (Muennighoff et al., 2023). <strong>How:</strong> repeating data up to <strong>~4 epochs</strong> ≈ as good as fresh data; beyond that, returns decay fast. <strong>Shift:</strong> with unique data fixed, favor adding parameters + modest repetition over endless re-reading.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">Quantifies the value of repeated data (≈4 epochs)</li>
+        <li class="fragment">Guides budget when unique tokens are capped</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Heavy repetition → memorization &amp; diminishing returns</li>
+        <li class="fragment">Optimal allocation gets data-distribution-specific</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> Chinchilla assumes unlimited fresh data; this asks what happens when the unique-token supply is <em>finite</em>.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2305.16264" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      This addresses the looming "we're running out of high-quality web text" problem. Chinchilla assumes unlimited unique data; in reality the supply of good tokens is finite. Muennighoff et al. found that repeating your data for up to about 4 epochs is nearly as valuable as having that much fresh data — but past ~4 epochs the extra passes add almost nothing and you start memorizing (by ~16 epochs, essentially zero added value). So when unique tokens are capped, the compute-optimal allocation shifts: add parameters and repeat modestly rather than re-reading forever. Reference: arXiv 2305.16264.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Data-constrained</p>
+    <h3>Data-constrained — step by step</h3>
+    <div class="cols" style="grid-template-columns:1.1fr 1fr;align-items:center;gap:.4em 1.3em;">
+      <svg class="sl-graph" viewBox="0 0 520 280" role="img" aria-label="Effective data versus epochs: repeating tokens tracks the fresh-data line up to about four epochs, then flattens and falls far below it.">
+        <line class="sl-axis" x1="64" y1="30" x2="64" y2="238"/>
+        <line class="sl-axis" x1="64" y1="238" x2="496" y2="238"/>
+        <polygon class="sl-arrow" points="64,24 59,36 69,36"/>
+        <polygon class="sl-arrow" points="502,238 490,233 490,243"/>
+        <text class="sl-axlab" x="284" y="268" text-anchor="middle">epochs over the same data  &#8594;</text>
+        <text class="sl-axlab" x="20" y="134" text-anchor="middle" transform="rotate(-90 20 134)">effective data</text>
+        <g class="fragment fade-in" data-fragment-index="1">
+          <line class="sl-ref" x1="64" y1="238" x2="470" y2="54"/>
+          <text class="sl-axlab" x="436" y="58" text-anchor="end">if data were fresh</text>
+        </g>
+        <g class="fragment fade-in" data-fragment-index="2">
+          <path class="sl-curve" d="M 64 238 C 112 212, 150 198, 165 193 C 280 172, 380 160, 470 154"/>
+          <text class="sl-note" x="462" y="148" text-anchor="end">repeated (real)</text>
+        </g>
+        <g class="fragment fade-in" data-fragment-index="3">
+          <line class="sl-vmark" x1="165" y1="193" x2="165" y2="238"/>
+          <circle class="sl-mark" cx="165" cy="193" r="6"/>
+          <text class="sl-mlab" x="165" y="256" text-anchor="middle">~4 epochs</text>
+          <text class="sl-note" x="338" y="206" text-anchor="middle">&#62; 4 epochs: diminishing</text>
+        </g>
+      </svg>
+      <ol>
+        <li class="fragment" data-fragment-index="1">You've used up the <strong>unique</strong> high-quality tokens — fresh \( D \) can't grow (dashed line).</li>
+        <li class="fragment" data-fragment-index="2"><strong>Repeat</strong> the data: up to <strong>~4 epochs</strong> is almost as valuable as fresh tokens.</li>
+        <li class="fragment" data-fragment-index="3">Past ~4 epochs returns <strong>decay fast</strong>; by ~16 epochs extra passes add almost nothing (and memorize).</li>
+        <li class="fragment" data-fragment-index="4">So shift the budget toward <strong>more parameters</strong> + modest repetition, not endless re-reading.</li>
+      </ol>
+    </div>
+    <aside class="notes">
+      Step through the discount: the fitted model treats repeated tokens as having a reduced effective value, which is why the first few epochs are nearly free and later ones aren't. The ~4-epoch rule is the practical answer to "what if we run out of data." Past it, you over-memorize and gain little, so the compute-optimal allocation tilts toward more parameters plus modest repetition. The exact optimum becomes data-distribution-specific.
+    </aside>
+  </section>
+
+  <!-- =================== Scaling 5: MoE (KEY) =================== -->
+  <section>
+    <p class="kicker">Approaches · 10 of 10</p>
+    <h3>MoE scaling <span class="tag sota">sparse</span></h3>
+    <p><strong>What:</strong> many expert FFNs, but route each token to only the top-<code>k</code> → params grow, per-token FLOPs stay flat. <strong>How:</strong> a gating network picks experts per token; e.g. 100B+ params but only ~10–20B <em>active</em> per token. <strong>Solves:</strong> "buy capacity (memorized knowledge) without paying proportional compute."</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">Huge capacity at fixed per-token compute</li>
+        <li class="fragment">Strong quality-per-FLOP for large models</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">All experts must fit in memory (big footprint)</li>
+        <li class="fragment">Routing instability, load-balancing losses, complex serving</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> the dense laws scale on raw \( N \); MoE adds a sparsity axis — scaling laws now depend on <em>active</em> params and expert count.</p>
+    <p class="small"><a href="https://huggingface.co/blog/moe" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Mixture-of-Experts decouples total parameters from per-token compute. You have many expert feed-forward networks, but a gating network routes each token to only the top-k (often k=1 or 2), so a model can have 100B+ total parameters while activating only ~10–20B per token. Scaling laws then depend on active parameters and the number of experts, not raw total. The win is capacity-per-FLOP: more memorized knowledge without proportional compute. The costs are real though — all experts must sit in memory (huge footprint), routing can be unstable so you need load-balancing losses, and serving is more complex. Reference: Hugging Face, "Mixture of Experts Explained," huggingface.co/blog/moe.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · MoE</p>
+    <h3>MoE — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">token</span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">gating net<small>scores experts</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">top-k experts<small>k = 1 or 2</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">combine<small>~10–20B active</small></span>
+    </div>
+    <div class="keyanim"><script type="application/json">
+    {"title":"MoE — sparse routing (100B+ params, ~10–20B active)","nodes":[["token","input"],["gate","router"],["E1","expert"],["E3","expert"],["combine","weighted sum"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"A token arrives. The model holds <strong>many expert FFNs</strong> (here E1…En, 100B+ total params)."},
+       {"on":[1],"done":[0],"cap":"The <strong>gating network</strong> scores every expert for this token and picks the <code>top-k</code> (often k = 1 or 2)."},
+       {"on":[1,2,3],"done":[0],"cap":"Only the chosen experts (E1, E3) run — the rest stay idle, so <strong>per-token FLOPs stay flat</strong>."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Their outputs are combined by the gate weights. Net effect: <strong>~10–20B active</strong> params despite 100B+ total."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Capacity-for-compute: scaling laws now track <em>active</em> params + expert count — at the cost of memory &amp; routing complexity."}
+     ],"interval":2000}
+    </script></div>
+    <ol>
+      <li class="fragment">A token enters a layer with many expert feed-forward networks instead of one.</li>
+      <li class="fragment">A small gating network scores the experts and selects the top-\( k \) (often \( k=1 \) or \( 2 \)).</li>
+      <li class="fragment">Only those experts compute — so total params can be 100B+ while only ~10–20B are <em>active</em> per token.</li>
+      <li class="fragment">Combine the selected experts' outputs by gate weights; add a load-balancing loss so routing doesn't collapse onto a few experts.</li>
+    </ol>
+    <aside class="notes">
+      Use the widget to show routing: the gate scores all experts, top-k fire, the rest stay idle, outputs are combined. The headline is decoupling total params from per-token FLOPs — capacity for memorized knowledge without proportional compute. Scaling laws gain a sparsity axis: loss depends on active params and the number of experts, and there's an optimal sparsity. The costs are concrete — all experts must sit in memory (big footprint), routing can be unstable so you add load-balancing (auxiliary) losses, and distributed serving has communication overhead.
+    </aside>
+  </section>
+</section>
+
+<!-- ===================== SECTION 7 · COMPARE ===================== -->
+<section>
+  <section>
+    <p class="kicker">Compare</p>
+    <h2>Objectives cheat-sheet</h2>
+    <table class="cmp">
+      <thead><tr><th>Approach</th><th>Core idea</th><th>Pros</th><th>Cons</th><th>Cost</th><th>When to use</th><th>Maturity</th></tr></thead>
+      <tbody>
+        <tr class="fragment"><td>Causal LM</td><td>Predict next token, left-to-right</td><td>Native generation; dense loss; scales</td><td>No future context</td><td>Low; decoder-only</td><td>Generative LLMs (default)</td><td>SOTA</td></tr>
+        <tr class="fragment"><td>Masked LM</td><td>Predict 15% masked, bidirectional</td><td>Rich encoders for understanding</td><td>Can't generate; ~15% signal</td><td>Low; encoder</td><td>Embeddings, classification, NER</td><td>Mature</td></tr>
+        <tr class="fragment"><td>Span corruption</td><td>Reconstruct spans via sentinels</td><td>Unified text-to-text</td><td>Encoder-decoder overhead</td><td>Medium</td><td>Seq2seq / multitask</td><td>Mature</td></tr>
+        <tr class="fragment"><td>Prefix-LM / UL2</td><td>Mixture-of-denoisers + mode tokens</td><td>Understanding + generation in one</td><td>Mixing ratios to tune</td><td>Medium-high</td><td>Want one model for both</td><td>Modern</td></tr>
+        <tr class="fragment"><td>FIM</td><td>Reorder doc to infill the middle</td><td>Enables insertion; "free"</td><td>Format/sentinel care</td><td>Low (same AR loss)</td><td>Code models, infilling</td><td>SOTA (code)</td></tr>
+      </tbody>
+    </table>
+    <aside class="notes">
+      This is the interview cheat-sheet. Reveal one row at a time. The pattern to point out: causal LM wins on generation and simplicity, MLM wins on understanding/embeddings, the middle two try to unify and mostly lost to plain causal LM in production, and FIM is the one modern add-on that's basically free and essential for code. If you can reconstruct this table from memory you can answer most "compare the objectives" questions.
+    </aside>
+  </section>
+</section>
+
+<!-- ===================== SECTION 8 · THE MATH ===================== -->
+<section>
+  <section>
+    <p class="kicker">The math</p>
+    <h2>Causal-LM cross-entropy loss</h2>
+    <p>$$ \mathcal{L}(\theta) = -\sum_{t=1}^{n} \log p_\theta(x_t \mid x_{&lt;t}) $$</p>
+    <p class="eqnote fragment"><b>\(\mathcal{L}(\theta)\)</b> = loss for one sequence; <b>\(\theta\)</b> = model weights; <b>\(n\)</b> = sequence length.</p>
+    <p class="eqnote fragment"><b>\(x_t\)</b> = token at position \(t\); <b>\(x_{&lt;t}\)</b> = all tokens before \(t\); <b>\(p_\theta\)</b> = predicted probability of the <em>true</em> next token.</p>
+    <p class="eqnote fragment">Negative log → confident-correct ≈ 0 loss, confident-wrong → large. Average over tokens; report perplexity \(= e^{\mathcal{L}/n}\).</p>
+    <aside class="notes">
+      Walk it term by term as the fragments appear. The sum runs over every position; at each one we take the negative log-probability the model assigned to the actual next token. The shape of −log: it punishes confident mistakes harshly and rewards confident correct guesses with near-zero loss. In practice we average over tokens so the number is comparable across sequence lengths, and we exponentiate to get perplexity, which is the intuitive "branching factor" of the model's uncertainty.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math</p>
+    <h2>Chinchilla parametric loss law</h2>
+    <p>$$ L(N,D) = E + \frac{A}{N^{\alpha}} + \frac{B}{D^{\beta}} $$</p>
+    <p class="eqnote fragment"><b>\(L\)</b> = expected test loss; <b>\(N\)</b> = (non-embedding) parameters; <b>\(D\)</b> = training tokens.</p>
+    <p class="eqnote fragment"><b>\(E\)</b> = <em>irreducible</em> loss — the entropy of language you can never beat, even with infinite data &amp; params.</p>
+    <p class="eqnote fragment"><b>\(A/N^{\alpha}\)</b> = error from a finite model (shrinks as you add params); <b>\(B/D^{\beta}\)</b> = error from finite data (shrinks as you add tokens).</p>
+    <p class="eqnote fragment">Fit \(\alpha \approx 0.34,\ \beta \approx 0.28\) — close enough that \(N\) and \(D\) should scale almost equally.</p>
+    <aside class="notes">
+      This is the single most important equation in the deck. Three pieces: E is the floor — the inherent unpredictability of language that no model can beat. The A/N^α term is your "model is too small" error and it shrinks as you add parameters. The B/D^β term is your "not enough data" error and it shrinks as you add tokens. Because α and β are both around 0.3 and roughly equal, the two error terms shrink at similar rates — which is precisely why the optimum scales N and D together rather than favoring one. If someone asks "why 20 tokens per param," it falls out of these exponents.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math</p>
+    <h2>Compute estimate</h2>
+    <p>$$ C \approx 6ND \;\;\text{FLOPs} $$</p>
+    <p class="eqnote fragment"><b>\(C\)</b> = total training compute (FLOPs); <b>\(N\)</b> = parameters; <b>\(D\)</b> = tokens.</p>
+    <p class="eqnote fragment">The <b>6</b> counts work per parameter per token: forward ≈ <strong>2</strong> FLOPs/param (one multiply + one add), backward ≈ <strong>4</strong> (grads w.r.t. inputs <em>and</em> weights) → 2 + 4 = 6.</p>
+    <p class="eqnote fragment">Back-of-envelope: ignores attention's quadratic term, which only matters at very long sequences.</p>
+    <aside class="notes">
+      This is the budgeting workhorse and a guaranteed interview question. The factor 6 is not magic — it's 2 for the forward pass (a matmul does one multiply and one add per parameter per token) and 4 for the backward pass (you compute gradients with respect to both the activations/inputs and the weights, roughly doubling the forward cost). 2 + 4 = 6. Multiply by N parameters and D tokens and you get total FLOPs. It's an approximation that drops the attention O(n²) term, which is negligible unless sequences are very long.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math</p>
+    <h2>The Chinchilla optimum</h2>
+    <p>$$ N_{\text{opt}} \propto C^{\,a}, \quad D_{\text{opt}} \propto C^{\,b}, \quad a \approx b \approx 0.5 \;\Rightarrow\; \frac{D}{N} \approx 20 $$</p>
+    <p class="eqnote fragment"><b>\(N_{\text{opt}}, D_{\text{opt}}\)</b> = loss-minimizing param &amp; token counts for a fixed budget \(C\).</p>
+    <p class="eqnote fragment">Both exponents ≈ 0.5 → doubling compute means scaling <em>both</em> \(N\) and \(D\) by ≈ \(\sqrt{2}\) (1.41×), holding \(D/N \approx 20\).</p>
+    <p class="eqnote fragment">Practically: a 10B-param model wants ≈ 200B tokens to be compute-optimal.</p>
+    <aside class="notes">
+      This is the operational takeaway from the loss law. Because both exponents are near 0.5, parameters and tokens should grow at the same rate as compute increases — doubling your budget means making the model about 1.41× bigger AND training on 1.41× more tokens, which keeps the ratio pinned near 20:1. The concrete rule to memorize: tokens ≈ 20 × parameters. A 10B model wants ~200B tokens; a 70B model wants ~1.4T tokens (which is exactly Chinchilla). We'll use this in the worked example next.
+    </aside>
+  </section>
+</section>
+
+<!-- ===================== SECTION 9 · IN CODE ===================== -->
+<section>
+  <section>
+    <p class="kicker">In code</p>
+    <h2>Causal-LM loss with teacher forcing</h2>
+    <pre><code class="language-python" data-trim data-line-numbers>import torch
+import torch.nn.functional as F
+
+def causal_lm_loss(logits, labels, pad_id=-100):
+    # logits: (batch, seq, vocab)  labels: (batch, seq) of token ids
+    # Predict token t+1 from position t -&gt; drop last logit, drop first label.
+    shift_logits = logits[:, :-1, :].contiguous()   # (b, n-1, vocab)
+    shift_labels = labels[:, 1:].contiguous()        # (b, n-1) shifted by one
+    loss = F.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),  # (b*(n-1), vocab)
+        shift_labels.view(-1),                          # (b*(n-1),)
+        ignore_index=pad_id,   # padding positions contribute no loss
+    )
+    return loss   # mean negative log-likelihood per (non-pad) token</code></pre>
+    <aside class="notes">
+      This is the entire causal-LM objective in ~10 lines. The two load-bearing lines are the shifts: drop the <em>last</em> logit (it predicts a token past the end) and drop the <em>first</em> label (nothing predicts the very first token), so position t's logits line up against token t+1. Then flatten to (b·(n−1), vocab) and call cross_entropy. ignore_index=pad_id means padded positions don't contribute loss. Point out that this is literally what every HuggingFace causal model does under the hood.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">In code</p>
+    <h2>Back-of-envelope scaling helper</h2>
+    <pre><code class="language-python" data-trim data-line-numbers>import math
+
+def training_flops(N, D):
+    "FLOPs to train N params on D tokens (C = 6*N*D)."
+    return 6 * N * D
+
+def chinchilla_optimal(C, tokens_per_param=20):
+    "Given a compute budget C, return compute-optimal (N, D)."
+    # C = 6*N*D and D = r*N  -&gt;  C = 6*r*N^2  -&gt;  N = sqrt(C / (6*r))
+    r = tokens_per_param
+    N = math.sqrt(C / (6 * r))
+    D = r * N
+    return N, D
+
+C = training_flops(70e9, 1.4e12)         # 70B params, 1.4T tokens
+print(f"{C:.2e} FLOPs")                   # ~5.9e23
+N, D = chinchilla_optimal(C)
+print(f"optimal N={N/1e9:.0f}B  D={D/1e12:.2f}T")  # ~ 70B / 1.4T</code></pre>
+    <aside class="notes">
+      Two helpers. training_flops just applies C = 6ND. chinchilla_optimal inverts it: fix the ratio r = D/N = 20, substitute D = rN into C = 6ND to get C = 6rN², solve N = sqrt(C / 6r), then D = rN. Run it on a 70B/1.4T budget and it returns ~70B / 1.4T — confirming Chinchilla sits exactly at its own optimum. This is the calculator you'd actually use to plan a run.
+    </aside>
+  </section>
+</section>
+
+<!-- ===================== SECTION 10 · WORKED EXAMPLE ===================== -->
+<section>
+  <section>
+    <p class="kicker">Worked example</p>
+    <h2>Sizing a 70B run — the FLOPs</h2>
+    <p class="fragment">How many FLOPs to train a 70B model on 1.4T tokens? Plug into <code>C ≈ 6ND</code>:</p>
+    <p class="fragment">$$ C \approx 6 \times (70\times10^{9}) \times (1.4\times10^{12}) \approx 5.9\times10^{23}\ \text{FLOPs} $$</p>
+    <p class="eqnote fragment">≈ 590 zettaFLOPs. On a cluster sustaining \(10^{18}\) useful FLOP/s (after MFU losses): \(5.9\times10^{23}/10^{18} \approx 5.9\times10^{5}\) s ≈ <strong>~7 days</strong> wall-clock.</p>
+    <aside class="notes">
+      Do the arithmetic live. 6 × 70e9 × 1.4e12: first 70e9 × 1.4e12 = 9.8e22, times 6 ≈ 5.9e23 FLOPs. That's ~590 zettaFLOPs. To turn FLOPs into time, divide by useful throughput — say an exaFLOP (1e18 useful FLOP/s) after accounting for Model FLOPs Utilization (you never get peak). That gives ~5.9e5 seconds, about a week. This is exactly how you'd sanity-check a training plan on a napkin.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Worked example</p>
+    <h2>Is 1.4T optimal for 70B?</h2>
+    <p class="fragment">Chinchilla says \(D \approx 20N\):</p>
+    <p class="fragment">$$ D_{\text{opt}} \approx 20 \times 70\times10^{9} = 1.4\times10^{12} = 1.4\text{T tokens} \;\;\checkmark $$</p>
+    <p class="fragment">So 70B-on-1.4T is <strong>almost exactly Chinchilla-optimal</strong> — which is precisely why Chinchilla was trained at that point.</p>
+    <aside class="notes">
+      Apply the 20:1 rule directly: 20 × 70B = 1.4T. The model and its data budget line up perfectly, confirming that the original Chinchilla paper trained its namesake model right at the compute-optimal frontier it had just discovered. This is a clean, satisfying check that ties the loss law to a real model.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Worked example</p>
+    <h2>Contrast: GPT-3 was undertrained</h2>
+    <ul>
+      <li class="fragment">GPT-3: \(N = 175\text{B}\) but only \(D = 300\text{B}\) tokens → ratio ≈ <strong>1.7</strong> tokens/param.</li>
+      <li class="fragment">That's about <strong>12× below</strong> the Chinchilla target.</li>
+    </ul>
+    <p class="fragment">$$ D_{\text{opt}} \approx 20 \times 175\times10^{9} = 3.5\times10^{12} = 3.5\text{T tokens} $$</p>
+    <p class="eqnote fragment">GPT-3 spent its budget on raw parameters instead of data. The headline lesson: for the <em>same</em> compute, a smaller model trained on more tokens often wins.</p>
+    <aside class="notes">
+      This is the punchline of the whole scaling story. GPT-3 had 175B parameters but saw only ~300B tokens — a ratio of 1.7, about 12× short of the 20:1 target. To be compute-optimal it should have seen ~3.5T tokens. So GPT-3 "wasted" much of its budget on parameters that weren't fed enough data. A Chinchilla-style allocation of the same compute would have produced a smaller model trained on far more tokens, with lower loss and cheaper inference. This single example is why Chinchilla changed how the whole field allocates compute.
+    </aside>
+  </section>
+</section>
+
+<!-- ===================== SECTION 11 · WHEN TO USE WHAT ===================== -->
+<section>
+  <section>
+    <p class="kicker">When to use what</p>
+    <h2>Decision guide</h2>
+    <div class="mermaid">
+flowchart TD
+  A["What are you building?"] --> B{"Need to generate text?"}
+  B -- "No, want embeddings/NER" --> C["Masked-LM encoder"]
+  B -- "Yes" --> D{"Code model?"}
+  D -- "Yes" --> E["Causal LM + FIM"]
+  D -- "No" --> F["Causal / decoder-only"]
+  F --> G{"Serve at scale?"}
+  G -- "Yes" --> H["Over-train smaller model"]
+  G -- "No" --> I["Chinchilla 20 tokens/param"]
+</div>
+    <aside class="notes">
+      Walk the tree. First fork: do you need generation at all? If not — you want embeddings, classification, NER — reach for a masked-LM encoder like BERT/RoBERTa. If yes, are you building a code model? If so, add FIM to the causal objective. Otherwise plain causal/decoder-only. Then the sizing fork: if you'll serve the model at scale, over-train a smaller one (inference dominates lifetime cost); if not, start at Chinchilla's 20 tokens/param.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">When to use what</p>
+    <h2>The practical checklist</h2>
+    <ul>
+      <li class="fragment"><strong>Generative LLM?</strong> Causal/decoder-only — training = inference.</li>
+      <li class="fragment"><strong>Embeddings / classification?</strong> Masked-LM encoder (BERT/RoBERTa).</li>
+      <li class="fragment"><strong>Code model?</strong> Add FIM to causal (≈ 50–90% mix).</li>
+      <li class="fragment"><strong>Budget planning?</strong> Start at Chinchilla ~20:1, then over-train if you'll serve at scale.</li>
+      <li class="fragment"><strong>Out of unique data?</strong> Repeat up to ~4 epochs, then add params over more repetition.</li>
+      <li class="fragment"><strong>Max capacity per FLOP?</strong> MoE — if you can afford the memory + routing complexity.</li>
+      <li class="fragment"><strong>Tuning a giant run?</strong> μP to transfer LR from small models; WSD to fork checkpoints.</li>
+    </ul>
+    <aside class="notes">
+      This is the field guide. Each line maps to an approach we covered. Stress the two production-level instincts: (1) over-train when inference dominates, and (2) use μP so you never guess the learning rate on a run that costs millions. The 4-epoch rule is the practical answer to the "running out of data" worry. WSD (warmup-stable-decay) is worth mentioning because its long constant-LR phase lets you checkpoint and fork, which is great for scaling-law sweeps.
+    </aside>
+  </section>
+</section>
+
+<!-- ===================== SECTION 12 · PITFALLS ===================== -->
+<section>
+  <section>
+    <p class="kicker">Pitfalls &amp; misconceptions</p>
+    <h2>People think X, but actually Y (1/2)</h2>
+    <div class="callout warn"><span class="t">⚠ "Bigger is always better."</span> A model can be <em>too big</em> for its data — GPT-3 was undertrained. For fixed compute, more tokens on a smaller model often wins.</div>
+    <div class="callout warn fragment"><span class="t">⚠ "Chinchilla = exactly 20 tokens/param, always."</span> 20:1 minimizes <em>training</em> compute only. If inference dominates lifetime cost, over-training (LLaMA-style) is better.</div>
+    <div class="callout warn fragment"><span class="t">⚠ "The 6 in 6ND is arbitrary."</span> It's 2 (forward) + 4 (backward) FLOPs/param/token — derivable, not magic.</div>
+    <div class="callout warn fragment"><span class="t">⚠ "MLM and causal LM are interchangeable."</span> MLM is bidirectional and can't generate; causal LM is autoregressive and generates natively. Different downstream tasks.</div>
+    <aside class="notes">
+      These are the misconceptions interviewers love to surface. "Bigger is always better" — no, GPT-3 proved you can be too big for your data. "20:1 always" — no, that's training-optimal; production over-trains. "6 is arbitrary" — no, 2+4, derive it. "MLM ≈ causal LM" — no, fundamentally different: one's an encoder that can't generate, the other generates natively. For each, state the wrong belief, then the correction, crisply.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Pitfalls &amp; misconceptions</p>
+    <h2>People think X, but actually Y (2/2)</h2>
+    <div class="callout warn"><span class="t">⚠ "Duplicate data is harmless, just redundant."</span> Dedup matters a lot — duplicates waste compute, encourage memorization/regurgitation, and can leak test data. Near-dedup (MinHash + LSH) is standard.</div>
+    <div class="callout warn fragment"><span class="t">⚠ "Emergence proves a magical phase transition."</span> Some "emergence" is a <em>metric artifact</em> — discontinuous metrics (exact-match) make smooth gains look sudden.</div>
+    <div class="callout warn fragment"><span class="t">⚠ "A high benchmark score means a good model."</span> Might be <em>data contamination</em> — the test set leaked into pretraining. Always decontaminate.</div>
+    <div class="callout warn fragment"><span class="t">⚠ "Continued pretraining is free capability."</span> It risks <em>catastrophic forgetting</em> — without replay or LR re-warming, adapting can wreck general ability.</div>
+    <aside class="notes">
+      Second batch. Dedup is underrated: duplicates burn compute, drive verbatim memorization (a privacy and copyright problem), and can leak eval data into training. Near-dedup with MinHash + LSH is the standard tool. The emergence "mirage" is a live debate — Schaeffer et al. showed that switching from a discontinuous metric (exact match) to a smooth one often turns an apparent sudden jump into gradual improvement. Contamination: a sky-high benchmark might just mean the test leaked into pretraining, so decontaminate and cross-check related benchmarks. And continued pretraining can cause catastrophic forgetting unless you replay old data or re-warm the learning rate.
+    </aside>
+  </section>
+</section>
+
+<!-- ===================== SECTION 13 · WHAT'S NEW ===================== -->
+<section>
+  <section>
+    <p class="kicker">What's new</p>
+    <h2>From "make it bigger" to "feed it smarter"</h2>
+    <div class="callout whatsnew"><span class="t">🚀 The modern shift</span>
+      <ul>
+        <li class="fragment"><strong>Over-training is standard.</strong> Frontier teams train at 100–1000+ tokens/param (≫ 20) — inference cost dominates.</li>
+        <li class="fragment"><strong>Data quality &gt; quantity.</strong> Aggressive dedup, classifier-based filtering, <em>learned</em> mixture weights (<strong>DoReMi</strong>).</li>
+        <li class="fragment"><strong>Hyperparameter transfer via μP.</strong> Tune LR on a tiny model, transfer to a huge one.</li>
+        <li class="fragment"><strong>WSD / trapezoidal schedules.</strong> Warmup-Stable-Decay (MiniCPM) — checkpoint &amp; fork from the stable phase.</li>
+        <li class="fragment"><strong>The "emergence" debate.</strong> Wei et al. (sudden) vs Schaeffer et al. (mirage from discontinuous metrics).</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      The center of gravity moved from "scale parameters" to "scale data quality and improve dynamics." Over-training at 100–1000+ tokens/param is now routine because deployment cost dominates. DoReMi uses a small proxy model to <em>learn</em> the optimal domain mixture weights rather than guessing them. μP (maximal-update parametrization) is the practical breakthrough for big runs — you tune the LR cheaply on a tiny model and transfer it, eliminating the scariest guess in a multi-million-dollar run. WSD replaces fixed-length cosine with a long constant-LR phase you can checkpoint and fork, plus a short decay — ideal for scaling-law sweeps. And the emergence debate is genuinely unresolved methodology, worth flagging as an open question.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">What's new · papers</p>
+    <h2>Papers — scaling laws</h2>
+    <div class="paper"><a href="https://arxiv.org/abs/2001.08361">Scaling Laws for Neural Language Models</a> <span class="meta">— Kaplan et al., 2020. First clean power laws; over-weighted parameters.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2203.15556">Training Compute-Optimal LLMs (Chinchilla)</a> <span class="meta">— Hoffmann et al., 2022. The ~20 tokens/param correction.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2005.14165">Language Models are Few-Shot Learners (GPT-3)</a> <span class="meta">— Brown et al., 2020. 175B, but undertrained at 300B tokens.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2302.13971">LLaMA</a> <span class="meta">— Touvron et al., 2023. Over-trained small models for cheap inference.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2305.16264">Scaling Data-Constrained LMs</a> <span class="meta">— Muennighoff et al., 2023. ~4 epochs ≈ fresh data.</span></div>
+    <aside class="notes">
+      All links verified from the source page. The scaling-law lineage in one slide: Kaplan (first laws) → Chinchilla (the correction) → GPT-3 (the cautionary tale of being undertrained) → LLaMA (over-training for inference) → Muennighoff (what to do when data runs out). If you read only two, read Chinchilla and the de Vries "go smol" post on the takeaways slide.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">What's new · papers</p>
+    <h2>Papers — objectives &amp; dynamics</h2>
+    <div class="paper"><a href="https://arxiv.org/abs/1810.04805">BERT</a> <span class="meta">— Devlin et al., 2018. Masked LM + the 80/10/10 split.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/1907.11692">RoBERTa</a> <span class="meta">— Liu et al., 2019. Dropped NSP, trained longer on more data.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/1910.10683">T5</a> <span class="meta">— Raffel et al., 2019. Span corruption + sentinel tokens, text-to-text.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2205.05131">UL2</a> <span class="meta">— Tay et al., 2022. Mixture-of-denoisers unifying the objectives.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2207.14255">Fill-in-the-Middle (FIM)</a> <span class="meta">— Bavarian et al., 2022. Infilling "for free" for code.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2305.10429">DoReMi</a> <span class="meta">— Xie et al., 2023. Optimizing domain mixture weights with a proxy model.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2203.03466">μP / Tensor Programs V</a> <span class="meta">— Yang et al., 2022. Hyperparameter transfer across model sizes.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2404.06395">MiniCPM (WSD schedule)</a> <span class="meta">— Hu et al., 2024. Warmup-Stable-Decay LR.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2206.07682">Emergent Abilities of LLMs</a> <span class="meta">— Wei et al., 2022. Abilities appearing suddenly at scale.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2304.15004">Are Emergent Abilities a Mirage?</a> <span class="meta">— Schaeffer et al., 2023. The metric-artifact critique.</span></div>
+    <aside class="notes">
+      The objectives lineage (BERT → RoBERTa → T5 → UL2 → FIM) plus the dynamics papers (DoReMi for data mixtures, μP for hyperparameter transfer, MiniCPM for the WSD schedule) and the two sides of the emergence debate (Wei vs Schaeffer). All arXiv links are verified from the source. Don't try to read these live — point people to the ones relevant to their work.
+    </aside>
+  </section>
+</section>
+
+<!-- ===================== SECTION 14 · PRACTICE ===================== -->
+<!-- ===================== SECTION 14 · PRACTICE ===================== -->
+<section>
+  <p class="kicker">Practice</p>
+  <h2>Practice — click a question to reveal the answer</h2>
+  <p class="small muted">Full bank: <a href="../../interview-prep/06-pretraining-and-scaling-laws.md">06 · Pretraining &amp; Scaling Laws</a> — from the answer key, condensed.</p>
+
+  <!-- ---- sub-slide 1 ---- -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">What is the causal (autoregressive) LM objective, and what does the model predict at each position? <span class="diff easy">Easy</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">It factorizes the joint as a product of conditionals \( P(x)=\prod_t P(x_t \mid x_{&lt;t}) \): at each position predict the next token given only preceding tokens, trained with cross-entropy. One forward pass scores every position at once.</div></li>
+      <li class="qa"><span class="q">Explain MLM as used in BERT. What fraction of tokens are masked and why? <span class="diff easy">Easy</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Randomly select ~15% of tokens and reconstruct them from bidirectional context. 15% balances signal vs efficiency — too few gives weak signal, too many destroys the context you predict from. <span class="watch">Strong for understanding/encoding, not generation.</span></div></li>
+      <li class="qa"><span class="q">Why does causal LM use a triangular mask, and what breaks if future tokens leak? <span class="diff easy">Easy</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">A lower-triangular mask makes position \( t \) attend only to positions \( \le t \), enforcing the autoregressive factorization. If the future leaks, the target is visible in the input — the model "sees the answer," loss collapses, and it's broken at inference. <span class="watch">It's about preventing label leakage, not efficiency.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ---- sub-slide 2 ---- -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Describe T5's span corruption. How does it differ from token-level MLM? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">T5 masks contiguous spans, replacing each with one unique sentinel; the decoder generates the dropped spans seq2seq-style, each preceded by its sentinel. Unlike BERT's in-place single-token MLM, it predicts variable-length multi-token spans, giving shorter targets and matching generative use.</div></li>
+      <li class="qa"><span class="q">Why are decoder-only autoregressive models dominant despite MLM being more bidirectional? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Generation is inherently sequential, which causal LM does natively. It gives a signal at every token (vs ~15% for MLM) so it's more sample-efficient, scales cleanly, and enables zero/few-shot prompting. <span class="watch">Bidirectionality mainly helps representation tasks, which matter less for general assistants.</span></div></li>
+      <li class="qa"><span class="q">What is fill-in-the-middle (FIM), why is it valuable for code, and how is the data reformatted? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">FIM teaches a causal model to infill a span given both prefix and suffix — essential when editing inside code files. Split a doc into prefix/middle/suffix and reorder to <code>[PRE]prefix[SUF]suffix[MID]middle</code>, so standard next-token training learns to condition on the suffix. <span class="watch">Applied to ~50% of docs, it adds infilling with negligible left-to-right loss.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ---- sub-slide 3 ---- -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Why the 80/10/10 [MASK]/random/original split in BERT? <span class="diff hard">Hard</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">[MASK] never appears at fine-tune/inference, creating a train–test mismatch. Of the ~15% targets, 80% become [MASK], 10% random, 10% unchanged. This forces a good representation for every position and stops the model blindly trusting the surface token. <span class="watch">Reduces the pretrain/fine-tune distribution gap.</span></div></li>
+      <li class="qa"><span class="q">According to Chinchilla, what is the approximate optimal ratio of training tokens to parameters? <span class="diff easy">Easy</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Roughly 20 tokens per parameter — scale \( N \) and \( D \) in equal proportion, so a 10B model wants ~200B tokens. <span class="watch">Kaplan's earlier work implied far fewer tokens/param (favoring bigger models); Chinchilla corrected it.</span></div></li>
+      <li class="qa"><span class="q">Why was GPT-3 (175B params, ~300B tokens) considered "undertrained"? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">That's ~1.7 tokens/param, ~12× below the ~20 optimum. Under the same compute a much smaller model on far more tokens would reach lower loss. GPT-3 spent its budget on parameters rather than data, leaving performance on the table.</div></li>
+    </ul>
+  </section>
+
+  <!-- ---- sub-slide 4 ---- -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">With 10× more compute than a Chinchilla-optimal model, how do you scale \( N \) and \( D \)? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Since \( C \approx 6ND \) and both \( N \) and \( D \) scale as ~\( C^{0.5} \), increase each by \( \sqrt{10}\approx 3.16\times \). The ~20 tokens/param ratio is preserved. <span class="watch">Don't multiply only parameters (or only tokens) by 10.</span></div></li>
+      <li class="qa"><span class="q">Where does the factor of 6 in \( C\approx 6ND \) come from? <span class="diff hard">Hard</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Each weight is one multiply-accumulate (~2 FLOPs) per token in the forward pass; the backward pass is ~2× that (~4 FLOPs) because it computes gradients w.r.t. both activations and weights. So ~2 + 4 = 6 FLOPs per param per token. <span class="watch">Attention score/softmax costs are neglected.</span></div></li>
+      <li class="qa"><span class="q">Write the Chinchilla loss \( L(N,D)=E+A/N^\alpha+B/D^\beta \) and explain each term. <span class="diff hard">Hard</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">\( E \) = irreducible loss (data entropy / Bayes floor). \( A/N^\alpha \) = reducible error from finite model capacity (vanishes as \( N\to\infty \)). \( B/D^\beta \) = reducible error from finite data (vanishes as \( D\to\infty \)). <span class="watch">α and β are close but NOT equal (≈0.34 vs ≈0.28).</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ---- sub-slide 5 ---- -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">How do scaling laws change for sparse MoE, and what does decoupling params from per-token FLOPs buy? <span class="diff hard">Hard</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">MoE routes each token to a few experts, so total params grow without raising per-token FLOPs. Laws gain a sparsity / expert-count axis, and for fixed FLOPs MoE typically reaches lower loss than a dense model. The win is memory-for-compute. <span class="watch">Cost: bigger memory footprint, routing complexity, and communication overhead.</span></div></li>
+      <li class="qa"><span class="q">Given 1024 A100s at known achieved FLOP/s, estimate wall-clock for a FLOP budget. <span class="diff hard">Hard</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Time = total FLOPs ÷ (GPUs × achieved FLOP/s). E.g. A100 ~312 TFLOP/s bf16, at ~40% MFU ≈ 125 TFLOP/s → cluster ≈ 1.28×10¹⁷ FLOP/s. A 6×10²³-FLOP budget ≈ 54 days. <span class="watch">Use achieved (MFU-adjusted), not peak — peak overestimates speed 2–3×.</span></div></li>
+      <li class="qa"><span class="q">Train loss falls smoothly but a downstream metric stays flat then jumps — how do you interpret it? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Typical of a thresholded metric: the model steadily improves (log-likelihood of the right answer rising) but the metric only registers once probability mass crosses the decision threshold, looking like sudden "emergence." <span class="watch">Don't conclude a new ability emerged — it's usually a metric artifact.</span></div></li>
+    </ul>
+  </section>
+</section>
+
+<!-- ===================== SECTION 15 · TAKEAWAYS ===================== -->
+<section>
+  <section>
+    <p class="kicker">Takeaways</p>
+    <h2>What to remember</h2>
+    <div class="takeaways"><ul>
+      <li class="fragment"><strong>Pretraining is self-supervised</strong> — the next token is its own label; learn from unlabeled web-scale text.</li>
+      <li class="fragment"><strong>Causal/decoder-only LM is the default</strong> (training = inference); MLM, span, UL2, FIM are alternatives for different tasks.</li>
+      <li class="fragment"><strong>Scaling laws are power laws</strong> — <code>L(N,D)=E+A/Nᵅ+B/Dᵝ</code>; loss falls predictably with N, D, C.</li>
+      <li class="fragment"><strong>Chinchilla's ~20 tokens/param</strong> revised Kaplan — scale N and D together; GPT-3 was badly undertrained.</li>
+      <li class="fragment"><strong>Compute ≈ 6ND</strong> (2 fwd + 4 bwd); MFU tells you how much peak hardware you actually use.</li>
+      <li class="fragment"><strong>Over-training pays off in production</strong> — when inference dominates, train smaller on far more tokens.</li>
+    </ul></div>
+    <aside class="notes">
+      Recap by walking each bullet — these mirror the roadmap, closing the loop. If the audience leaves with these six, they can hold their own on any pretraining/scaling question. The deepest practical insight is the last two together: 6ND lets you budget, and the over-training instinct corrects naive Chinchilla for real-world inference cost.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Takeaways · the frontier</p>
+    <h2>Where the field is going</h2>
+    <ul>
+      <li class="fragment"><strong>Data and dynamics</strong> are the new frontier: dedup + learned mixtures (DoReMi), μP transfer, WSD schedules.</li>
+      <li class="fragment"><strong>Loss-spike control</strong>, the <strong>emergence "mirage"</strong> debate, <strong>contamination</strong>, and <strong>continued pretraining</strong> without forgetting.</li>
+    </ul>
+    <p class="fragment"><strong>Go deeper:</strong> <a href="https://arxiv.org/abs/2203.15556">Chinchilla (Hoffmann et al., 2022)</a> · <a href="https://www.harmdevries.com/post/model-size-vs-compute-overhead/">Harm de Vries — "Go smol or go home" (over-training math)</a>.</p>
+    <aside class="notes">
+      The future isn't "make it bigger" — that lever is mostly pulled. It's smarter data (dedup, learned mixtures), better dynamics (μP, WSD), and a cluster of open problems: loss spikes, the emergence debate, contamination, and continued pretraining without catastrophic forgetting. Two further-reading picks: the Chinchilla paper itself, and Harm de Vries's "Go smol or go home" post, which works through the over-training economics clearly.
+    </aside>
+  </section>
+
+  <section class="deck-title">
+    <div class="logo">∑</div>
+    <h2>That's pretraining &amp; scaling laws</h2>
+    <p class="subtitle">The next token is its own label · scale N and D together · C ≈ 6ND · over-train for production.</p>
+    <p class="keyhint"><kbd>S</kbd> speaker notes · <kbd>O</kbd> overview · <kbd>←</kbd><kbd>→</kbd> navigate · next up: <strong>07 · Fine-tuning &amp; PEFT</strong></p>
+    <aside class="notes">
+      Close it out. Repeat the one-liners: text labels itself, scale N and D together (~20:1), C ≈ 6ND for budgeting, and over-train when you'll serve at scale. Next module is fine-tuning and PEFT — how we take this base model and cheaply specialize it. Thanks, and press S if you want to revisit any of the deeper notes.
+    </aside>
+  </section>
+</section>
+
+    </div>
+  </div>
+
+  <!-- reveal.js core + plugins + mermaid (CDN), then shared deck runtime -->
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/math/math.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+  <script src="../assets/deck.js?v=2"></script>
+</body>
+</html>

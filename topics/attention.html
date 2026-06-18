@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Attention Mechanisms — Transformer Foundations</title>
+  <meta name="description" content="Scaled dot-product attention, multi-head, MQA/GQA/MLA, FlashAttention, sliding-window/sparse/linear attention, and attention sinks — with a live heatmap demo." />
+
+  <!-- Tailwind (CDN) for layout utilities -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>window.tailwind && (tailwind.config = { darkMode: "class" });</script>
+
+  <!-- KaTeX (math) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <!-- highlight.js themes (light default; dark toggled by site.js) -->
+  <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" />
+  <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" disabled />
+
+  <!-- Shared site styles -->
+  <link rel="stylesheet" href="../assets/site.css" />
+
+  <!-- FOUC guard: set theme before first paint -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("theme") ||
+          ((window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+        if (t === "dark") document.documentElement.classList.add("dark");
+        if (localStorage.getItem("sidebar") === "collapsed") document.documentElement.classList.add("sidebar-collapsed");
+        var l = document.getElementById("hljs-light"), d = document.getElementById("hljs-dark");
+        if (l) l.disabled = (t === "dark");
+        if (d) d.disabled = (t !== "dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="app">
+
+    <aside class="sidebar" id="sidebar">
+      <a class="sidebar-brand" href="../index.html">
+        <span class="logo">∑</span>
+        <span><b>LLM Foundations</b><span>Interview teaching series</span></span>
+      </a>
+
+      <a class="nav-link" href="../index.html"><span class="num">⌂</span> Home</a>
+
+      <div class="nav-group-title">Phase 1 · Foundations</div>
+      <a class="nav-link" href="foundations-intro.html"><span class="num">↪</span> Intro &amp; overview</a>
+      <a class="nav-link" href="tokenization.html"><span class="num">02</span> Tokenization &amp; Embeddings</a>
+      <a class="nav-link active" href="attention.html"><span class="num">04</span> Attention Mechanisms</a>
+      <a class="nav-link" href="transformers.html"><span class="num">03</span> Transformer Architecture</a>
+      <a class="nav-link" href="positional-encoding.html"><span class="num">05</span> Positional Encoding</a>
+      <div class="nav-group-title">Phase 2 · Training &amp; Alignment</div>
+      <a class="nav-link" href="../decks/pretraining.html"><span class="num">06</span> Pretraining &amp; Scaling</a>
+      <a class="nav-link" href="../decks/finetuning-peft.html"><span class="num">07</span> Fine-tuning &amp; PEFT</a>
+      <a class="nav-link" href="../decks/rlhf.html"><span class="num">08</span> RLHF &amp; Alignment</a>
+      <a class="nav-link" href="../decks/synthetic-data.html"><span class="num">31</span> Synthetic Data</a>
+
+      <div class="nav-group-title">Phase 3 · Reasoning &amp; Inference</div>
+      <span class="nav-link soon"><span class="num">28</span> Reasoning Models</span>
+      <span class="nav-link soon"><span class="num">11</span> Inference &amp; Serving</span>
+      <span class="nav-link soon"><span class="num">32</span> Small / Edge Models</span>
+
+      <div class="nav-group-title">Phase 4 · Building Apps</div>
+      <span class="nav-link soon"><span class="num">29</span> Context Engineering</span>
+      <span class="nav-link soon"><span class="num">13</span> RAG</span>
+      <span class="nav-link soon"><span class="num">14</span> Vector Databases</span>
+      <span class="nav-link soon"><span class="num">15</span> Agents &amp; Tools</span>
+      <span class="nav-link soon"><span class="num">16</span> MCP</span>
+      <span class="nav-link soon"><span class="num">36</span> GenAI App Dev</span>
+
+      <div class="nav-group-title">Phase 6 · Architectures</div>
+      <span class="nav-link soon"><span class="num">30</span> Beyond Transformers</span>
+    </aside>
+    <div class="scrim" id="scrim"></div>
+
+    <div class="main">
+      <div class="topbar">
+        <button class="icon-btn" data-sidebar-toggle aria-label="Open menu">☰</button>
+        <strong style="color:var(--text-strong)">Attention Mechanisms</strong>
+        <button class="icon-btn" data-theme-toggle style="margin-left:auto" aria-label="Toggle theme">☾</button>
+      </div>
+      <button class="icon-btn theme-fab" data-theme-toggle aria-label="Toggle theme">☾</button>
+
+      <main class="content lecture">
+
+        <p style="font-size:13px;font-weight:700;letter-spacing:.04em;color:var(--accent);text-transform:uppercase;margin:0 0 6px;">
+          Phase 1 · Foundations · Module 04
+        </p>
+        <h1>Attention Mechanisms</h1>
+        <p class="subtitle">
+          The soft, content-based lookup at the heart of every Transformer block — from scaled dot-product attention to
+          the efficiency variants (GQA, MLA, FlashAttention, sparse/linear) that make modern LLMs affordable.
+        </p>
+
+        <div class="callout roadmap">
+          <div class="callout-title">📋 What you’ll learn <span style="font-weight:500;color:var(--muted);font-size:.9rem;">(~15 min)</span></div>
+          <p style="margin:.2em 0 0;">Q/K/V and scaled dot-product · why the √d<sub>k</sub> matters · multi-head &amp; causal masking · the KV cache and
+          MQA/GQA/MLA · FlashAttention · sliding-window / sparse / linear attention · attention sinks · a live heatmap
+          demo · the math and the n²/KV-cache cost story.</p>
+        </div>
+
+        <h2><span class="sec-num">1.</span> Intuition</h2>
+        <p>
+          <strong>Attention</strong> is a spotlight with a search engine attached. To understand the word <em>it</em> in
+          “the trophy didn’t fit in the suitcase because <em>it</em> was too big,” the model lets <em>it</em> issue a
+          <em>query</em> (“what am I referring to?”), every other word advertises a <em>key</em> (“I’m a noun, I’m the
+          subject…”), and the words whose keys best match the query get the most spotlight — their <em>values</em> are
+          blended into the new representation of <em>it</em>. Unlike an RNN, this gives an <strong>O(1) path</strong>
+          between any two tokens and is fully parallel at training time.
+        </p>
+
+        <h2><span class="sec-num">2.</span> How it works</h2>
+        <p>
+          From each token’s hidden vector we compute three projections via learned matrices: a <strong>query</strong>
+          <code>Q = xW_Q</code>, a <strong>key</strong> <code>K = xW_K</code>, and a <strong>value</strong>
+          <code>V = xW_V</code>. Then, for every pair of tokens, we score how much token <em>i</em>’s query matches token
+          <em>j</em>’s key with a dot product, scale it, softmax across <em>j</em> so the weights for each query sum to 1,
+          and use those weights to take a weighted average of the values:
+        </p>
+        <div class="diagram">
+          <div class="flow">
+            <span class="box ghost">x<small>(n × d)</small></span>
+            <span class="arrow">→</span>
+            <span class="box accent">Q, K, V<small>= xW_Q, xW_K, xW_V</small></span>
+            <span class="arrow">→</span>
+            <span class="box">scores = QKᵀ/√d<small>(n × n)</small></span>
+            <span class="arrow">→</span>
+            <span class="box">+ mask<small>causal / padding</small></span>
+            <span class="arrow">→</span>
+            <span class="box accent">softmax<small>rows sum to 1</small></span>
+            <span class="arrow">→</span>
+            <span class="box">× V</span>
+            <span class="arrow">→</span>
+            <span class="box green">out · W_O</span>
+          </div>
+          <div class="caption">Figure 2 — Scaled dot-product attention. The only quadratic part is the <code>n × n</code> score matrix.</div>
+        </div>
+        <p>
+          <strong>Multi-head</strong> attention runs <code>h</code> of these in parallel on <code>d/h</code>-dimensional
+          slices, so different heads can specialize (one tracks the previous token, one tracks the subject noun, one tracks
+          matching brackets…), then concatenates the results and mixes them with an output projection <code>W_O</code>.
+          For autoregressive (GPT-style) generation we apply a <strong>causal mask</strong> so token <em>i</em> can only
+          attend to tokens <em>≤ i</em> — the future is hidden. Below, a 6-token toy heatmap; switch the pattern to see
+          different head behaviors:
+        </p>
+        <div class="widget" id="attn-widget">
+          <label for="attn-pattern">Attention pattern</label>
+          <select id="attn-pattern" style="max-width:340px;">
+            <option value="causal">Causal average (look back uniformly)</option>
+            <option value="local">Local / positional (attend to neighbours)</option>
+            <option value="previous">Previous-token head</option>
+            <option value="induction">Induction head (copy after a match)</option>
+          </select>
+          <div id="attn-grid" style="margin-top:14px;"></div>
+          <div class="tok-stats">Rows = queries (the token doing the looking), columns = keys (tokens being looked at). Darker = more attention. Causal masking keeps the upper triangle empty.</div>
+        </div>
+
+        <h2><span class="sec-num">3.</span> The approaches — full landscape</h2>
+        <p class="lead">Attention from the 2017 core through the efficiency variants every modern LLM uses, classic → SOTA.</p>
+
+        <div class="approach">
+          <h4>RNN / LSTM sequence models <span class="tag classic">what attention replaced</span></h4>
+          <p><strong>What:</strong> the pre-2017 baseline. <strong>How:</strong> process tokens one at a time, carrying a hidden state. <strong>Why we left:</strong> strictly sequential (can’t parallelize over time), and the path between distant tokens is O(n), so long-range gradients vanish. Attention makes that path O(1) and fully parallel at training time.</p>
+          <p class="read-more"><a href="https://colah.github.io/posts/2015-08-Understanding-LSTMs/" target="_blank" rel="noopener noreferrer">Read more: Understanding LSTM Networks<span class="src"> · Christopher Olah</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>Scaled dot-product self-attention <span class="tag modern">core</span></h4>
+          <p><strong>What:</strong> the 2017 mechanism, <code>softmax(QKᵀ/√d_k)V</code>. <strong>How:</strong> content-based soft lookup over all positions (§2). <strong>Solves:</strong> O(1) path length, full parallelism, dynamic context-dependent mixing. <strong>Variants of <em>use</em>:</strong> <em>self</em>-attention (Q,K,V from the same sequence), <em>cross</em>-attention (queries from the decoder, keys/values from the encoder), and <em>causal/masked</em> attention (future hidden for generation).</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>Expressive, parallel, general</li><li>Exact, no approximation</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li>O(n²) compute &amp; memory in sequence length</li><li>KV cache grows with context at inference</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener noreferrer">Read more: The Illustrated Transformer<span class="src"> · Jay Alammar</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>Multi-Head Attention (MHA) <span class="tag modern">core</span></h4>
+          <p><strong>What:</strong> <code>h</code> attention heads on <code>d/h</code>-dim subspaces. <strong>How:</strong> split, attend per head in parallel, concat, project with <code>W_O</code>. <strong>Solves:</strong> lets the layer attend to multiple relationships at once (syntax, coreference, position) without extra parameters vs one big head. <strong>Trade-off:</strong> at inference each head keeps its own K and V → fat KV cache, which the next three variants attack.</p>
+          <p class="read-more"><a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener noreferrer">Read more: The Illustrated Transformer (multi-head)<span class="src"> · Jay Alammar</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>Multi-Query Attention (MQA) <span class="tag modern">inference</span></h4>
+          <p><strong>What:</strong> all query heads share <em>one</em> K and one V head (Shazeer, 2019). <strong>How:</strong> keep <code>h</code> query heads but a single K/V. <strong>Solves:</strong> shrinks the KV cache and memory-bandwidth pressure ~<code>h×</code>, which dominates decode latency. <strong>Cost:</strong> some quality loss and training instability.</p>
+          <p class="read-more"><a href="https://tinkerd.net/blog/machine-learning/multi-query-attention/" target="_blank" rel="noopener noreferrer">Read more: Multi-Query Attention, explained<span class="src"> · Tinkerd</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>Grouped-Query Attention (GQA) <span class="tag sota">the sweet spot</span></h4>
+          <p><strong>What:</strong> interpolation between MHA and MQA (Ainslie, 2023) — <code>G</code> groups of query heads share a K/V head. <strong>How:</strong> <code>G=h</code> is MHA, <code>G=1</code> is MQA; LLaMA-2/3, Mistral use <code>G≈8</code>. <strong>Solves:</strong> ~MQA inference cost with ~MHA quality; you can even <em>uptrain</em> an existing MHA checkpoint into GQA. This is the modern default.</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>Big KV-cache savings, tiny quality hit</li><li>Convertible from MHA</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li>One more hyperparameter (group count)</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://sebastianraschka.com/llms-from-scratch/ch04/04_gqa/" target="_blank" rel="noopener noreferrer">Read more: Grouped-Query Attention<span class="src"> · Sebastian Raschka</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>Multi-head Latent Attention (MLA) <span class="tag sota">frontier</span></h4>
+          <p><strong>What:</strong> compress K/V into a low-rank <em>latent</em> vector (DeepSeek-V2/V3, 2024). <strong>How:</strong> instead of caching full K and V per head, cache a small shared latent that is projected up at use time (with a RoPE-compatible split). <strong>Solves:</strong> shrinks the KV cache even further than GQA while <em>improving</em> quality — a different axis (low-rank) than GQA’s head-sharing.</p>
+          <p class="read-more"><a href="https://sebastianraschka.com/llm-architecture-gallery/mla/" target="_blank" rel="noopener noreferrer">Read more: Multi-Head Latent Attention<span class="src"> · Sebastian Raschka</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>FlashAttention <span class="tag sota">how, not what</span></h4>
+          <p><strong>What:</strong> an <em>exact</em> attention algorithm that’s IO-aware (Dao, 2022; v2 2023; v3 2024). <strong>How:</strong> tile Q/K/V into blocks that fit in fast on-chip SRAM and use an <strong>online (streaming) softmax</strong> — running max and running sum — so the full <code>n×n</code> matrix is <em>never materialized</em> in slow HBM. <strong>Solves:</strong> the memory bottleneck — same math, O(n) memory, large wall-clock speedups; v3 adds FP8 and Hopper async. Crucially, it changes <em>computation</em>, not the result.</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>Exact result, much faster &amp; lighter</li><li>Enables long-context training</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li>Still O(n²) <em>compute</em></li><li>Hardware-specific kernels</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://hazyresearch.stanford.edu/blog/2023-01-12-flashattention-long-sequences" target="_blank" rel="noopener noreferrer">Read more: FlashAttention for long sequences<span class="src"> · Stanford Hazy Research</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>Sliding-window / local attention <span class="tag modern">long context</span></h4>
+          <p><strong>What:</strong> each token attends only to the last <code>w</code> tokens (Longformer 2020; Mistral 2023). <strong>How:</strong> a fixed local window; stacking <code>L</code> layers gives an effective receptive field of ~<code>L·w</code>. <strong>Solves:</strong> linear cost in <code>n</code> and a bounded (rolling) KV cache. <strong>Cost:</strong> sacrifices direct long-range links within a layer — often mixed with occasional full/global layers to recover them.</p>
+          <p class="read-more"><a href="https://huggingface.co/docs/transformers/model_doc/longformer" target="_blank" rel="noopener noreferrer">Read more: Longformer: local windowed attention<span class="src"> · Hugging Face</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>Sparse attention <span class="tag modern">long context</span></h4>
+          <p><strong>What:</strong> attend to a structured subset — local windows + a few global tokens + strided/random blocks (Longformer, BigBird), or learned/dynamic block selection (Native Sparse Attention, MoBA, 2025). <strong>How:</strong> a sparsity pattern (fixed or routed) cuts the score matrix. <strong>Solves:</strong> sub-quadratic long-context; the 2025 trainable variants get real speedups <em>and</em> keep quality, unlike older bolt-on sparsity.</p>
+          <p class="read-more"><a href="https://huggingface.co/docs/transformers/model_doc/longformer" target="_blank" rel="noopener noreferrer">Read more: Longformer: sparse attention<span class="src"> · Hugging Face</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>Linear / kernel attention <span class="tag modern">O(n)</span></h4>
+          <p><strong>What:</strong> replace <code>softmax(QKᵀ)V</code> with a kernel feature map so you can reorder the matmuls (Performer, Linear Transformers, Linformer, Reformer). <strong>How:</strong> compute <code>φ(K)ᵀV</code> first → O(n·d²) and constant-memory recurrence at decode. <strong>Solves:</strong> true linear complexity for very long sequences. <strong>Cost:</strong> the softmax approximation tends to underperform exact attention on hard recall/associative tasks.</p>
+          <p class="read-more"><a href="https://linear-transformers.com/" target="_blank" rel="noopener noreferrer">Read more: Transformers are RNNs (linear attention)<span class="src"> · project page</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>StreamingLLM / attention sinks <span class="tag sota">streaming</span></h4>
+          <p><strong>What:</strong> keep a few initial “sink” tokens plus a rolling recent window (Xiao, 2023). <strong>How:</strong> models dump excess attention onto the first tokens (because softmax must sum to 1); preserving those “sinks” while sliding the rest lets generation run over effectively unbounded streams. <strong>Solves:</strong> the quality collapse when you naively evict the earliest tokens from the KV cache.</p>
+          <p class="read-more"><a href="https://github.com/mit-han-lab/streaming-llm" target="_blank" rel="noopener noreferrer">Read more: StreamingLLM &amp; attention sinks<span class="src"> · MIT Han Lab · GitHub</span></a></p>
+        </div>
+
+        <h2><span class="sec-num">4.</span> Compare the variants</h2>
+        <div class="table-wrap">
+          <table class="cmp">
+            <thead><tr><th>Approach</th><th>Core idea</th><th>Pros</th><th>Cons</th><th>Complexity</th><th>When to use</th><th>Maturity</th></tr></thead>
+            <tbody>
+              <tr><td>MHA</td><td>h full heads</td><td>Most expressive</td><td>Fat KV cache</td><td>O(n²), big cache</td><td>Quality-first / small models</td><td>Mature</td></tr>
+              <tr><td>MQA</td><td>Share 1 K/V head</td><td>Tiny cache</td><td>Quality drop</td><td>O(n²), small cache</td><td>Aggressive inference</td><td>Mature</td></tr>
+              <tr><td><strong>GQA</strong></td><td>G grouped K/V heads</td><td>MHA quality, MQA speed</td><td>Extra hyperparam</td><td>O(n²), small cache</td><td><strong>Modern default</strong></td><td><strong>SOTA</strong></td></tr>
+              <tr><td>MLA</td><td>Low-rank K/V latent</td><td>Smallest cache, good quality</td><td>More complex</td><td>O(n²), tiny cache</td><td>Frontier long-context</td><td>Emerging</td></tr>
+              <tr><td>FlashAttention</td><td>Tiled exact + online softmax</td><td>Exact, fast, O(n) mem</td><td>HW-specific kernel</td><td>O(n²) compute, O(n) mem</td><td>Always (it’s a kernel)</td><td>SOTA</td></tr>
+              <tr><td>Sliding-window</td><td>Local window w</td><td>Linear, bounded cache</td><td>Loses far links/layer</td><td>O(n·w)</td><td>Long context, streaming</td><td>Mature</td></tr>
+              <tr><td>Sparse</td><td>Local+global / routed blocks</td><td>Sub-quadratic</td><td>Pattern design</td><td>~O(n·√n) / O(n·k)</td><td>Very long docs</td><td>Modern→Emerging</td></tr>
+              <tr><td>Linear / kernel</td><td>Kernel feature map</td><td>True O(n), const memory</td><td>Weaker recall</td><td>O(n·d²)</td><td>Extreme length, efficiency</td><td>Research</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2><span class="sec-num">5.</span> The math</h2>
+        <h4>Scaled dot-product attention</h4>
+        $$ \mathrm{Attention}(Q,K,V) = \mathrm{softmax}\!\left( \frac{QK^{\top}}{\sqrt{d_k}} + M \right) V $$
+        <p class="eqnote"><b>\(Q\in\mathbb{R}^{n\times d_k}\)</b> queries, <b>\(K\in\mathbb{R}^{n\times d_k}\)</b> keys, <b>\(V\in\mathbb{R}^{n\times d_v}\)</b> values, <b>n</b> = sequence length. <b>\(QK^{\top}\)</b> is the \(n\times n\) score matrix (entry \(ij\) = relevance of token \(j\) to token \(i\)). <b>\(M\)</b> is the mask (\(0\) where allowed, \(-\infty\) where forbidden). Softmax is taken over each row.</p>
+        <h4>Why divide by \(\sqrt{d_k}\)?</h4>
+        $$ q\cdot k = \sum_{i=1}^{d_k} q_i k_i \quad\Rightarrow\quad \mathrm{Var}(q\cdot k) = d_k $$
+        <p class="eqnote">With unit-variance components the dot product has variance <b>\(d_k\)</b>; for large head dims the logits get huge, softmax saturates into a near-one-hot spike, and gradients vanish. Dividing by <b>\(\sqrt{d_k}\)</b> normalizes the standard deviation back to \(1\). Omit it and deep models barely train.</p>
+        <h4>Numerically stable (online) softmax</h4>
+        $$ \mathrm{softmax}(z)_i = \frac{e^{\,z_i - \max_j z_j}}{\sum_{k} e^{\,z_k - \max_j z_j}} $$
+        <p class="eqnote">Subtracting the row max prevents overflow. The running max + running sum is exactly what FlashAttention computes incrementally so it never stores a full row.</p>
+        <h4>Multi-head attention</h4>
+        $$ \mathrm{MHA}(x) = \big[\,\mathrm{head}_1 \,\Vert\, \cdots \,\Vert\, \mathrm{head}_h\,\big]\,W_O,\qquad \mathrm{head}_i = \mathrm{Attention}(xW_Q^i,\,xW_K^i,\,xW_V^i) $$
+        <p class="eqnote"><b>h</b> heads, each of dim <b>\(d_k=d/h\)</b>; <b>\(\Vert\)</b> is concatenation; <b>\(W_O\in\mathbb{R}^{d\times d}\)</b> mixes heads. Total Q/K/V/O parameters: \(4d^2\) (independent of \(h\)).</p>
+        <h4>KV-cache size (the long-context memory wall)</h4>
+        $$ \text{KV bytes} = 2 \cdot L \cdot n_{kv} \cdot d_{\text{head}} \cdot n_{\text{seq}} \cdot b_{\text{batch}} \cdot \text{bytes} $$
+        <p class="eqnote">Factor <b>2</b> = keys + values; <b>L</b> layers; <b>\(n_{kv}\)</b> = KV heads (← exactly what MQA/GQA/MLA shrink); <b>\(n_{\text{seq}}\)</b> = context length. It grows linearly with context and dominates inference memory.</p>
+
+        <h2><span class="sec-num">6.</span> In code</h2>
+        <p><strong>Scaled dot-product attention with a causal mask</strong> (PyTorch):</p>
+        <div class="codeblock"><span class="code-label">python</span><pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def attention(Q, K, V, mask=None):
+    # Q, K, V: (batch, heads, seq, d_head)
+    d_head = Q.size(-1)
+    scores = (Q @ K.transpose(-2, -1)) / d_head ** 0.5      # (b, h, n, n)
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, float('-inf'))  # forbidden -> -inf
+    weights = F.softmax(scores, dim=-1)                     # each query row sums to 1
+    return weights @ V                                      # (b, h, n, d_head)
+
+# causal mask: query i may attend only to keys j ≤ i
+n = 5
+causal = torch.tril(torch.ones(n, n)).bool()               # lower-triangular True
+</code></pre></div>
+        <p><strong>Splitting into heads</strong> — reshape <code>(b, n, d)</code> into <code>(b, h, n, d/h)</code>:</p>
+        <div class="codeblock"><span class="code-label">python</span><pre><code class="language-python">def split_heads(x, heads):
+    b, n, d = x.shape
+    # (b, n, d) -> (b, n, h, d/h) -> (b, h, n, d/h) so each head attends in parallel
+    return x.view(b, n, heads, d // heads).transpose(1, 2)
+</code></pre></div>
+
+        <h2><span class="sec-num">7.</span> Worked example — attention by hand</h2>
+        <p><strong>Causal attention for the last token of “the cat sat.”</strong> “sat” issues a query and scores it against
+        the keys of all tokens it can see (1, 2, 3). Suppose the <em>scaled</em> scores (after \(QK^\top/\sqrt{d_k}\)) come out as:</p>
+        $$ s = [\,s_{\text{the}},\, s_{\text{cat}},\, s_{\text{sat}}\,] = [\,2.0,\; 1.0,\; 0.0\,] $$
+        <p><strong>Softmax</strong> turns scores into weights (using \(e^{2}=7.389,\ e^{1}=2.718,\ e^{0}=1\), sum \(=11.107\)):</p>
+        $$ \alpha = \left[\tfrac{7.389}{11.107},\ \tfrac{2.718}{11.107},\ \tfrac{1.000}{11.107}\right] \approx [\,0.665,\; 0.245,\; 0.090\,] $$
+        <p><strong>Mix the values</strong> with \(v_{\text{the}}=[1,0]\), \(v_{\text{cat}}=[0,1]\), \(v_{\text{sat}}=[1,1]\):</p>
+        $$ \mathbf{o} = 0.665\,[1,0] + 0.245\,[0,1] + 0.090\,[1,1] = [\,0.755,\; 0.335\,] $$
+        <p class="eqnote">All three weights sum to 1, the masked future contributes nothing, and the output is a blend dominated by “the.” That vector replaces “sat”’s representation and flows on to the FFN and the next layer.</p>
+
+        <h2><span class="sec-num">8.</span> When to use what — choosing a variant</h2>
+        <ul>
+          <li>Always use a <strong>FlashAttention</strong> kernel — it’s exact, just faster, and orthogonal to the choices below.</li>
+          <li>Default modern stack → <strong>GQA</strong> (great quality/throughput balance); go <strong>MLA</strong> for the smallest KV cache at the frontier.</li>
+          <li>Need very long context cheaply → <strong>sliding-window</strong> (+ a few global/full layers) or <strong>sparse</strong> (MoBA / NSA).</li>
+          <li>Unbounded streaming chat → <strong>StreamingLLM</strong> sinks + rolling window.</li>
+          <li>Extreme length, willing to trade recall → linear/kernel attention or an SSM hybrid.</li>
+        </ul>
+
+        <h2><span class="sec-num">9.</span> Common pitfalls &amp; misconceptions</h2>
+        <ul>
+          <li><strong>“The √d<sub>k</sub> is cosmetic.”</strong> Remove it and large-head models barely train — softmax saturates and gradients die.</li>
+          <li><strong>“FlashAttention approximates attention.”</strong> It’s <em>exact</em>. It changes memory traffic, not the result. It’s also still O(n²) <em>compute</em>.</li>
+          <li><strong>“Attention weights explain the model.”</strong> Contested — high attention ≠ causal importance; values and later layers matter, and attention can be manipulated without changing outputs.</li>
+          <li><strong>“GQA/MQA save FLOPs.”</strong> Their main win is <em>memory bandwidth / KV-cache size</em> at decode, not raw compute.</li>
+          <li><strong>“Forgetting the padding mask is harmless.”</strong> Unmasked PAD tokens leak into attention and the loss, silently degrading quality.</li>
+        </ul>
+
+        <h2><span class="sec-num">10.</span> 🚀 What’s new in the industry</h2>
+        <div class="callout whatsnew">
+          <div class="callout-title">🚀 Fighting the n² and the KV-cache wall</div>
+          <ul style="margin-bottom:.3em;">
+            <li><strong>Exact-but-faster.</strong> FlashAttention-2/3 push attention toward GPU peak FLOPs with better parallelism, async scheduling, and FP8 — long context became trainable, not just theoretical.</li>
+            <li><strong>Shrinking the KV cache.</strong> GQA is now standard; <strong>MLA</strong> (DeepSeek-V2/V3) compresses K/V into a low-rank latent; <strong>YOCO</strong> caches KV essentially once across layers.</li>
+            <li><strong>Trainable sparse attention.</strong> 2025’s <strong>Native Sparse Attention</strong> and <strong>MoBA</strong> make sparsity native to training (not a bolt-on), getting real long-context speedups without quality loss.</li>
+          </ul>
+        </div>
+        <details class="fold">
+          <summary>📄 Papers — attention &amp; efficiency (verified links)</summary>
+          <div class="fold-body">
+            <div class="paper"><a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a> <span class="meta">— Vaswani et al., 2017. The Transformer.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/1911.02150">Fast Transformer Decoding: One Write-Head is All You Need (MQA)</a> <span class="meta">— Shazeer, 2019.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2205.14135">FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness</a> <span class="meta">— Dao et al., 2022.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2307.08691">FlashAttention-2: Better Parallelism and Work Partitioning</a> <span class="meta">— Dao, 2023.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2407.08608">FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision</a> <span class="meta">— Shah et al., 2024.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2305.13245">GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints</a> <span class="meta">— Ainslie et al., 2023.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2405.04434">DeepSeek-V2 (introduces Multi-head Latent Attention, MLA)</a> <span class="meta">— DeepSeek-AI, 2024.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2405.05254">You Only Cache Once (YOCO): Decoder-Decoder Architectures</a> <span class="meta">— Sun et al., 2024.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2309.17453">Efficient Streaming Language Models with Attention Sinks (StreamingLLM)</a> <span class="meta">— Xiao et al., 2023.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2310.06825">Mistral 7B (sliding-window attention)</a> <span class="meta">— Jiang et al., 2023.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2004.05150">Longformer: The Long-Document Transformer</a> <span class="meta">— Beltagy et al., 2020.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2006.16236">Transformers are RNNs: Linear Attention</a> <span class="meta">— Katharopoulos et al., 2020.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2009.14794">Rethinking Attention with Performers</a> <span class="meta">— Choromanski et al., 2020.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2502.11089">Native Sparse Attention</a> <span class="meta">— Yuan et al., 2025.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2502.13189">MoBA: Mixture of Block Attention for Long-Context LLMs</a> <span class="meta">— Lu et al., 2025.</span></div>
+          </div>
+        </details>
+
+        <h2><span class="sec-num">11.</span> Practice</h2>
+        <p>Drill the full bank: <a href="../../interview-prep/04-attention-mechanisms.md">04 · Attention Mechanisms</a>. A starter mix:</p>
+        <ul class="qlist">
+          <li>What problem does the attention mechanism solve that earlier RNN/LSTM-based models struggled with? <span class="diff easy">Easy</span></li>
+          <li>Write out the scaled dot-product attention formula and explain each term. <span class="diff easy">Easy</span></li>
+          <li>Why do we divide the attention scores by √d<sub>k</sub> rather than by d<sub>k</sub>? What goes wrong if you remove it? <span class="diff med">Med</span></li>
+          <li>What is multi-head attention, and why is it preferred over a single head of the same total dimension? <span class="diff easy">Easy</span></li>
+          <li>What core idea makes FlashAttention faster and more memory-efficient than a naive implementation? <span class="diff med">Med</span></li>
+          <li>FlashAttention never materializes the full n×n matrix. How does it compute softmax correctly without holding all scores at once? <span class="diff hard">Hard</span></li>
+          <li>What is the KV cache, and what inference inefficiency does it eliminate during autoregressive generation? <span class="diff easy">Easy</span></li>
+          <li>What is Grouped-Query Attention (GQA), and how does it interpolate between MHA and MQA? <span class="diff med">Med</span></li>
+          <li>What is Multi-head Latent Attention (MLA), and how does compressing K/V into a low-rank latent differ from GQA? <span class="diff hard">Hard</span></li>
+          <li>You see attention concentrate on the first token. What is the “attention sink” phenomenon, and how does StreamingLLM exploit it? <span class="diff med">Med</span></li>
+        </ul>
+
+        <h2><span class="sec-num">12.</span> Key takeaways</h2>
+        <div class="takeaways">
+          <ul>
+            <li><strong>Attention = <code>softmax(QKᵀ/√d)·V</code></strong> — a soft, content-based, fully-parallel lookup with an O(1) path between any two tokens. The √d keeps softmax sane.</li>
+            <li><strong>Multi-head</strong> lets one layer track many relationships at once; <strong>causal masking</strong> hides the future for generation.</li>
+            <li><strong>The whole efficiency story is fighting n² and the KV cache:</strong> FlashAttention (exact, IO-aware), MQA/GQA/MLA (smaller cache), sliding-window/sparse/linear (sub-quadratic).</li>
+            <li><strong>GQA is the modern default</strong>; MLA pushes the cache smaller still.</li>
+            <li><strong>Attention sinks</strong> explain odd first-token attention and enable streaming.</li>
+          </ul>
+        </div>
+        <p><strong>Go deeper:</strong> <a href="https://jalammar.github.io/illustrated-transformer/">The Illustrated Transformer</a> · <a href="https://github.com/karpathy/nanoGPT">nanoGPT</a>. Next: <a href="transformers.html">Transformer Architecture →</a></p>
+
+        <nav class="page-footer">
+          <a class="footlink home" href="../index.html"><span class="dir">⌂</span><span class="ttl">Home</span></a>
+          <a class="footlink prev" href="tokenization.html"><span class="dir">← Tokenization</span><span class="ttl">02 · Tokenization</span></a>
+          <a class="footlink next" href="transformers.html"><span class="dir">Next: Transformers →</span><span class="ttl">03 · Transformer Architecture</span></a>
+        </nav>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- CDN libs + shared JS (order matters: libs before site.js) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../assets/site.js"></script>
+  <!-- Page widget: attention heatmap (vanilla, self-contained) -->
+  <script>
+    (function () {
+      "use strict";
+      var TOKENS = ["The", "cat", "sat", "on", "the", "mat"];
+      function buildMatrix(kind) {
+        var n = TOKENS.length, M = [];
+        for (var i = 0; i < n; i++) {
+          var row = new Array(n).fill(0), j;
+          if (kind === "causal") {
+            for (j = 0; j <= i; j++) row[j] = 1 / (i + 1);
+          } else if (kind === "local") {
+            var sum = 0;
+            for (j = 0; j <= i; j++) { var w = Math.exp(-Math.abs(i - j)); row[j] = w; sum += w; }
+            for (j = 0; j <= i; j++) row[j] /= sum;
+          } else if (kind === "previous") {
+            if (i === 0) row[0] = 1; else row[i - 1] = 1;
+          } else if (kind === "induction") {
+            for (j = 0; j <= i; j++) row[j] = 0;
+            if (i === 0) { row[0] = 1; }
+            else if (TOKENS[i].toLowerCase() === "the" && i > 0) { row[1] = 0.8; row[i] = 0.2; }
+            else { row[i] = 0.7; if (i > 0) row[i - 1] = 0.3; }
+          }
+          M.push(row);
+        }
+        return M;
+      }
+      function cell(text, cls, header) {
+        var d = document.createElement("div");
+        d.className = cls; d.textContent = text;
+        if (header) { d.style.textAlign = "center"; d.style.alignSelf = "end"; }
+        return d;
+      }
+      function renderHeatmap() {
+        var grid = document.getElementById("attn-grid"), sel = document.getElementById("attn-pattern");
+        if (!grid || !sel) return;
+        var M = buildMatrix(sel.value), n = TOKENS.length;
+        grid.style.display = "grid";
+        grid.style.gridTemplateColumns = "64px repeat(" + n + ", 1fr)";
+        grid.style.gap = "3px"; grid.style.maxWidth = "460px"; grid.innerHTML = "";
+        grid.appendChild(cell("", "attn-row-label"));
+        TOKENS.forEach(function (t) { grid.appendChild(cell(t, "attn-axis", true)); });
+        for (var i = 0; i < n; i++) {
+          grid.appendChild(cell(TOKENS[i], "attn-row-label"));
+          for (var j = 0; j < n; j++) {
+            var w = M[i][j], c = document.createElement("div");
+            c.className = "attn-cell";
+            var a = Math.min(1, w);
+            c.style.background = "rgba(79,70,229," + (0.08 + a * 0.92) + ")";
+            if (w === 0) c.style.background = "var(--surface-2)";
+            c.style.color = a > 0.5 ? "#fff" : "var(--muted)";
+            c.textContent = w > 0.001 ? w.toFixed(2) : "";
+            c.title = '"' + TOKENS[i] + '" → "' + TOKENS[j] + '": ' + w.toFixed(3);
+            grid.appendChild(c);
+          }
+        }
+      }
+      var attnSel = document.getElementById("attn-pattern");
+      if (attnSel) { attnSel.addEventListener("change", renderHeatmap); renderHeatmap(); }
+    })();
+  </script>
+</body>
+</html>

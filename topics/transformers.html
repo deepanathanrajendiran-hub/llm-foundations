@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Transformer Architecture — Transformer Foundations</title>
+  <meta name="description" content="The Transformer block (attention + FFN + residual + norm), pre-norm/RMSNorm/SwiGLU, BERT vs GPT vs T5, parameter counting and Chinchilla scaling." />
+
+  <!-- Tailwind (CDN) for layout utilities -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>window.tailwind && (tailwind.config = { darkMode: "class" });</script>
+
+  <!-- KaTeX (math) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <!-- highlight.js themes (light default; dark toggled by site.js) -->
+  <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" />
+  <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" disabled />
+
+  <!-- Shared site styles -->
+  <link rel="stylesheet" href="../assets/site.css" />
+
+  <!-- FOUC guard: set theme before first paint -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("theme") ||
+          ((window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+        if (t === "dark") document.documentElement.classList.add("dark");
+        if (localStorage.getItem("sidebar") === "collapsed") document.documentElement.classList.add("sidebar-collapsed");
+        var l = document.getElementById("hljs-light"), d = document.getElementById("hljs-dark");
+        if (l) l.disabled = (t === "dark");
+        if (d) d.disabled = (t !== "dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="app">
+
+    <aside class="sidebar" id="sidebar">
+      <a class="sidebar-brand" href="../index.html">
+        <span class="logo">∑</span>
+        <span><b>LLM Foundations</b><span>Interview teaching series</span></span>
+      </a>
+
+      <a class="nav-link" href="../index.html"><span class="num">⌂</span> Home</a>
+
+      <div class="nav-group-title">Phase 1 · Foundations</div>
+      <a class="nav-link" href="foundations-intro.html"><span class="num">↪</span> Intro &amp; overview</a>
+      <a class="nav-link" href="tokenization.html"><span class="num">02</span> Tokenization &amp; Embeddings</a>
+      <a class="nav-link" href="attention.html"><span class="num">04</span> Attention Mechanisms</a>
+      <a class="nav-link active" href="transformers.html"><span class="num">03</span> Transformer Architecture</a>
+      <a class="nav-link" href="positional-encoding.html"><span class="num">05</span> Positional Encoding</a>
+      <div class="nav-group-title">Phase 2 · Training &amp; Alignment</div>
+      <a class="nav-link" href="../decks/pretraining.html"><span class="num">06</span> Pretraining &amp; Scaling</a>
+      <a class="nav-link" href="../decks/finetuning-peft.html"><span class="num">07</span> Fine-tuning &amp; PEFT</a>
+      <a class="nav-link" href="../decks/rlhf.html"><span class="num">08</span> RLHF &amp; Alignment</a>
+      <a class="nav-link" href="../decks/synthetic-data.html"><span class="num">31</span> Synthetic Data</a>
+
+      <div class="nav-group-title">Phase 3 · Reasoning &amp; Inference</div>
+      <span class="nav-link soon"><span class="num">28</span> Reasoning Models</span>
+      <span class="nav-link soon"><span class="num">11</span> Inference &amp; Serving</span>
+      <span class="nav-link soon"><span class="num">32</span> Small / Edge Models</span>
+
+      <div class="nav-group-title">Phase 4 · Building Apps</div>
+      <span class="nav-link soon"><span class="num">29</span> Context Engineering</span>
+      <span class="nav-link soon"><span class="num">13</span> RAG</span>
+      <span class="nav-link soon"><span class="num">14</span> Vector Databases</span>
+      <span class="nav-link soon"><span class="num">15</span> Agents &amp; Tools</span>
+      <span class="nav-link soon"><span class="num">16</span> MCP</span>
+      <span class="nav-link soon"><span class="num">36</span> GenAI App Dev</span>
+
+      <div class="nav-group-title">Phase 6 · Architectures</div>
+      <span class="nav-link soon"><span class="num">30</span> Beyond Transformers</span>
+    </aside>
+    <div class="scrim" id="scrim"></div>
+
+    <div class="main">
+      <div class="topbar">
+        <button class="icon-btn" data-sidebar-toggle aria-label="Open menu">☰</button>
+        <strong style="color:var(--text-strong)">Transformer Architecture</strong>
+        <button class="icon-btn" data-theme-toggle style="margin-left:auto" aria-label="Toggle theme">☾</button>
+      </div>
+      <button class="icon-btn theme-fab" data-theme-toggle aria-label="Toggle theme">☾</button>
+
+      <main class="content lecture">
+
+        <p style="font-size:13px;font-weight:700;letter-spacing:.04em;color:var(--accent);text-transform:uppercase;margin:0 0 6px;">
+          Phase 1 · Foundations · Module 03
+        </p>
+        <h1>Transformer Architecture</h1>
+        <p class="subtitle">
+          How attention, a feed-forward network, residual connections, and normalization stack into the model that
+          ate NLP — plus the design choices (pre-norm, RMSNorm, SwiGLU) and families (BERT / GPT / T5) you’ll be asked about.
+        </p>
+
+        <div class="callout roadmap">
+          <div class="callout-title">📋 What you’ll learn <span style="font-weight:500;color:var(--muted);font-size:.9rem;">(~13 min)</span></div>
+          <p style="margin:.2em 0 0;">The block (attention + FFN + residual + norm) · pre-norm vs post-norm · RMSNorm &amp; SwiGLU · the residual stream ·
+          encoder-only vs decoder-only vs encoder-decoder · parameter counting · depth vs width &amp; Chinchilla scaling.</p>
+        </div>
+
+        <h2><span class="sec-num">1.</span> Intuition</h2>
+        <p>
+          A Transformer block does two things: <strong>attention</strong> lets tokens <em>talk to each other</em> (mix
+          information across the sequence), and a <strong>feed-forward network</strong> lets each token <em>think on its
+          own</em> (transform its own vector). Wrap both in a residual connection (a gradient highway) and a normalization
+          step (to keep activations well-scaled), stack the block <code>L</code> times, and you have a model that — unlike
+          an RNN — trains fully in parallel and connects any two tokens in one step.
+        </p>
+
+        <h2><span class="sec-num">2.</span> How it works — the block, and stacking</h2>
+        <p>
+          A <strong>position-wise feed-forward network (FFN)</strong> — two linear layers with a nonlinearity, applied
+          identically and independently to every position — expands to ~4× width and back, doing most of the model’s
+          per-token computation (and holding ~⅔ of its parameters). Both sub-layers are wrapped in a
+          <strong>residual connection</strong> (<code>x + sublayer(x)</code>, which creates the “residual stream” gradients
+          flow through) and <strong>normalization</strong>. Modern models put the norm <em>inside</em> the residual branch
+          (“pre-norm”) for stable deep training. Stack <code>L</code> blocks, apply a final norm, and project back to
+          vocabulary logits. A <strong>decoder</strong> (GPT) uses causal masking; an <strong>encoder</strong> (BERT) is
+          bidirectional; an <strong>encoder-decoder</strong> (T5) adds a cross-attention sub-layer linking the two.
+        </p>
+        <div class="diagram">
+          <div class="vflow">
+            <span class="box ghost">input hidden states&nbsp; x</span>
+            <span class="arrow">→</span>
+            <span class="box">RMSNorm</span>
+            <span class="arrow">→</span>
+            <span class="box accent">Causal Multi-Head Attention</span>
+            <span class="arrow">→</span>
+            <span class="add-pill">⊕ add residual (x + attn)</span>
+            <span class="arrow">→</span>
+            <span class="box">RMSNorm</span>
+            <span class="arrow">→</span>
+            <span class="box green">Feed-Forward Network&nbsp; (SwiGLU)</span>
+            <span class="arrow">→</span>
+            <span class="add-pill">⊕ add residual</span>
+            <span class="arrow">→</span>
+            <span class="box ghost">output&nbsp; →&nbsp; next block</span>
+          </div>
+          <div class="repeat-note">repeat × L layers, then final RMSNorm → unembed → softmax</div>
+          <div class="caption">Figure 3 — A modern pre-norm decoder block (LLaMA-style). The original 2017 design used post-norm + ReLU FFN + sinusoidal position.</div>
+        </div>
+
+        <h2><span class="sec-num">3.</span> The approaches — families &amp; block design</h2>
+        <div class="approach">
+          <h4>Encoder-only (BERT) <span class="tag classic">understanding</span></h4>
+          <p><strong>What:</strong> bidirectional encoder, pretrained with masked-language-modeling. <strong>Solves:</strong> rich bidirectional representations for classification, NER, retrieval. <strong>Cost:</strong> can’t generate open-ended text (sees the whole input at once, no left-to-right factorization).</p>
+          <p class="read-more"><a href="https://jalammar.github.io/illustrated-bert/" target="_blank" rel="noopener noreferrer">Read more: The Illustrated BERT<span class="src"> · Jay Alammar</span></a></p>
+        </div>
+        <div class="approach">
+          <h4>Decoder-only (GPT) <span class="tag sota">dominant for generation</span></h4>
+          <p><strong>What:</strong> causal decoder, pretrained with next-token prediction. <strong>Solves:</strong> generation + in-context learning; one simple objective scales beautifully (GPT-2/3 → today). The default for modern LLMs.</p>
+          <p class="read-more"><a href="https://jalammar.github.io/illustrated-gpt2/" target="_blank" rel="noopener noreferrer">Read more: The Illustrated GPT-2<span class="src"> · Jay Alammar</span></a></p>
+        </div>
+        <div class="approach">
+          <h4>Encoder-decoder (T5) <span class="tag modern">seq2seq</span></h4>
+          <p><strong>What:</strong> encoder reads input, decoder generates output, joined by cross-attention; everything framed as text-to-text. <strong>Solves:</strong> translation/summarization where a clean input→output split helps. <strong>Cost:</strong> more complex; for general chat, decoder-only won.</p>
+          <p class="read-more"><a href="https://huggingface.co/docs/transformers/model_doc/t5" target="_blank" rel="noopener noreferrer">Read more: T5 (encoder-decoder) docs<span class="src"> · Hugging Face</span></a></p>
+        </div>
+        <div class="approach">
+          <h4>Block-design choices: norm, activation, residual <span class="tag sota">modern defaults</span></h4>
+          <p><strong>Pre-norm vs post-norm:</strong> moving LayerNorm <em>inside</em> the residual branch (pre-norm) makes deep stacks train stably without heavy warmup — now standard, with a final norm added at the end. <strong>RMSNorm</strong> drops mean-centering and bias for a cheaper, equally good norm (LLaMA-family). <strong>Activations</strong> evolved ReLU → GELU → <strong>SwiGLU</strong> (a gated FFN that boosts quality, with hidden width scaled to ~⅔·4d to match parameters). <strong>Residual stream:</strong> the additive highway through all layers — the conceptual backbone of mechanistic interpretability.</p>
+          <p class="read-more"><a href="https://magazine.sebastianraschka.com/p/the-big-llm-architecture-comparison" target="_blank" rel="noopener noreferrer">Read more: The Big LLM Architecture Comparison<span class="src"> · Sebastian Raschka</span></a></p>
+        </div>
+
+        <h2><span class="sec-num">4.</span> Compare the model families</h2>
+        <div class="table-wrap">
+          <table class="cmp">
+            <thead><tr><th>Family</th><th>Attention</th><th>Objective</th><th>Best at</th><th>Weak at</th><th>Example</th></tr></thead>
+            <tbody>
+              <tr><td>Encoder-only</td><td>Bidirectional</td><td>Masked LM</td><td>Classification, embeddings, NER</td><td>Open generation</td><td>BERT</td></tr>
+              <tr><td><strong>Decoder-only</strong></td><td>Causal</td><td>Next-token</td><td>Generation, in-context learning</td><td>(needs prompting for classify)</td><td>GPT, LLaMA</td></tr>
+              <tr><td>Encoder-decoder</td><td>Both + cross-attn</td><td>Span corruption / seq2seq</td><td>Translation, summarization</td><td>Heavier, less general chat</td><td>T5</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2><span class="sec-num">5.</span> The math</h2>
+        <h4>LayerNorm vs RMSNorm</h4>
+        $$ \mathrm{LN}(x) = \gamma\odot\frac{x-\mu}{\sqrt{\sigma^2+\epsilon}}+\beta, \qquad \mathrm{RMSNorm}(x) = \gamma\odot\frac{x}{\sqrt{\tfrac{1}{d}\sum_i x_i^2 + \epsilon}} $$
+        <p class="eqnote"><b>\(\mu,\sigma^2\)</b> = mean/variance over the feature dim; <b>\(\gamma,\beta\)</b> = learned scale/shift; <b>\(\odot\)</b> = elementwise. RMSNorm drops the mean subtraction and bias \(\beta\) — cheaper, and empirically just as good.</p>
+        <h4>FFN and SwiGLU</h4>
+        $$ \mathrm{FFN}(x) = W_2\,\phi(W_1 x + b_1) + b_2, \qquad \mathrm{SwiGLU}(x) = \big(\,\mathrm{Swish}(W_1 x)\odot (W_3 x)\,\big)W_2 $$
+        <p class="eqnote">The classic FFN expands to <b>\(d_{ff}\approx 4d\)</b> then back. SwiGLU is a <em>gated</em> variant using three matrices; to keep parameters comparable its hidden width is set to ~<b>\(\tfrac{2}{3}\cdot 4d\)</b>.</p>
+        <h4>Parameter counts (interview favorite)</h4>
+        $$ P_{\text{attn}} = 4d^2,\qquad P_{\text{ffn}} = 2\cdot d\cdot d_{ff} = 8d^2,\qquad P_{\text{block}} \approx 12d^2,\qquad P_{\text{model}} \approx 12\,L\,d^2 $$
+        <p class="eqnote">So the FFN holds \(8d^2/12d^2 = \tfrac{2}{3}\) of a block’s parameters, and a whole model (ignoring embeddings) is ≈ <b>\(12\,L\,d^2\)</b> for \(L\) layers — the back-of-envelope every interviewer wants.</p>
+
+        <h2><span class="sec-num">6.</span> In code</h2>
+        <p><strong>A pre-norm block</strong> — two residual sub-layers, norm inside each branch:</p>
+        <div class="codeblock"><span class="code-label">python</span><pre><code class="language-python">def transformer_block(x, attn, ffn, norm1, norm2):
+    # pre-norm: normalize INSIDE the residual branch, then add back
+    x = x + attn(norm1(x))     # mix across tokens (causal multi-head attention)
+    x = x + ffn(norm2(x))      # think per token (e.g. SwiGLU feed-forward)
+    return x
+</code></pre></div>
+        <p><strong>The whole decoder-only forward pass</strong>, end to end:</p>
+        <div class="codeblock"><span class="code-label">python</span><pre><code class="language-python">def gpt_forward(ids, embed, pos, blocks, final_norm, unembed):
+    x = embed(ids) + pos(ids)          # tokens + positions   -> (b, n, d)
+    for block in blocks:               # L stacked pre-norm blocks
+        x = block(x)
+    x = final_norm(x)                  # final RMSNorm
+    return x @ unembed                 # logits               -> (b, n, vocab)
+</code></pre></div>
+
+        <h2><span class="sec-num">7.</span> Worked example — count the parameters</h2>
+        <p>Take a BERT-base-ish config: <code>d = 768</code>, <code>L = 12</code> layers, FFN ratio 4, vocab <code>V = 30k</code>.</p>
+        <ul>
+          <li><strong>Attention per block:</strong> \(4d^2 = 4 \times 768^2 \approx 2.36\text{M}\)</li>
+          <li><strong>FFN per block:</strong> \(8d^2 = 8 \times 768^2 \approx 4.72\text{M}\) — about twice the attention, the ~⅔ share.</li>
+          <li><strong>Per block:</strong> ≈ 7.08M → <strong>× 12 layers</strong> ≈ <strong>85M</strong>.</li>
+          <li><strong>Embedding / unembedding:</strong> \(V \cdot d = 30000 \times 768 \approx 23\text{M}\) (tied → counted once).</li>
+          <li><strong>Total ≈ 85M + 23M ≈ 108M</strong> — right in the BERT-base ballpark (~110M). The <code>12 L d²</code> rule nailed it.</li>
+        </ul>
+
+        <h2><span class="sec-num">8.</span> When to use what — decision guide</h2>
+        <ul>
+          <li>Generation / chat → <strong>decoder-only</strong> (GPT/LLaMA). It’s the default.</li>
+          <li>Classification / embeddings / retrieval → <strong>encoder</strong> (BERT-style): bidirectional context, cheap inference.</li>
+          <li>Translation / summarization with a clean input→output split → <strong>encoder-decoder</strong> (T5).</li>
+          <li><strong>Depth vs width</strong> at a fixed budget: deeper helps reasoning/composition up to a point but is harder to train (needs pre-norm, careful init, residual scaling); wider is easier to parallelize. Most modern LLMs grow both, guided by <strong>Chinchilla</strong> (~20 training tokens per parameter).</li>
+        </ul>
+
+        <h2><span class="sec-num">9.</span> Common pitfalls &amp; misconceptions</h2>
+        <ul>
+          <li><strong>“The FFN is a minor add-on.”</strong> It holds ~⅔ of each block’s parameters and does most per-token computation.</li>
+          <li><strong>“Remove the residuals, it’ll be fine.”</strong> A deep stack without residual connections won’t train — gradients can’t flow; the residual stream is essential.</li>
+          <li><strong>“Pre-norm vs post-norm is a detail.”</strong> Post-norm needs careful warmup and is unstable when deep; pre-norm (norm inside the branch, plus a final norm) is why we can train 100-layer models.</li>
+          <li><strong>“Bigger model is always better.”</strong> Chinchilla showed many big models were <em>undertrained</em>; for a fixed compute budget, a smaller model on more tokens often wins.</li>
+          <li><strong>“A decoder can’t classify.”</strong> It can (via prompting), but a fine-tuned encoder is usually cheaper and stronger for pure classification.</li>
+        </ul>
+
+        <h2><span class="sec-num">10.</span> 🚀 What’s new in the industry</h2>
+        <div class="callout whatsnew">
+          <div class="callout-title">🚀 How the block is evolving</div>
+          <ul style="margin-bottom:.3em;">
+            <li><strong>Modern defaults converged.</strong> Pre-norm + <strong>RMSNorm</strong> + <strong>SwiGLU</strong> + RoPE + GQA is the de-facto recipe (LLaMA 3, DeepSeek-V3, Qwen).</li>
+            <li><strong>Sparse scaling (MoE).</strong> <strong>Switch Transformers</strong> → DeepSeek-V3 route each token to a few experts, scaling parameters to hundreds of billions while keeping per-token compute roughly constant.</li>
+            <li><strong>Beyond attention.</strong> <strong>Mamba</strong> (selective SSMs) and hybrids like <strong>Jamba</strong> interleave linear-time recurrence with attention for cheap long context; <strong>nGPT</strong> rethinks normalization on the hypersphere for faster training.</li>
+          </ul>
+        </div>
+        <details class="fold">
+          <summary>📄 Papers — architecture &amp; building blocks (verified links)</summary>
+          <div class="fold-body">
+            <div class="paper"><a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a> <span class="meta">— Vaswani et al., 2017.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/1810.04805">BERT: Pre-training of Deep Bidirectional Transformers</a> <span class="meta">— Devlin et al., 2018.</span></div>
+            <div class="paper"><a href="https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf">Language Models are Unsupervised Multitask Learners (GPT-2)</a> <span class="meta">— Radford et al., 2019.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2005.14165">Language Models are Few-Shot Learners (GPT-3)</a> <span class="meta">— Brown et al., 2020.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/1910.10683">Exploring the Limits of Transfer Learning (T5)</a> <span class="meta">— Raffel et al., 2019/2020.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2002.04745">On Layer Normalization in the Transformer Architecture (Pre-LN)</a> <span class="meta">— Xiong et al., 2020.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/1910.07467">Root Mean Square Layer Normalization (RMSNorm)</a> <span class="meta">— Zhang &amp; Sennrich, 2019.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2002.05202">GLU Variants Improve Transformer (SwiGLU)</a> <span class="meta">— Shazeer, 2020.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2203.15556">Training Compute-Optimal Large Language Models (Chinchilla)</a> <span class="meta">— Hoffmann et al., 2022.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2302.13971">LLaMA: Open and Efficient Foundation Language Models</a> <span class="meta">— Touvron et al., 2023.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2407.21783">The Llama 3 Herd of Models</a> <span class="meta">— Grattafiori et al., 2024.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report</a> <span class="meta">— DeepSeek-AI, 2024.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2312.00752">Mamba: Linear-Time Sequence Modeling with Selective State Spaces</a> <span class="meta">— Gu &amp; Dao, 2023.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2403.19887">Jamba: A Hybrid Transformer-Mamba Language Model</a> <span class="meta">— Lieber et al., 2024.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2410.01131">nGPT: Normalized Transformer on the Hypersphere</a> <span class="meta">— Loshchilov et al., 2024.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2101.03961">Switch Transformers: Scaling to Trillion Parameter Models</a> <span class="meta">— Fedus et al., 2021.</span></div>
+          </div>
+        </details>
+
+        <h2><span class="sec-num">11.</span> Practice</h2>
+        <p>Drill the full bank: <a href="../../interview-prep/03-transformers-architecture.md">03 · Transformer Architecture</a>. A starter mix:</p>
+        <ul class="qlist">
+          <li>At a high level, what problem was the Transformer designed to solve, and what was the core idea behind “Attention Is All You Need”? <span class="diff easy">Easy</span></li>
+          <li>Why did Transformers largely replace RNNs and LSTMs for sequence modeling? <span class="diff easy">Easy</span></li>
+          <li>What is the purpose of the residual (skip) connection around each sub-layer? <span class="diff easy">Easy</span></li>
+          <li>Describe the full forward pass of a single encoder block, naming every operation in order. <span class="diff med">Med</span></li>
+          <li>Compare pre-norm vs post-norm Transformers, including where LayerNorm sits relative to the residual addition. <span class="diff med">Med</span></li>
+          <li>What is RMSNorm, and why have many recent models adopted it over standard LayerNorm? <span class="diff med">Med</span></li>
+          <li>The FFN holds roughly two-thirds of a block’s parameters — sketch the parameter counts of attention vs FFN to show why. <span class="diff hard">Hard</span></li>
+          <li>Classify BERT, GPT, and T5 as encoder-only / decoder-only / encoder-decoder, and state the primary task each was designed for. <span class="diff easy">Easy</span></li>
+          <li>Given d_model, layers L, and FFN ratio, write the approximate total parameter count (ignoring embeddings). <span class="diff med">Med</span></li>
+          <li>What do the Chinchilla scaling laws say about the optimal ratio of parameters to training tokens? <span class="diff hard">Hard</span></li>
+        </ul>
+
+        <h2><span class="sec-num">12.</span> Key takeaways</h2>
+        <div class="takeaways">
+          <ul>
+            <li><strong>A block = mix (attention) + think (FFN), in a residual + norm wrapper.</strong> Stack <code>L</code>, finish with a norm and an unembed.</li>
+            <li><strong>The FFN holds ~⅔ of the parameters;</strong> a model is ≈ <code>12·L·d²</code> ignoring embeddings.</li>
+            <li><strong>Pre-norm + RMSNorm + SwiGLU</strong> is the modern recipe; pre-norm is what makes deep stacks trainable.</li>
+            <li><strong>Decoder-only dominates generation</strong>; encoders for understanding, encoder-decoders for seq2seq.</li>
+            <li><strong>Chinchilla</strong> reset pretraining: balance parameters against ~20× tokens, don’t just grow the model.</li>
+          </ul>
+        </div>
+        <p><strong>Go deeper:</strong> <a href="https://jalammar.github.io/illustrated-gpt2/">The Illustrated GPT-2</a> · <a href="https://magazine.sebastianraschka.com/p/the-big-llm-architecture-comparison">The Big LLM Architecture Comparison</a>. Next: <a href="positional-encoding.html">Positional Encoding →</a></p>
+
+        <nav class="page-footer">
+          <a class="footlink home" href="../index.html"><span class="dir">⌂</span><span class="ttl">Home</span></a>
+          <a class="footlink prev" href="attention.html"><span class="dir">← Attention</span><span class="ttl">04 · Attention</span></a>
+          <a class="footlink next" href="positional-encoding.html"><span class="dir">Next: Positional →</span><span class="ttl">05 · Positional Encoding</span></a>
+        </nav>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- CDN libs + shared JS (order matters: libs before site.js) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../assets/site.js"></script>
+
+</body>
+</html>

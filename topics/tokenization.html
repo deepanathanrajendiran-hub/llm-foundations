@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tokenization &amp; Embeddings — Transformer Foundations</title>
+  <meta name="description" content="How raw text becomes tokens and embeddings: BPE, byte-level, WordPiece, Unigram, SentencePiece, tokenizer-free; static vs contextual embeddings. With a live tokenizer demo." />
+
+  <!-- Tailwind (CDN) for layout utilities -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>window.tailwind && (tailwind.config = { darkMode: "class" });</script>
+
+  <!-- KaTeX (math) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <!-- highlight.js themes (light default; dark toggled by site.js) -->
+  <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" />
+  <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" disabled />
+
+  <!-- Shared site styles -->
+  <link rel="stylesheet" href="../assets/site.css" />
+
+  <!-- FOUC guard: set theme before first paint -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("theme") ||
+          ((window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+        if (t === "dark") document.documentElement.classList.add("dark");
+        if (localStorage.getItem("sidebar") === "collapsed") document.documentElement.classList.add("sidebar-collapsed");
+        var l = document.getElementById("hljs-light"), d = document.getElementById("hljs-dark");
+        if (l) l.disabled = (t === "dark");
+        if (d) d.disabled = (t !== "dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="app">
+
+    <aside class="sidebar" id="sidebar">
+      <a class="sidebar-brand" href="../index.html">
+        <span class="logo">∑</span>
+        <span><b>LLM Foundations</b><span>Interview teaching series</span></span>
+      </a>
+
+      <a class="nav-link" href="../index.html"><span class="num">⌂</span> Home</a>
+
+      <div class="nav-group-title">Phase 1 · Foundations</div>
+      <a class="nav-link" href="foundations-intro.html"><span class="num">↪</span> Intro &amp; overview</a>
+      <a class="nav-link active" href="tokenization.html"><span class="num">02</span> Tokenization &amp; Embeddings</a>
+      <a class="nav-link" href="attention.html"><span class="num">04</span> Attention Mechanisms</a>
+      <a class="nav-link" href="transformers.html"><span class="num">03</span> Transformer Architecture</a>
+      <a class="nav-link" href="positional-encoding.html"><span class="num">05</span> Positional Encoding</a>
+      <div class="nav-group-title">Phase 2 · Training &amp; Alignment</div>
+      <a class="nav-link" href="../decks/pretraining.html"><span class="num">06</span> Pretraining &amp; Scaling</a>
+      <a class="nav-link" href="../decks/finetuning-peft.html"><span class="num">07</span> Fine-tuning &amp; PEFT</a>
+      <a class="nav-link" href="../decks/rlhf.html"><span class="num">08</span> RLHF &amp; Alignment</a>
+      <a class="nav-link" href="../decks/synthetic-data.html"><span class="num">31</span> Synthetic Data</a>
+
+      <div class="nav-group-title">Phase 3 · Reasoning &amp; Inference</div>
+      <span class="nav-link soon"><span class="num">28</span> Reasoning Models</span>
+      <span class="nav-link soon"><span class="num">11</span> Inference &amp; Serving</span>
+      <span class="nav-link soon"><span class="num">32</span> Small / Edge Models</span>
+
+      <div class="nav-group-title">Phase 4 · Building Apps</div>
+      <span class="nav-link soon"><span class="num">29</span> Context Engineering</span>
+      <span class="nav-link soon"><span class="num">13</span> RAG</span>
+      <span class="nav-link soon"><span class="num">14</span> Vector Databases</span>
+      <span class="nav-link soon"><span class="num">15</span> Agents &amp; Tools</span>
+      <span class="nav-link soon"><span class="num">16</span> MCP</span>
+      <span class="nav-link soon"><span class="num">36</span> GenAI App Dev</span>
+
+      <div class="nav-group-title">Phase 6 · Architectures</div>
+      <span class="nav-link soon"><span class="num">30</span> Beyond Transformers</span>
+    </aside>
+    <div class="scrim" id="scrim"></div>
+
+    <div class="main">
+      <div class="topbar">
+        <button class="icon-btn" data-sidebar-toggle aria-label="Open menu">☰</button>
+        <strong style="color:var(--text-strong)">Tokenization &amp; Embeddings</strong>
+        <button class="icon-btn" data-theme-toggle style="margin-left:auto" aria-label="Toggle theme">☾</button>
+      </div>
+      <button class="icon-btn theme-fab" data-theme-toggle aria-label="Toggle theme">☾</button>
+
+      <main class="content lecture">
+
+        <p style="font-size:13px;font-weight:700;letter-spacing:.04em;color:var(--accent);text-transform:uppercase;margin:0 0 6px;">
+          Phase 1 · Foundations · Module 02
+        </p>
+        <h1>Tokenization &amp; Embeddings</h1>
+        <p class="subtitle">
+          How raw text becomes a list of integer IDs, and how those IDs become the vectors a Transformer actually
+          reads — the foundation layer, classic → SOTA.
+        </p>
+
+        <div class="callout roadmap">
+          <div class="callout-title">📋 What you’ll learn <span style="font-weight:500;color:var(--muted);font-size:.9rem;">(~12 min)</span></div>
+          <p style="margin:.2em 0 0;">The tokenizer pipeline · every subword algorithm (BPE, byte-level, WordPiece, Unigram, SentencePiece) and the
+          tokenizer-free frontier · static vs contextual embeddings · the embedding matrix &amp; weight tying · a live
+          tokenizer demo · and the pitfalls that bite (the “strawberry” problem).</p>
+        </div>
+
+        <h2><span class="sec-num">1.</span> Intuition</h2>
+        <p>
+          <strong>Tokenization</strong> is like writing with LEGO bricks instead of whole pre-built houses. Whole-word
+          “houses” mean you need a brick for <em>every</em> word that exists (millions, and you still miss new ones).
+          Single-letter bricks are universal but you need hundreds of them to build anything. <strong>Subwords</strong>
+          are the sweet spot: a few common chunks (<code>token</code>, <code>##ization</code>, <code>▁the</code>) compose
+          into any word, even ones never seen in training.
+        </p>
+        <p>
+          <strong>Embeddings</strong> turn each brick into a point in a high-dimensional “map of meaning,” where nearness
+          encodes similarity: <em>cat</em> and <em>kitten</em> land close together, <em>cat</em> and <em>thermodynamics</em>
+          far apart. But a static map can’t tell which sense of <em>bank</em> you mean — that takes context, which is the
+          job of attention (next page).
+        </p>
+
+        <h2><span class="sec-num">2.</span> How it works</h2>
+        <h3>2.1 — Text → tokens → IDs</h3>
+        <p>
+          The tokenizer is a deterministic pre-processor run <em>before</em> the neural network. A modern pipeline has four
+          stages: <strong>normalization</strong> (e.g. Unicode NFC/NFKC, optional lowercasing), <strong>pre-tokenization</strong>
+          (split on whitespace/punctuation so merges never cross word boundaries), the <strong>subword model</strong>
+          (BPE / WordPiece / Unigram applied to each chunk), and <strong>post-processing</strong> (add special tokens like
+          <code>&lt;BOS&gt;</code>/<code>&lt;EOS&gt;</code>, build the integer ID list). The output is a list of integers — the only
+          thing the network ever sees. Note that leading spaces matter: GPT-style byte-level tokenizers treat <code>"▁the"</code>
+          (space + the) and <code>"the"</code> as <em>different</em> tokens, which is why stray spaces in prompts and stop
+          sequences trip people up.
+        </p>
+        <p>Try it — type and watch one string become many tokens (illustrative mock, not a real BPE table):</p>
+        <div class="widget" id="tok-widget">
+          <label for="tok-input">Mock tokenizer</label>
+          <textarea id="tok-input" rows="2">Tokenization splits "unhappiness" into subwords like un+happi+ness.</textarea>
+          <div id="tok-out" style="margin-top:12px;"></div>
+          <div class="tok-stats" id="tok-stats"></div>
+        </div>
+
+        <h3>2.2 — IDs → vectors (the embedding layer)</h3>
+        <p>
+          The embedding matrix <code>E</code> has shape <code>(V, d)</code>: one row of length <code>d</code> (the model
+          dimension) per vocabulary entry <code>V</code>. “Looking up” token ID <code>i</code> is just selecting row
+          <code>i</code> — mathematically identical to multiplying a one-hot vector by <code>E</code>, but done as an
+          indexed read so it’s cheap. For a batch of token IDs of shape <code>(B, n)</code> you get hidden states of shape
+          <code>(B, n, d)</code>. These vectors are <em>learned</em>, so similar tokens drift to similar regions of space.
+          Many models <strong>tie</strong> this matrix with the output (unembedding) layer to save <code>V·d</code>
+          parameters — which for a small model can be a large fraction of the total.
+        </p>
+
+        <h2><span class="sec-num">3.</span> The approaches — full landscape</h2>
+        <p class="lead">
+          Every major tokenizer and embedding type, roughly classic → SOTA, with <strong>what it is, how it works, what
+          it solves, and trade-offs.</strong> Each has a “read more” deep-dive link.
+        </p>
+
+        <div class="approach">
+          <h4>Word-level tokenization <span class="tag classic">classic</span></h4>
+          <p><strong>What:</strong> one token per whitespace/punctuation word. <strong>How:</strong> build a fixed vocabulary of the most frequent words; everything else maps to <code>&lt;UNK&gt;</code>. <strong>Solves:</strong> short sequences, intuitive units.</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>Few tokens per sentence</li><li>Human-readable units</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li>Huge vocab, still misses rare/new words (OOV)</li><li>No sharing between <em>run/running/ran</em></li><li>Terrible for morphologically rich languages</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://huggingface.co/docs/transformers/tokenizer_summary" target="_blank" rel="noopener noreferrer">Read more: Summary of the tokenizers<span class="src"> · Hugging Face</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>Character / byte-level <span class="tag classic">classic</span></h4>
+          <p><strong>What:</strong> one token per character (or per raw byte). <strong>How:</strong> tiny fixed alphabet (~100 chars, or exactly 256 bytes). <strong>Solves:</strong> zero OOV — anything can be spelled out; trivially multilingual.</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>No OOV ever; tiny vocab</li><li>Robust to typos, code, emoji</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li>Very long sequences → attention cost (n²) explodes</li><li>Model must relearn spelling; weaker semantics per token</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://huggingface.co/docs/transformers/en/tokenizer_summary" target="_blank" rel="noopener noreferrer">Read more: Character- &amp; byte-level tokenization<span class="src"> · Hugging Face</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>Byte-Pair Encoding (BPE) <span class="tag modern">modern · dominant</span></h4>
+          <p><strong>What:</strong> the subword workhorse (Sennrich et al., 2015). <strong>How:</strong> start from characters; repeatedly find the <em>most frequent adjacent pair</em> in the corpus and merge it into a new symbol; stop at the target vocab size. At inference, apply the learned merges in order. <strong>Solves:</strong> the OOV/sequence-length trade-off — frequent words become one token, rare words fall back to a few subwords.</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>Open-vocabulary; tunable vocab size</li><li>Simple, fast, deterministic</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li>Greedy merges aren’t globally optimal</li><li>Segmentation can be linguistically odd</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://huggingface.co/learn/nlp-course/chapter6/5" target="_blank" rel="noopener noreferrer">Read more: Byte-Pair Encoding, step by step<span class="src"> · Hugging Face NLP Course</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>Byte-level BPE <span class="tag sota">SOTA default</span></h4>
+          <p><strong>What:</strong> BPE applied over the 256 raw bytes instead of Unicode characters (GPT-2 and most LLMs). <strong>How:</strong> the base alphabet is bytes, so <em>any</em> Unicode string is representable; merges build up common byte sequences. <strong>Solves:</strong> guarantees no <code>&lt;UNK&gt;</code> for any input, in any language or binary, with a compact base.</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>Truly universal coverage, never breaks</li><li>De-facto standard (GPT, LLaMA via SP-BPE)</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li>A single emoji/CJK char can cost several byte-tokens</li><li>Multibyte chars can be split mid-character</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://huggingface.co/learn/nlp-course/chapter6/5" target="_blank" rel="noopener noreferrer">Read more: Byte-level BPE (GPT-2 style)<span class="src"> · Hugging Face NLP Course</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>WordPiece <span class="tag modern">modern</span></h4>
+          <p><strong>What:</strong> BERT’s tokenizer. <strong>How:</strong> like BPE, but instead of merging the most <em>frequent</em> pair it merges the pair that most increases the <em>likelihood</em> of the training corpus under a unigram LM (score ≈ <code>freq(ab)/(freq(a)·freq(b))</code>). Continuation pieces are marked with <code>##</code>. <strong>Solves:</strong> slightly more principled merges than raw frequency.</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>Likelihood-driven, good for encoders</li><li><code>##</code> makes word boundaries explicit</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li>Still greedy; tied to its training corpus</li><li>Needs pre-tokenization</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://huggingface.co/learn/nlp-course/chapter6/6" target="_blank" rel="noopener noreferrer">Read more: WordPiece tokenization<span class="src"> · Hugging Face NLP Course</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>Unigram LM <span class="tag modern">modern</span></h4>
+          <p><strong>What:</strong> a probabilistic tokenizer (Kudo, 2018). <strong>How:</strong> start with a <em>large</em> candidate vocabulary and <em>prune</em> it: keep a unigram probability per subword, and iteratively (via EM) drop the pieces that hurt corpus likelihood least. At inference, pick the highest-probability segmentation with Viterbi. <strong>Solves:</strong> a global probabilistic objective and multiple possible segmentations.</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>Often cleaner morphological splits than BPE</li><li>Enables subword regularization (sampling)</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li>More complex training</li><li>Probabilities tied to corpus distribution</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://huggingface.co/learn/nlp-course/chapter6/7" target="_blank" rel="noopener noreferrer">Read more: Unigram tokenization<span class="src"> · Hugging Face NLP Course</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>SentencePiece <span class="tag modern">framework</span></h4>
+          <p><strong>What:</strong> not an algorithm but a <em>language-agnostic implementation</em> (Kudo &amp; Richardson, 2018) that runs BPE or Unigram. <strong>How:</strong> consumes <em>raw</em> text (no pre-tokenization), treating whitespace as a normal symbol it encodes as <code>▁</code>. <strong>Solves:</strong> fully reversible, reproducible tokenization for any language — crucial for non-space-delimited languages (Chinese, Japanese).</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>Detokenization is exact (no lost spaces)</li><li>Works on any script, end-to-end</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li>The <code>▁</code> meta-symbol surprises newcomers</li><li>Inherits whatever model (BPE/Unigram) you pick</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://github.com/google/sentencepiece" target="_blank" rel="noopener noreferrer">Read more: SentencePiece<span class="src"> · GitHub · google</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>Subword regularization / BPE-dropout <span class="tag modern">robustness</span></h4>
+          <p><strong>What:</strong> sample <em>different</em> segmentations of the same string during training. <strong>How:</strong> Unigram sampling or randomly skipping BPE merges exposes the model to many tokenizations of one word. <strong>Solves:</strong> over-reliance on one brittle segmentation; acts as data augmentation, improving robustness (especially for MT and noisy text).</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>More robust, better generalization</li><li>Nearly free to add</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li>Slightly slower training</li><li>Inference still uses the single best split</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://github.com/google/sentencepiece" target="_blank" rel="noopener noreferrer">Read more: Subword regularization &amp; BPE-dropout<span class="src"> · SentencePiece</span></a></p>
+        </div>
+
+        <div class="approach">
+          <h4>Tokenizer-free / byte-latent models <span class="tag sota">frontier</span></h4>
+          <p><strong>What:</strong> drop the fixed vocabulary entirely and model raw bytes/characters (MEGABYTE, CANINE, Meta’s Byte Latent Transformer, T-FREE). <strong>How:</strong> group bytes into patches — fixed-size or, in BLT, <em>entropy-based</em> dynamic patches — and process them hierarchically, spending more compute where the text is less predictable. <strong>Solves:</strong> tokenizer brittleness — glitch tokens, multilingual unfairness, numeric/code splitting, and the “strawberry has how many r’s” character-blindness.</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>No tokenizer to train or mis-load; robust &amp; fair across languages</li><li>BLT matches token-based LLMs at scale with better inference efficiency</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li>Longer base sequences need clever hierarchies</li><li>Newer, less battle-tested than BPE</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://aipapersacademy.com/byte-latent-transformer/" target="_blank" rel="noopener noreferrer">Read more: Byte Latent Transformer, explained<span class="src"> · AI Papers Academy</span></a></p>
+        </div>
+
+        <h3 style="margin-top:1.6em;">Embeddings: from static to contextual</h3>
+        <div class="approach">
+          <h4>Static word embeddings — word2vec / GloVe / fastText <span class="tag classic">classic</span></h4>
+          <p><strong>What:</strong> one fixed vector per word, learned from co-occurrence. <strong>word2vec</strong> (Mikolov 2013) predicts a word from its context (CBOW) or context from the word (Skip-gram), trained efficiently with negative sampling. <strong>GloVe</strong> (Pennington 2014) factorizes a global co-occurrence count matrix. <strong>fastText</strong> (Bojanowski 2016) sums character-n-gram vectors so it can embed <em>unseen</em> words. <strong>Solves:</strong> dense, semantic vectors where geometry ≈ meaning (the famous <code>king − man + woman ≈ queen</code>).</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>Cheap, interpretable, reusable</li><li>fastText handles OOV / morphology</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li><strong>One vector per word</strong> → can’t separate the two senses of <em>bank</em></li><li>No context, no order</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://jalammar.github.io/illustrated-word2vec/" target="_blank" rel="noopener noreferrer">Read more: The Illustrated Word2vec<span class="src"> · Jay Alammar</span></a></p>
+        </div>
+        <div class="approach">
+          <h4>Contextual embeddings (the Transformer hidden state) <span class="tag sota">SOTA</span></h4>
+          <p><strong>What:</strong> the vector a Transformer produces for a token <em>depends on the whole sentence</em>. <strong>How:</strong> attention blends in surrounding tokens, so <em>bank</em> in “river bank” and “bank account” get different vectors. <strong>Solves:</strong> polysemy — the core limitation of static embeddings. Sentence-embedding models (and Matryoshka representations, which nest usable shorter vectors inside longer ones) build on this for retrieval.</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>Sense- and context-aware</li><li>Backbone of RAG, search, reranking</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li>Needs a full forward pass to compute</li><li>Anisotropy can distort naive cosine similarity</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://jalammar.github.io/illustrated-bert/" target="_blank" rel="noopener noreferrer">Read more: The Illustrated BERT, ELMo &amp; co.<span class="src"> · Jay Alammar</span></a></p>
+        </div>
+
+        <h2><span class="sec-num">4.</span> Compare the tokenizers</h2>
+        <div class="table-wrap">
+          <table class="cmp">
+            <thead><tr><th>Approach</th><th>Core idea</th><th>Pros</th><th>Cons</th><th>Cost</th><th>When to use</th><th>Maturity</th></tr></thead>
+            <tbody>
+              <tr><td>Word-level</td><td>One token per word</td><td>Short, readable</td><td>OOV, huge vocab</td><td>Low seq len</td><td>Legacy / closed vocab</td><td>Legacy</td></tr>
+              <tr><td>Char / byte</td><td>One token per char/byte</td><td>No OOV, tiny vocab</td><td>Very long sequences</td><td>High n²</td><td>Robustness, morphology-heavy</td><td>Niche</td></tr>
+              <tr><td>BPE</td><td>Merge frequent pairs</td><td>Simple, tunable</td><td>Greedy splits</td><td>Low</td><td>General default</td><td>Mature</td></tr>
+              <tr><td><strong>Byte-level BPE</strong></td><td>BPE over 256 bytes</td><td>Universal, no UNK</td><td>Emoji/CJK bloat</td><td>Low</td><td><strong>Most LLMs</strong></td><td><strong>SOTA</strong></td></tr>
+              <tr><td>WordPiece</td><td>Likelihood-best merge</td><td>Principled, encoders</td><td>Greedy, needs pretok</td><td>Low</td><td>BERT-family</td><td>Mature</td></tr>
+              <tr><td>Unigram (SP)</td><td>Prune by LM likelihood</td><td>Clean splits, sampling</td><td>Heavier training</td><td>Low</td><td>Multilingual, T5/LLaMA</td><td>Mature</td></tr>
+              <tr><td>Tokenizer-free</td><td>Model raw bytes/patches</td><td>Robust, fair, no glitch tokens</td><td>Long base seqs</td><td>Med</td><td>Research / robustness</td><td>Emerging</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2><span class="sec-num">5.</span> The math</h2>
+        <h4>Embedding lookup</h4>
+        <p>For token ID \( t \) and embedding matrix \( E \in \mathbb{R}^{V \times d} \):</p>
+        $$ \mathbf{x}_t = E_{t,:} = \mathbf{e}_t^{\top} E $$
+        <p class="eqnote"><b>V</b> = vocabulary size, <b>d</b> = model dimension, <b>\(\mathbf{e}_t\)</b> = one-hot vector for ID \(t\). The right form shows why a lookup equals a one-hot matrix multiply — we just skip the multiply.</p>
+        <h4>Embedding-layer parameters &amp; tying</h4>
+        $$ P_{\text{embed}} = V \cdot d, \qquad P_{\text{tied}} = V \cdot d \;\;(\text{shared in + out}) $$
+        <p class="eqnote">With <b>V</b>=32k and <b>d</b>=768 that’s ~25M parameters per matrix — for a small model, a big slice of the budget. <strong>Weight tying</strong> reuses one matrix for both input embedding and output projection, halving this cost and often improving quality.</p>
+
+        <h2><span class="sec-num">6.</span> In code — one BPE merge step</h2>
+        <p>BPE’s whole training loop is “count adjacent pairs, merge the most frequent, repeat.” The core step:</p>
+        <div class="codeblock"><span class="code-label">python</span><pre><code class="language-python">from collections import Counter
+
+# words as space-separated symbols; '_' marks end-of-word. value = corpus frequency
+vocab = {'h u g _': 10, 'p u g _': 5, 'h u g s _': 5}
+
+def best_pair(vocab):
+    pairs = Counter()
+    for word, freq in vocab.items():
+        symbols = word.split()
+        for a, b in zip(symbols, symbols[1:]):
+            pairs[(a, b)] += freq
+    return pairs.most_common(1)[0]
+
+print(best_pair(vocab))   # -> (('u', 'g'), 20)  --> merge 'u','g' into 'ug' first
+</code></pre></div>
+
+        <h2><span class="sec-num">7.</span> Worked example — tokenize &amp; embed</h2>
+        <p>
+          Take “<strong>the cat sat</strong>.” A byte-level BPE tokenizer (with leading spaces attached) might emit three
+          tokens <code>▁the</code>, <code>▁cat</code>, <code>▁sat</code> → IDs <code>[464, 3797, 3332]</code>. The embedding
+          lookup grabs rows <code>464, 3797, 3332</code> of <code>E</code>, giving three <code>d</code>-dim vectors (a
+          <code>(3, d)</code> tensor). A position signal is added, and those vectors flow into the first attention layer
+          (next page). Notice: “the” written with vs without a leading space are <em>different</em> IDs — a classic prompt
+          bug. And a rarer word like “tokenization” would split into several pieces (<code>token</code> + <code>ization</code>),
+          so token count ≠ word count.
+        </p>
+
+        <h2><span class="sec-num">8.</span> When to use what — choosing a tokenizer</h2>
+        <ul>
+          <li>General LLM, many languages → <strong>byte-level BPE</strong> (or SentencePiece-Unigram). It’s the safe default.</li>
+          <li>Heavy code / structured data → train BPE <em>on</em> that data, reserve tokens for indentation/operators; check token fertility (tokens-per-word).</li>
+          <li>Robustness, morphology-rich or noisy text, fairness across scripts → consider char/byte or tokenizer-free (BLT).</li>
+          <li>Arithmetic-critical → digit-level or single-token numeric schemes (xVal/FoNE) to avoid inconsistent number splits.</li>
+        </ul>
+
+        <h2><span class="sec-num">9.</span> Common pitfalls &amp; misconceptions</h2>
+        <ul>
+          <li><strong>“A token is a word.”</strong> No — one word is often several tokens (<em>unhappiness</em> → <code>un</code>+<code>happi</code>+<code>ness</code>), and a leading space is part of the token. This is why models miscount letters in “strawberry”: they never see the letters, only subword chunks.</li>
+          <li><strong>“Byte-level BPE still needs UNK.”</strong> It doesn’t — every byte is in the base vocab, so any input is representable. UNK lingers only for legacy/compat reasons.</li>
+          <li><strong>“Static embeddings capture meaning fully.”</strong> One vector per word can’t separate the senses of <em>bank</em>; only contextual hidden states can.</li>
+          <li><strong>“Same text costs the same tokens in every model.”</strong> Different tokenizers → different counts → different cost and context usage; English-centric tokenizers make other languages more expensive.</li>
+          <li><strong>“Glitch tokens are harmless.”</strong> Under-trained tokens (e.g. SolidGoldMagikarp) arise from tokenizer/training-data mismatch and cause bizarre behavior.</li>
+        </ul>
+
+        <h2><span class="sec-num">10.</span> 🚀 What’s new in the industry</h2>
+        <div class="callout whatsnew">
+          <div class="callout-title">🚀 Beyond fixed-vocabulary BPE</div>
+          <ul style="margin-bottom:.3em;">
+            <li><strong>Tokenizer-free / byte-latent.</strong> Meta’s <strong>Byte Latent Transformer</strong> groups bytes into <em>entropy-based</em> dynamic patches and matches token-based LLMs at scale — no tokenizer to train or mis-load, and no glitch tokens.</li>
+            <li><strong>“Superword” tokens.</strong> <strong>SuperBPE</strong> lets tokens span whitespace, cutting token counts up to ~33% and improving downstream accuracy over same-size BPE.</li>
+            <li><strong>Better numbers.</strong> <strong>xVal</strong> and <strong>FoNE</strong> encode each number as a single value-aware token, fixing the inconsistent digit-splitting that hurts arithmetic.</li>
+            <li><strong>Adaptive embeddings.</strong> <strong>Matryoshka</strong> representations nest usable shorter vectors inside longer ones, so one embedding serves many storage/latency budgets — now standard in retrieval.</li>
+          </ul>
+        </div>
+        <details class="fold">
+          <summary>📄 Papers — tokenization &amp; embeddings (verified links)</summary>
+          <div class="fold-body">
+            <div class="paper"><a href="https://arxiv.org/abs/1508.07909">Neural Machine Translation of Rare Words with Subword Units (BPE)</a> <span class="meta">— Sennrich et al., 2015.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/1609.08144">Google’s NMT System (popularized WordPiece)</a> <span class="meta">— Wu et al., 2016.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/1804.10959">Subword Regularization &amp; the Unigram LM tokenizer</a> <span class="meta">— Kudo, 2018.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/1808.06226">SentencePiece: language-independent subword tokenizer</a> <span class="meta">— Kudo &amp; Richardson, 2018.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/1301.3781">Efficient Estimation of Word Representations (word2vec)</a> <span class="meta">— Mikolov et al., 2013.</span></div>
+            <div class="paper"><a href="https://aclanthology.org/D14-1162/">GloVe: Global Vectors for Word Representation</a> <span class="meta">— Pennington et al., 2014 (EMNLP).</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/1607.04606">Enriching Word Vectors with Subword Information (fastText)</a> <span class="meta">— Bojanowski et al., 2016.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2205.13147">Matryoshka Representation Learning</a> <span class="meta">— Kusupati et al., 2022.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2305.07185">MEGABYTE: Predicting Million-byte Sequences with Multiscale Transformers</a> <span class="meta">— Yu et al., 2023.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2412.09871">Byte Latent Transformer: Patches Scale Better Than Tokens (BLT)</a> <span class="meta">— Pagnoni et al., 2024.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2406.19223">T-FREE: Tokenizer-Free Generative LLMs via Sparse Representations</a> <span class="meta">— Deiseroth et al., 2024.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2503.13423">SuperBPE: Space Travel for Language Models</a> <span class="meta">— Liu et al., 2025.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2310.02989">xVal: A Continuous Numerical Tokenization for Scientific Language Models</a> <span class="meta">— Golkar et al., 2023.</span></div>
+          </div>
+        </details>
+
+        <h2><span class="sec-num">11.</span> Practice</h2>
+        <p>Drill the full bank (questions only, by design): <a href="../../interview-prep/02-tokenization-and-embeddings.md">02 · Tokenization &amp; Embeddings</a>. A starter mix:</p>
+        <ul class="qlist">
+          <li>What problem does subword tokenization solve that word-level tokenization does not? <span class="diff easy">Easy</span></li>
+          <li>Define “out-of-vocabulary” (OOV). How does subword tokenization largely eliminate the OOV problem? <span class="diff med">Med</span></li>
+          <li>Explain how Byte-Pair Encoding (BPE) builds its vocabulary during training. <span class="diff med">Med</span></li>
+          <li>At inference time, how does a trained BPE tokenizer segment a new word? <span class="diff med">Med</span></li>
+          <li>How does WordPiece differ from BPE in the criterion it uses to choose which pair to merge? <span class="diff hard">Hard</span></li>
+          <li>Explain the Unigram Language Model tokenizer. How is its training objective fundamentally different from BPE’s greedy merging? <span class="diff hard">Hard</span></li>
+          <li>What is SentencePiece, and what does it mean that it is “language-agnostic” and operates on raw text without pre-tokenization? <span class="diff med">Med</span></li>
+          <li>A user reports the model miscounts characters in “how many r’s in strawberry.” Explain the tokenization root cause. <span class="diff med">Med</span></li>
+          <li>Why are word2vec/GloVe/fastText called “static” embeddings, and what is their limitation regarding polysemy (e.g. “bank”)? <span class="diff med">Med</span></li>
+          <li>What are tied (weight-shared) input and output embeddings? Why do many models tie them, and what do you save? <span class="diff hard">Hard</span></li>
+        </ul>
+
+        <h2><span class="sec-num">12.</span> Key takeaways</h2>
+        <div class="takeaways">
+          <ul>
+            <li><strong>Subwords win.</strong> Byte-level BPE / SentencePiece balance vocabulary size against sequence length and kill OOV.</li>
+            <li><strong>A “token” is not a word</strong>, and a leading space is part of the token — the root of the “strawberry” miscount and many prompt bugs.</li>
+            <li><strong>Embedding = a learned <code>(V, d)</code> lookup table</strong>; tying input/output saves <code>V·d</code> parameters.</li>
+            <li><strong>Static embeddings give geometry; attention gives context.</strong> Only contextual hidden states disambiguate <em>bank</em>.</li>
+            <li><strong>The frontier is going tokenizer-free</strong> (BLT) and smarter (SuperBPE, numeric schemes).</li>
+          </ul>
+        </div>
+        <p><strong>Go deeper:</strong> <a href="https://huggingface.co/learn/nlp-course/chapter6/1">Hugging Face NLP Course — tokenizers</a> · <a href="https://jalammar.github.io/illustrated-word2vec/">The Illustrated Word2vec</a>. Next: <a href="attention.html">Attention Mechanisms →</a></p>
+
+        <nav class="page-footer">
+          <a class="footlink home" href="../index.html"><span class="dir">⌂</span><span class="ttl">Home</span></a>
+          <a class="footlink prev" href="foundations-intro.html"><span class="dir">← Intro</span><span class="ttl">Overview</span></a>
+          <a class="footlink next" href="attention.html"><span class="dir">Next: Attention →</span><span class="ttl">04 · Attention Mechanisms</span></a>
+        </nav>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- CDN libs + shared JS (order matters: libs before site.js) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../assets/site.js"></script>
+  <!-- Page widget: mock tokenizer (vanilla, self-contained) -->
+  <script>
+    (function () {
+      "use strict";
+      function hashId(s) {
+        var h = 0;
+        for (var i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; }
+        return Math.abs(h) % 50257;
+      }
+      function mockTokenize(text) {
+        var raw = text.match(/\s+|[A-Za-z0-9]+|[^\sA-Za-z0-9]/g) || [];
+        var toks = [], pendingSpace = false;
+        raw.forEach(function (piece) {
+          if (/^\s+$/.test(piece)) { pendingSpace = true; return; }
+          var prefix = pendingSpace ? "▁" : "";
+          pendingSpace = false;
+          if (/^[A-Za-z0-9]+$/.test(piece) && piece.length > 4) {
+            var i = 0, first = true;
+            while (i < piece.length) {
+              var len = Math.min(4, piece.length - i);
+              if (piece.length - i - len === 1) len = piece.length - i;
+              toks.push((first ? prefix : "") + piece.slice(i, i + len));
+              first = false; i += len;
+            }
+          } else { toks.push(prefix + piece); }
+        });
+        return toks;
+      }
+      var palette = ["#eef2ff", "#e7f6ec", "#fff2e0", "#fde8e8", "#e7f0fb", "#f0e8fb"];
+      function renderTokens() {
+        var input = document.getElementById("tok-input");
+        var out = document.getElementById("tok-out");
+        var stats = document.getElementById("tok-stats");
+        if (!input || !out) return;
+        var text = input.value, toks = mockTokenize(text);
+        out.innerHTML = "";
+        toks.forEach(function (t, idx) {
+          var span = document.createElement("span");
+          span.className = "tok";
+          span.style.background = palette[idx % palette.length];
+          span.style.color = "#1f2733";
+          var label = t.replace(/▁/g, '<span class="tok-ws">▁</span>');
+          span.innerHTML = label + '<span class="id">#' + hashId(t) + "</span>";
+          out.appendChild(span);
+        });
+        var chars = text.length, ratio = toks.length ? (chars / toks.length).toFixed(2) : "0";
+        stats.textContent = toks.length + " tokens · " + chars + " chars · " + ratio +
+          " chars/token  (real GPT-style tokenizers average ~4 chars/token for English)";
+      }
+      var tokInput = document.getElementById("tok-input");
+      if (tokInput) { tokInput.addEventListener("input", renderTokens); renderTokens(); }
+    })();
+  </script>
+</body>
+</html>

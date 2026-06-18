@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Positional Encoding &amp; Long Context — Transformer Foundations</title>
+  <meta name="description" content="Sinusoidal, learned, relative/T5, RoPE, ALiBi, NoPE; context extension (PI/NTK/YaRN/LongRoPE); lost-in-the-middle and attention sinks." />
+
+  <!-- Tailwind (CDN) for layout utilities -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>window.tailwind && (tailwind.config = { darkMode: "class" });</script>
+
+  <!-- KaTeX (math) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <!-- highlight.js themes (light default; dark toggled by site.js) -->
+  <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" />
+  <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" disabled />
+
+  <!-- Shared site styles -->
+  <link rel="stylesheet" href="../assets/site.css" />
+
+  <!-- FOUC guard: set theme before first paint -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("theme") ||
+          ((window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+        if (t === "dark") document.documentElement.classList.add("dark");
+        if (localStorage.getItem("sidebar") === "collapsed") document.documentElement.classList.add("sidebar-collapsed");
+        var l = document.getElementById("hljs-light"), d = document.getElementById("hljs-dark");
+        if (l) l.disabled = (t === "dark");
+        if (d) d.disabled = (t !== "dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="app">
+
+    <aside class="sidebar" id="sidebar">
+      <a class="sidebar-brand" href="../index.html">
+        <span class="logo">∑</span>
+        <span><b>LLM Foundations</b><span>Interview teaching series</span></span>
+      </a>
+
+      <a class="nav-link" href="../index.html"><span class="num">⌂</span> Home</a>
+
+      <div class="nav-group-title">Phase 1 · Foundations</div>
+      <a class="nav-link" href="foundations-intro.html"><span class="num">↪</span> Intro &amp; overview</a>
+      <a class="nav-link" href="tokenization.html"><span class="num">02</span> Tokenization &amp; Embeddings</a>
+      <a class="nav-link" href="attention.html"><span class="num">04</span> Attention Mechanisms</a>
+      <a class="nav-link" href="transformers.html"><span class="num">03</span> Transformer Architecture</a>
+      <a class="nav-link active" href="positional-encoding.html"><span class="num">05</span> Positional Encoding</a>
+      <div class="nav-group-title">Phase 2 · Training &amp; Alignment</div>
+      <a class="nav-link" href="../decks/pretraining.html"><span class="num">06</span> Pretraining &amp; Scaling</a>
+      <a class="nav-link" href="../decks/finetuning-peft.html"><span class="num">07</span> Fine-tuning &amp; PEFT</a>
+      <a class="nav-link" href="../decks/rlhf.html"><span class="num">08</span> RLHF &amp; Alignment</a>
+      <a class="nav-link" href="../decks/synthetic-data.html"><span class="num">31</span> Synthetic Data</a>
+
+      <div class="nav-group-title">Phase 3 · Reasoning &amp; Inference</div>
+      <span class="nav-link soon"><span class="num">28</span> Reasoning Models</span>
+      <span class="nav-link soon"><span class="num">11</span> Inference &amp; Serving</span>
+      <span class="nav-link soon"><span class="num">32</span> Small / Edge Models</span>
+
+      <div class="nav-group-title">Phase 4 · Building Apps</div>
+      <span class="nav-link soon"><span class="num">29</span> Context Engineering</span>
+      <span class="nav-link soon"><span class="num">13</span> RAG</span>
+      <span class="nav-link soon"><span class="num">14</span> Vector Databases</span>
+      <span class="nav-link soon"><span class="num">15</span> Agents &amp; Tools</span>
+      <span class="nav-link soon"><span class="num">16</span> MCP</span>
+      <span class="nav-link soon"><span class="num">36</span> GenAI App Dev</span>
+
+      <div class="nav-group-title">Phase 6 · Architectures</div>
+      <span class="nav-link soon"><span class="num">30</span> Beyond Transformers</span>
+    </aside>
+    <div class="scrim" id="scrim"></div>
+
+    <div class="main">
+      <div class="topbar">
+        <button class="icon-btn" data-sidebar-toggle aria-label="Open menu">☰</button>
+        <strong style="color:var(--text-strong)">Positional Encoding</strong>
+        <button class="icon-btn" data-theme-toggle style="margin-left:auto" aria-label="Toggle theme">☾</button>
+      </div>
+      <button class="icon-btn theme-fab" data-theme-toggle aria-label="Toggle theme">☾</button>
+
+      <main class="content lecture">
+
+        <p style="font-size:13px;font-weight:700;letter-spacing:.04em;color:var(--accent);text-transform:uppercase;margin:0 0 6px;">
+          Phase 1 · Foundations · Module 05
+        </p>
+        <h1>Positional Encoding &amp; Long Context</h1>
+        <p class="subtitle">
+          Attention is order-blind, so position must be injected — and <em>how</em> you inject it decides whether your
+          model handles 2K tokens or 2M. Sinusoidal → learned → relative → RoPE → ALiBi, plus the context-extension tricks.
+        </p>
+
+        <div class="callout roadmap">
+          <div class="callout-title">📋 What you’ll learn <span style="font-weight:500;color:var(--muted);font-size:.9rem;">(~14 min)</span></div>
+          <p style="margin:.2em 0 0;">Why position is needed (permutation-equivariance) · sinusoidal &amp; learned absolute · relative / T5 bias · RoPE and
+          why it’s <em>relative</em> · ALiBi · NoPE · context extension (PI / NTK / YaRN / LongRoPE) · lost-in-the-middle
+          &amp; attention sinks.</p>
+        </div>
+
+        <h2><span class="sec-num">1.</span> Intuition</h2>
+        <p>
+          Self-attention is <strong>permutation-equivariant</strong>: shuffle the input tokens and the outputs just shuffle
+          the same way — the mechanism literally cannot tell “dog bites man” from “man bites dog.” To it, a sentence is an
+          unordered bag of words. So we inject a <strong>position signal</strong> — a timestamp on each token. The
+          <em>how</em> matters enormously: it determines whether a model trained at 4K tokens falls apart at 32K, or
+          extends gracefully to millions.
+        </p>
+
+        <h2><span class="sec-num">2.</span> How it works — three places to inject position</h2>
+        <p>
+          The original Transformer <em>adds</em> a fixed sinusoidal vector to each token embedding. Modern models instead
+          <em>rotate</em> the query/key vectors (RoPE) or <em>bias</em> the attention scores directly (ALiBi). Where the
+          signal enters changes its behavior — especially how well it extrapolates past the trained length.
+        </p>
+        <div class="diagram">
+          <div class="flow"><span class="box ghost" style="min-width:84px">Absolute</span><span class="arrow">→</span><span class="box">embedding</span><span class="add-pill">⊕ position vector</span><span class="arrow">→</span><span class="box accent">into block</span></div>
+          <div style="height:10px"></div>
+          <div class="flow"><span class="box ghost" style="min-width:84px">RoPE</span><span class="arrow">→</span><span class="box">Q, K</span><span class="add-pill">⟳ rotate by position</span><span class="arrow">→</span><span class="box accent">score depends on m−n</span></div>
+          <div style="height:10px"></div>
+          <div class="flow"><span class="box ghost" style="min-width:84px">ALiBi</span><span class="arrow">→</span><span class="box">scores</span><span class="add-pill">⊕ −m·(i−j) bias</span><span class="arrow">→</span><span class="box accent">softmax</span></div>
+          <div class="caption">Figure 4 — Add to embeddings (absolute), rotate Q/K (RoPE), or bias the scores (ALiBi).</div>
+        </div>
+
+        <h2><span class="sec-num">3.</span> The approaches — full landscape</h2>
+        <div class="approach">
+          <h4>Sinusoidal absolute <span class="tag classic">classic</span></h4>
+          <p><strong>What:</strong> the original (2017): add fixed sine/cosine vectors of geometrically increasing wavelength to embeddings. <strong>How:</strong> dimension <code>2i</code> uses <code>sin(pos/10000^{2i/d})</code>. <strong>Solves:</strong> gives order for free (no parameters); in theory a fixed linear map relates any two offsets. <strong>Cost:</strong> extrapolates to longer-than-trained lengths poorly in practice.</p>
+          <p class="read-more"><a href="https://kazemnejad.com/blog/transformer_architecture_positional_encoding/" target="_blank" rel="noopener noreferrer">Read more: The positional encoding, explained<span class="src"> · Kazemnejad</span></a></p>
+        </div>
+        <div class="approach">
+          <h4>Learned absolute <span class="tag classic">classic</span></h4>
+          <p><strong>What:</strong> a trainable embedding per position 0…L−1 (BERT, GPT-1/2). <strong>How:</strong> just another lookup table added to token embeddings. <strong>Solves:</strong> flexible, data-fit positions. <strong>Cost:</strong> a hard wall at the max trained length <code>L</code> — positions beyond it have no embedding at all, so extending context means adding+training new rows.</p>
+          <p class="read-more"><a href="https://iclr-blogposts.github.io/2025/blog/positional-embedding/" target="_blank" rel="noopener noreferrer">Read more: Positional embeddings in Transformers<span class="src"> · ICLR 2025 Blog</span></a></p>
+        </div>
+        <div class="approach">
+          <h4>Relative position (Shaw) &amp; T5 bias <span class="tag modern">relative</span></h4>
+          <p><strong>What:</strong> encode the <em>distance</em> between tokens, not absolute slots. <strong>Shaw 2018</strong> adds learned vectors keyed by relative offset into the attention computation; <strong>T5</strong> simplifies this to a learned scalar bias per (head, bucketed distance) added to the logits. <strong>Solves:</strong> translation invariance and cleaner length behavior than absolute. <strong>Cost:</strong> extra logic/params in the attention step.</p>
+          <p class="read-more"><a href="https://jaketae.github.io/study/relative-positional-encoding/" target="_blank" rel="noopener noreferrer">Read more: Relative positional encoding<span class="src"> · Jake Tae</span></a></p>
+        </div>
+        <div class="approach">
+          <h4>RoPE — Rotary Position Embedding <span class="tag sota">dominant default</span></h4>
+          <p><strong>What:</strong> rotate Q and K by an angle proportional to position (Su et al., RoFormer 2021) — used by LLaMA, Qwen, Mistral, GPT-NeoX. <strong>How:</strong> treat dimensions in pairs; rotate pair <code>i</code> by <code>pos·θ_i</code> with <code>θ_i = base^{−2i/d}</code> (base often 10000). Because a dot product of two rotated vectors depends only on the <em>difference</em> of angles, the attention score depends on the <em>relative</em> distance <code>m−n</code> — even though each token is rotated by its own <em>absolute</em> position. Applied to Q/K only (not V). <strong>Solves:</strong> relative-position behavior with zero added parameters and clean long-context extension.</p>
+          <div class="pcons">
+            <div class="pros"><h5>Pros</h5><ul><li>Relative &amp; absolute in one, parameter-free</li><li>Extendable (PI/NTK/YaRN below)</li></ul></div>
+            <div class="cons"><h5>Cons</h5><ul><li>Naive extrapolation past training length breaks</li><li>Interleaved vs half-split conventions trip weight ports</li></ul></div>
+          </div>
+          <p class="read-more"><a href="https://blog.eleuther.ai/rotary-embeddings/" target="_blank" rel="noopener noreferrer">Read more: Rotary Embeddings: A Relative Revolution<span class="src"> · EleutherAI</span></a></p>
+        </div>
+        <div class="approach">
+          <h4>ALiBi — Attention with Linear Biases <span class="tag modern">extrapolation</span></h4>
+          <p><strong>What:</strong> no embeddings at all — add a distance penalty straight to the scores (Press, 2021). <strong>How:</strong> subtract <code>m·(i−j)</code> from each logit, with a fixed per-head slope <code>m</code> (a geometric sequence across heads). <strong>Solves:</strong> strong length extrapolation (“train short, test long”) and a built-in recency bias. <strong>Cost:</strong> the recency bias can hurt tasks needing far-back lookups; less expressive than RoPE.</p>
+          <p class="read-more"><a href="https://github.com/ofirpress/attention_with_linear_biases" target="_blank" rel="noopener noreferrer">Read more: ALiBi: attention with linear biases<span class="src"> · Ofir Press · GitHub</span></a></p>
+        </div>
+        <div class="approach">
+          <h4>NoPE — no positional encoding <span class="tag sota">surprising</span></h4>
+          <p><strong>What:</strong> a <em>causal</em> decoder with no explicit position signal (Kazemnejad, 2023). <strong>How:</strong> the causal mask itself breaks permutation symmetry, so the model can <em>learn</em> position implicitly. <strong>Solves:</strong> sometimes matches or beats explicit schemes on length generalization — a useful reminder that “you must add position” is not absolute for decoders.</p>
+          <p class="read-more"><a href="https://sebastianraschka.com/llm-architecture-gallery/nope/" target="_blank" rel="noopener noreferrer">Read more: No Positional Embeddings (NoPE)<span class="src"> · Sebastian Raschka</span></a></p>
+        </div>
+        <div class="approach">
+          <h4>Context-window extension: PI → NTK → YaRN → LongRoPE <span class="tag sota">frontier</span></h4>
+          <p><strong>What:</strong> stretch a RoPE model trained at e.g. 4K to 32K–2M tokens. <strong>How:</strong> <em>Position Interpolation</em> (Chen 2023) linearly squeezes position indices into the trained range (needs a short fine-tune). <em>NTK-aware</em> scaling changes the base frequency instead, preserving high-frequency (short-range) detail. <em>YaRN</em> (Peng 2023) interpolates frequency bands non-uniformly (“NTK-by-parts”) and adds an attention-temperature correction, reaching long context with far less fine-tuning. <em>LongRoPE</em> (2024) evolutionary-searches per-dimension scales to hit 2M tokens. <strong>Solves:</strong> long context without retraining from scratch; trade a little short-context quality for a lot of reach.</p>
+          <p class="read-more"><a href="https://blog.eleuther.ai/yarn/" target="_blank" rel="noopener noreferrer">Read more: Extending RoPE: PI, NTK &amp; YaRN<span class="src"> · EleutherAI</span></a></p>
+        </div>
+
+        <h2><span class="sec-num">4.</span> Compare the schemes</h2>
+        <div class="table-wrap">
+          <table class="cmp">
+            <thead><tr><th>Approach</th><th>Where injected</th><th>Extrapolation</th><th>Params</th><th>Pros</th><th>Cons</th><th>Maturity</th></tr></thead>
+            <tbody>
+              <tr><td>Sinusoidal</td><td>+ to embeddings</td><td>Weak in practice</td><td>0</td><td>Free, simple</td><td>Poor length gen</td><td>Classic</td></tr>
+              <tr><td>Learned absolute</td><td>+ to embeddings</td><td>None (hard wall at L)</td><td>L·d</td><td>Flexible</td><td>Can’t exceed L</td><td>Classic</td></tr>
+              <tr><td>Relative / T5 bias</td><td>+ to logits</td><td>Good</td><td>Small</td><td>Translation-invariant</td><td>Attention-step cost</td><td>Mature</td></tr>
+              <tr><td><strong>RoPE</strong></td><td>Rotate Q/K</td><td>Good (great w/ scaling)</td><td>0</td><td>Relative+absolute, extendable</td><td>Naive extrapolation breaks</td><td><strong>SOTA</strong></td></tr>
+              <tr><td>ALiBi</td><td>Linear bias on logits</td><td>Strong</td><td>0</td><td>Train-short-test-long</td><td>Recency bias hurts recall</td><td>Modern</td></tr>
+              <tr><td>NoPE (causal)</td><td>(none)</td><td>Often strong</td><td>0</td><td>Simplest; mask gives order</td><td>Decoder-only; less control</td><td>Emerging</td></tr>
+              <tr><td>PI / YaRN / LongRoPE</td><td>Rescale RoPE freqs</td><td>Excellent (to 2M)</td><td>0</td><td>Extend pretrained models</td><td>Slight short-ctx loss</td><td>SOTA</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2><span class="sec-num">5.</span> The math</h2>
+        <h4>Sinusoidal positional encoding</h4>
+        $$ PE_{(pos,\,2i)} = \sin\!\left(\frac{pos}{10000^{2i/d}}\right),\qquad PE_{(pos,\,2i+1)} = \cos\!\left(\frac{pos}{10000^{2i/d}}\right) $$
+        <p class="eqnote"><b>pos</b> = position index, <b>i</b> = dimension pair. Low dimensions oscillate fast, high dimensions slowly — a multi-scale “binary clock.” Geometric wavelengths let a fixed linear map shift any position by a constant offset.</p>
+        <h4>RoPE — rotary embedding (2-D pair)</h4>
+        $$ R(m\theta) = \begin{pmatrix} \cos m\theta & -\sin m\theta \\ \sin m\theta & \cos m\theta \end{pmatrix},\qquad \theta_i = 10000^{-2i/d} $$
+        <p>The key identity — rotated query at \(m\) dotted with rotated key at \(n\) depends only on \(m-n\):</p>
+        $$ \big(R(m\theta)\,q\big)^{\top}\big(R(n\theta)\,k\big) = q^{\top} R\big((n-m)\theta\big)\, k $$
+        <p class="eqnote">Because \(R(a)^{\top}R(b)=R(b-a)\). So an <b>absolute</b> rotation per token yields a score that is purely a function of <b>relative</b> distance \(m-n\) — the magic of RoPE. Position Interpolation replaces \(m\) with \(m\cdot \tfrac{L_{\text{train}}}{L_{\text{target}}}\); NTK/YaRN instead rescale the base inside \(\theta_i\).</p>
+        <h4>ALiBi bias</h4>
+        $$ \text{score}_{ij} = \frac{q_i \cdot k_j}{\sqrt{d_k}} - m\,(i - j) $$
+        <p class="eqnote"><b>m</b> = fixed per-head slope (a geometric sequence over heads). The penalty grows linearly with distance \(i-j\), encoding recency without any embedding — and it keeps working past the trained length.</p>
+
+        <h2><span class="sec-num">6.</span> In code — applying RoPE</h2>
+        <div class="codeblock"><span class="code-label">python</span><pre><code class="language-python">def apply_rope(x, positions, theta=10000.0):
+    # x: (batch, heads, seq, d_head) with d_head even
+    b, h, n, d = x.shape
+    half = d // 2
+    freqs = theta ** (-torch.arange(0, half).float() / half)   # (half,)
+    ang = positions[:, None].float() * freqs[None, :]          # (seq, half)
+    cos, sin = ang.cos(), ang.sin()
+    x1, x2 = x[..., :half], x[..., half:]
+    # rotate each (x1, x2) pair by its position-dependent angle
+    return torch.cat([x1 * cos - x2 * sin,
+                      x2 * cos + x1 * sin], dim=-1)
+</code></pre></div>
+
+        <h2><span class="sec-num">7.</span> Worked example — why RoPE is “relative”</h2>
+        <p>
+          Work in one 2-D pair with step angle \(\theta = 0.5\) rad/position. Put a query at position \(m=3\) and a key at
+          \(n=1\). RoPE rotates the query by \(m\theta = 1.5\) rad and the key by \(n\theta = 0.5\) rad. Their dot product is
+        </p>
+        $$ \big(R(1.5)\,q\big)^{\top}\big(R(0.5)\,k\big) = q^{\top} R(0.5 - 1.5)\,k = q^{\top} R(-1.0)\,k. $$
+        <p>
+          The score depends only on the rotation \(R(-1.0)\) — i.e. the <strong>gap of 2 positions</strong>, not the absolute
+          slots 3 and 1. Move the same pair to positions 7 and 5 (gap still 2) and you get the <em>identical</em> score.
+          That is exactly the relative-position property, achieved with no learned parameters and nothing added to the
+          values — which is why RoPE became the default.
+        </p>
+
+        <h2><span class="sec-num">8.</span> When to use what — decision guide</h2>
+        <ul>
+          <li>New decoder-only LLM → <strong>RoPE</strong> (set a larger base θ if you plan long context).</li>
+          <li>Must extrapolate far beyond training cheaply → <strong>ALiBi</strong>, or RoPE + <strong>YaRN/LongRoPE</strong>.</li>
+          <li>Extending an existing RoPE model 4K→32K with a small fine-tune budget → <strong>Position Interpolation</strong> or <strong>YaRN</strong>; validate on needle-in-a-haystack <em>and</em> multi-hop tasks, and watch short-context regression.</li>
+          <li>Long-context serving → remember the cost is also the <strong>KV cache</strong> (see <a href="attention.html">Attention</a>): pair your positional scheme with GQA/MLA + FlashAttention.</li>
+        </ul>
+
+        <h2><span class="sec-num">9.</span> Common pitfalls &amp; misconceptions</h2>
+        <ul>
+          <li><strong>“Just feed a RoPE model longer sequences.”</strong> Naive extrapolation past the trained length collapses; you need PI/NTK/YaRN/LongRoPE.</li>
+          <li><strong>“Bigger context window = the model uses it.”</strong> Advertised ≠ effective length. Watch <em>lost-in-the-middle</em> (U-shaped recall: info at the start/end is used far better than the middle) and validate beyond single-needle tests.</li>
+          <li><strong>“Without positional encoding a Transformer is useless.”</strong> A <em>causal</em> decoder (NoPE) can learn order from the mask alone — sometimes competitively.</li>
+          <li><strong>“Attention sinks are a bug.”</strong> Models dump attention on the first tokens because softmax must sum to 1; StreamingLLM <em>exploits</em> this to stream over millions of tokens — but naively evicting those first tokens breaks generation.</li>
+          <li><strong>“Low perplexity at long context = good long-context model.”</strong> Perplexity can stay low while retrieval accuracy collapses; measure effective context directly.</li>
+        </ul>
+
+        <h2><span class="sec-num">10.</span> 🚀 What’s new in the industry</h2>
+        <div class="callout whatsnew">
+          <div class="callout-title">🚀 Context to millions of tokens</div>
+          <ul style="margin-bottom:.3em;">
+            <li><strong>RoPE scaling matured.</strong> <strong>YaRN</strong> and <strong>LongRoPE</strong> stretch RoPE to 128K–2M tokens with modest fine-tuning, balancing long reach against short-context quality.</li>
+            <li><strong>Rethinking position itself.</strong> <strong>CoPE</strong> makes position content-dependent (count what matters), and “Round and Round We Go” shows models use the full RoPE frequency spectrum — not just distance decay.</li>
+            <li><strong>Streaming &amp; sinks.</strong> Dedicated sink tokens + sliding windows (StreamingLLM) enable effectively unbounded generation, now common in serving stacks.</li>
+          </ul>
+        </div>
+        <details class="fold">
+          <summary>📄 Papers — positional encoding &amp; long context (verified links)</summary>
+          <div class="fold-body">
+            <div class="paper"><a href="https://arxiv.org/abs/1803.02155">Self-Attention with Relative Position Representations</a> <span class="meta">— Shaw et al., 2018.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2104.09864">RoFormer: Enhanced Transformer with Rotary Position Embedding (RoPE)</a> <span class="meta">— Su et al., 2021.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2108.12409">Train Short, Test Long: Attention with Linear Biases (ALiBi)</a> <span class="meta">— Press et al., 2021.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2306.15595">Extending Context Window via Positional Interpolation (PI)</a> <span class="meta">— Chen et al., 2023.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2309.00071">YaRN: Efficient Context Window Extension of LLMs</a> <span class="meta">— Peng et al., 2023.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2402.13753">LongRoPE: Extending LLM Context Window Beyond 2 Million Tokens</a> <span class="meta">— Ding et al., 2024.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2305.19466">The Impact of Positional Encoding on Length Generalization (NoPE)</a> <span class="meta">— Kazemnejad et al., 2023.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2307.03172">Lost in the Middle: How Language Models Use Long Contexts</a> <span class="meta">— Liu et al., 2023.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2309.17453">Efficient Streaming Language Models with Attention Sinks</a> <span class="meta">— Xiao et al., 2023.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2405.18719">Contextual Position Encoding (CoPE)</a> <span class="meta">— Golovneva et al., 2024.</span></div>
+            <div class="paper"><a href="https://arxiv.org/abs/2410.06205">Round and Round We Go! What makes Rotary Positional Encodings useful?</a> <span class="meta">— Barbero et al., 2024.</span></div>
+          </div>
+        </details>
+
+        <h2><span class="sec-num">11.</span> Practice</h2>
+        <p>Drill the full bank: <a href="../../interview-prep/05-positional-encoding-and-long-context.md">05 · Positional Encoding &amp; Long Context</a>. A starter mix:</p>
+        <ul class="qlist">
+          <li>Why does self-attention need explicit position information at all, when RNNs and CNNs do not? <span class="diff easy">Easy</span></li>
+          <li>Describe the sinusoidal absolute positional encoding. Why are sine/cosine of geometrically increasing wavelengths used? <span class="diff med">Med</span></li>
+          <li>Explain the core idea of RoPE. How does rotating the query and key vectors encode position? <span class="diff med">Med</span></li>
+          <li>Why does RoPE inject <em>relative</em> position even though it is applied as an absolute rotation to each token’s Q and K? <span class="diff hard">Hard</span></li>
+          <li>Explain ALiBi. How does it encode position, and why does it require no learned or added positional embeddings? <span class="diff med">Med</span></li>
+          <li>Explain Position Interpolation (PI). How does it modify the position indices, and why does compressing into the trained range help? <span class="diff med">Med</span></li>
+          <li>Describe YaRN at a high level. What components does it combine, and why? <span class="diff hard">Hard</span></li>
+          <li>What is the “lost in the middle” phenomenon? Describe the typical U-shaped performance curve. <span class="diff easy">Easy</span></li>
+          <li>What is an “attention sink,” and why do models dump large amounts of attention onto the first few tokens? <span class="diff med">Med</span></li>
+          <li>To extend a 512-token model to 4096 tokens, what does the choice of positional scheme imply for difficulty? <span class="diff hard">Hard</span></li>
+        </ul>
+
+        <h2><span class="sec-num">12.</span> Key takeaways</h2>
+        <div class="takeaways">
+          <ul>
+            <li><strong>Attention is order-blind</strong> (permutation-equivariant), so position must be injected.</li>
+            <li><strong>RoPE is today’s default</strong> — rotating Q/K makes scores depend on relative distance for free, and it extends (PI/YaRN/LongRoPE).</li>
+            <li><strong>ALiBi</strong> trades expressiveness for strong, simple length extrapolation; <strong>NoPE</strong> shows causal decoders can learn order from the mask.</li>
+            <li><strong>Long context is two problems:</strong> the positional scheme (this page) <em>and</em> the KV-cache cost (the <a href="attention.html">Attention</a> page).</li>
+            <li><strong>Advertised ≠ effective length:</strong> watch lost-in-the-middle and attention sinks; measure recall, not just perplexity.</li>
+          </ul>
+        </div>
+        <p><strong>Go deeper:</strong> <a href="https://blog.eleuther.ai/rotary-embeddings/">Rotary Embeddings: A Relative Revolution</a> · <a href="https://kazemnejad.com/blog/transformer_architecture_positional_encoding/">The positional encoding, explained</a>. ← Back to the <a href="foundations-intro.html">module overview</a>.</p>
+
+        <nav class="page-footer">
+          <a class="footlink home" href="../index.html"><span class="dir">⌂</span><span class="ttl">Home</span></a>
+          <a class="footlink prev" href="transformers.html"><span class="dir">← Transformers</span><span class="ttl">03 · Transformer Architecture</span></a>
+          <a class="footlink next" href="../decks/pretraining.html"><span class="dir">Next: Pretraining →</span><span class="ttl">06 · Pretraining &amp; Scaling</span></a>
+        </nav>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- CDN libs + shared JS (order matters: libs before site.js) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../assets/site.js"></script>
+
+</body>
+</html>

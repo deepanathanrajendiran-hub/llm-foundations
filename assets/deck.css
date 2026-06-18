@@ -1,0 +1,332 @@
+/* ============================================================
+   Teaching Slides — shared reveal.js theme (assets/deck.css)
+   Loaded AFTER reveal's base + white theme; overrides them so
+   every deck looks identical. Calm, indigo accent, big type.
+   Light by default; html.deck-dark flips tokens. Also styles the
+   teaching components (approach slides, cmp table, anim widgets,
+   evolution animations) reused across decks.
+   ============================================================ */
+
+:root {
+  --bg:            #ffffff;
+  --surface:       #ffffff;
+  --surface-2:     #f5f7fb;
+  --text:          #1f2733;
+  --text-strong:   #0f1726;
+  --muted:         #5b6675;
+  --border:        #e4e9f1;
+  --border-strong: #d4dbe6;
+  --accent:        #4f46e5;
+  --accent-hover:  #4338ca;
+  --accent-weak:   #eef2ff;
+  --accent-border: #c7d2fe;
+  --new-accent:    #0d9488;
+  --new-weak:      #effbf8;
+  --new-border:    #99e6da;
+  --warn-accent:   #b45309;
+  --warn-weak:     #fef6ec;
+  --warn-border:   #f3d9a8;
+  --code-bg:       #f6f8fa;
+}
+html.deck-dark {
+  --bg:            #0d1117;
+  --surface:       #161b22;
+  --surface-2:     #1b212b;
+  --text:          #d6dee8;
+  --text-strong:   #f0f4f9;
+  --muted:         #95a1b0;
+  --border:        #283039;
+  --border-strong: #38414d;
+  --accent:        #8b93f8;
+  --accent-hover:  #a5acff;
+  --accent-weak:   #1c2030;
+  --accent-border: #36406b;
+  --new-accent:    #2dd4bf;
+  --new-weak:      #11201f;
+  --new-border:    #1f4d49;
+  --warn-accent:   #fbbf24;
+  --warn-weak:     #211a10;
+  --warn-border:   #4a3b1d;
+  --code-bg:       #11161d;
+}
+
+/* ---------- reveal base overrides ---------- */
+.reveal-viewport { background: var(--bg); transition: background .25s; }
+.reveal {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--text);
+  font-size: 30px;
+}
+.reveal .slides { text-align: left; }
+.reveal .slides section { line-height: 1.4; }
+.reveal h1, .reveal h2, .reveal h3, .reveal h4 {
+  color: var(--text-strong); font-weight: 800; letter-spacing: -.01em;
+  text-transform: none; margin: 0 0 .35em; line-height: 1.15;
+}
+.reveal h1 { font-size: 1.9em; }
+.reveal h2 { font-size: 1.45em; }
+.reveal h3 { font-size: 1.15em; color: var(--accent); }
+.reveal h4 { font-size: 1em; color: var(--accent); }
+.reveal p, .reveal li { color: var(--text); }
+.reveal strong { color: var(--text-strong); }
+.reveal em { color: inherit; }
+.reveal a { color: var(--accent); text-decoration: none; }
+.reveal a:hover { text-decoration: underline; }
+.reveal ul, .reveal ol { margin: .3em 0 .3em 1em; }
+.reveal li { margin: .28em 0; }
+.reveal .slides section img { border: none; box-shadow: none; }
+.reveal .controls { color: var(--accent); }
+.reveal .progress { color: var(--accent); height: 4px; }
+.reveal .slide-number { background: transparent; color: var(--muted); font-size: 15px; right: 12px; bottom: 10px; }
+.reveal code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.reveal :not(pre) > code {
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: 5px; padding: .04em .32em; font-size: .82em; color: var(--text-strong);
+}
+.reveal pre { width: 100%; box-shadow: none; font-size: .56em; margin: .4em 0; }
+.reveal pre code {
+  border-radius: 10px; padding: 14px 16px; max-height: 460px;
+  border: 1px solid #30363d; background: #0d1117; color: #c9d1d9;
+}
+.reveal section.present { /* top aligned via center:false in config */ }
+
+/* small kicker above titles */
+.kicker {
+  font-size: .5em; font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--accent); margin: 0 0 .5em;
+}
+.subtitle { color: var(--muted); font-size: .82em; font-weight: 500; }
+.muted { color: var(--muted); }
+.small { font-size: .8em; }
+.tiny { font-size: .66em; }
+.center { text-align: center; }
+
+/* ---------- title slide ---------- */
+.deck-title { text-align: center; }
+.deck-title .logo {
+  width: 64px; height: 64px; border-radius: 16px; margin: 0 auto .4em;
+  background: linear-gradient(135deg, var(--accent), #8b5cf6);
+  display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 34px;
+}
+.deck-title h1 { font-size: 2.1em; }
+.keyhint {
+  display: inline-block; margin-top: 1em; font-size: .54em; color: var(--muted);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 6px 16px;
+}
+.keyhint kbd {
+  font-family: ui-monospace, Menlo, monospace; font-size: .92em; color: var(--text-strong);
+  background: var(--bg); border: 1px solid var(--border-strong); border-bottom-width: 2px;
+  border-radius: 4px; padding: 0 .35em; margin: 0 .15em;
+}
+
+/* ---------- callout boxes ---------- */
+.callout {
+  border: 1px solid var(--border); border-left: 5px solid var(--accent);
+  background: var(--accent-weak); border-radius: 10px; padding: .55em .8em; margin: .5em 0;
+}
+.callout .t { font-weight: 800; color: var(--text-strong); display: block; margin-bottom: .2em; }
+.callout.whatsnew { border-left-color: var(--new-accent); background: var(--new-weak); }
+.callout.whatsnew .t { color: var(--new-accent); }
+.callout.warn { border-left-color: var(--warn-accent); background: var(--warn-weak); }
+.callout.warn .t { color: var(--warn-accent); }
+
+/* ---------- two-column layout ---------- */
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: .8em 1.2em; align-items: start; }
+.cols.c3 { grid-template-columns: 1fr 1fr 1fr; }
+.cols.tight { gap: .4em .9em; }
+
+/* ---------- approach tag + pros/cons ---------- */
+.tag {
+  display: inline-block; font-size: .42em; font-weight: 800; letter-spacing: .04em;
+  text-transform: uppercase; padding: 3px 10px; border-radius: 999px; vertical-align: middle;
+  margin-left: .4em; background: var(--accent-weak); color: var(--accent);
+}
+.tag.classic { background: var(--surface-2); color: var(--muted); }
+.tag.modern  { background: var(--accent-weak); color: var(--accent); }
+.tag.sota    { background: var(--new-weak); color: var(--new-accent); }
+.pcons { display: grid; grid-template-columns: 1fr 1fr; gap: .3em .9em; margin-top: .3em; }
+.pcons h5 { margin: 0 0 .1em; font-size: .62em; text-transform: uppercase; letter-spacing: .04em; }
+.pcons .pros h5 { color: #15803d; }
+.pcons .cons h5 { color: #b91c1c; }
+html.deck-dark .pcons .pros h5 { color: #4ade80; }
+html.deck-dark .pcons .cons h5 { color: #f87171; }
+.pcons ul { margin: 0 0 0 .9em; font-size: .82em; }
+
+/* ---------- comparison table ---------- */
+.reveal table.cmp { border-collapse: collapse; width: 100%; font-size: .56em; margin: 0; }
+.reveal table.cmp th, .reveal table.cmp td {
+  text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top;
+}
+.reveal table.cmp thead th { background: var(--surface-2); color: var(--text-strong); font-weight: 800; }
+.reveal table.cmp tbody tr:nth-child(even) { background: var(--surface-2); }
+.reveal table.cmp td:first-child, .reveal table.cmp th:first-child { font-weight: 700; color: var(--text-strong); }
+
+/* ---------- math notes ---------- */
+.eqnote { font-size: .66em; color: var(--muted); margin-top: .3em; }
+.eqnote b { color: var(--text-strong); }
+.reveal .katex { font-size: 1.05em; }
+
+/* ---------- papers + practice ---------- */
+.paper { font-size: .62em; margin: .3em 0; padding-left: 12px; border-left: 2px solid var(--accent-border); }
+.paper a { font-weight: 700; }
+.paper .meta { color: var(--muted); }
+.qlist { list-style: none; margin: .3em 0 0; padding: 0; }
+.qlist li {
+  position: relative; font-size: .82em; margin: .35em 0; padding: .35em .6em .35em 2.2em;
+  border: 1px solid var(--border); border-radius: 9px; background: var(--surface); counter-increment: q;
+}
+.qlist { counter-reset: q; }
+.qlist li::before {
+  content: counter(q); position: absolute; left: .5em; top: .5em;
+  width: 1.4em; height: 1.4em; border-radius: 6px; background: var(--accent-weak); color: var(--accent);
+  font-size: .8em; font-weight: 800; display: grid; place-items: center;
+}
+.diff { font-size: .62em; font-weight: 800; padding: 1px 7px; border-radius: 999px; margin-left: .3em; }
+.diff.easy { background: #e7f6ec; color: #15803d; }
+.diff.med  { background: #fff2e0; color: #b45309; }
+.diff.hard { background: #fde8e8; color: #b91c1c; }
+html.deck-dark .diff.easy { background: #11271a; color: #4ade80; }
+html.deck-dark .diff.med  { background: #2a2113; color: #fbbf24; }
+html.deck-dark .diff.hard { background: #2a1414; color: #f87171; }
+
+/* ---------- takeaways ---------- */
+.takeaways { border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); padding: .3em 1em; }
+
+/* ---------- Mermaid ---------- */
+.mermaid { text-align: center; margin: .3em 0; }
+.mermaid svg { max-width: 100%; max-height: 520px; height: auto; }   /* tall TD trees scale to fit the slide */
+
+/* ---------- inline SVG graphs (e.g. the scaling-law log-log plot) ---------- */
+.sl-graph { width: 100%; max-width: 540px; height: auto; display: block; margin: .2em auto; overflow: visible; }
+.sl-axis  { stroke: var(--muted); stroke-width: 2; fill: none; }
+.sl-arrow { fill: var(--muted); }
+.sl-pt    { fill: var(--accent); stroke: var(--surface); stroke-width: 1.5; }
+.sl-fit   { stroke: var(--accent); stroke-width: 3; fill: none; }
+.sl-extrap{ stroke: var(--new-accent); stroke-width: 3; stroke-dasharray: 7 6; fill: none; }
+.sl-fore  { fill: var(--new-accent); stroke: var(--surface); stroke-width: 1.5; }
+.sl-axlab { fill: var(--muted); font-size: 13px; font-family: inherit; }
+.sl-pow   { fill: var(--accent); font-size: 15px; font-weight: 700; font-family: inherit; }
+.sl-note  { fill: var(--new-accent); font-size: 12px; font-weight: 600; font-family: inherit; }
+.sl-curve { stroke: var(--accent); stroke-width: 3; fill: none; }
+.sl-curve2{ stroke: var(--new-accent); stroke-width: 3; fill: none; }
+.sl-ref   { stroke: var(--muted); stroke-width: 2; stroke-dasharray: 5 5; fill: none; }
+.sl-vmark { stroke: var(--border-strong); stroke-width: 1.5; stroke-dasharray: 3 4; }
+.sl-mark  { fill: var(--accent); stroke: var(--surface); stroke-width: 1.5; }
+.sl-mark2 { fill: var(--new-accent); stroke: var(--surface); stroke-width: 1.5; }
+.sl-mlab  { fill: var(--text-strong); font-size: 12px; font-weight: 700; font-family: inherit; }
+
+/* ---------- flow boxes (lightweight inline diagrams) ---------- */
+.flow { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; }
+.flow .box {
+  border: 1px solid var(--border-strong); background: var(--surface); border-radius: 9px;
+  padding: 7px 11px; font-size: .7em; font-weight: 700; color: var(--text-strong); text-align: center;
+}
+.flow .box small { display: block; font-weight: 500; color: var(--muted); font-size: .82em; }
+.flow .box.accent { background: var(--accent-weak); border-color: var(--accent-border); color: var(--accent); }
+.flow .box.green  { background: var(--new-weak); border-color: var(--new-border); color: var(--new-accent); }
+.flow .arrow { color: var(--accent); font-weight: 800; }
+
+/* ============================================================
+   Animation widgets (mechanism + approach-evolution)
+   ============================================================ */
+.anim { border: 1px solid var(--accent-border); border-radius: 12px; background: var(--surface); padding: .55em .7em; margin: .3em 0; }
+.anim-stage { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; min-height: 1.6em; padding: .4em 0; }
+.anim-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: .4em; }
+.deckbtn {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font: inherit;
+  font-size: .6em; font-weight: 700; padding: 6px 12px; border-radius: 8px;
+  border: 1px solid var(--accent); background: var(--accent); color: #fff;
+}
+.deckbtn:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.deckbtn.ghost { background: transparent; color: var(--accent); }
+.deckbtn.ghost:hover { background: var(--accent-weak); }
+.deckbtn.on { background: var(--accent-hover); }
+.anim-caption {
+  margin-top: .4em; font-size: .68em; line-height: 1.45; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: 8px; padding: .45em .6em; min-height: 3.2em;
+}
+.anim-caption .step-num { font-weight: 800; color: var(--accent); margin-right: .3em; }
+.anim-node {
+  border: 1px solid var(--border-strong); background: var(--surface); border-radius: 9px;
+  padding: 6px 10px; font-size: .62em; font-weight: 700; color: var(--text-strong); text-align: center; line-height: 1.2;
+  transition: opacity .25s, background .25s, border-color .25s, box-shadow .25s, color .25s;
+}
+.anim-node small { display: block; font-weight: 500; color: var(--muted); font-size: .8em; }
+.anim-node.dim { opacity: .3; }
+.anim-node.on { border-color: var(--accent-border); background: var(--accent-weak); color: var(--accent); box-shadow: 0 0 0 2px var(--accent-border); }
+.anim-node.done { border-color: var(--new-border); background: var(--new-weak); color: var(--new-accent); }
+.anim-arrow { color: var(--muted); font-weight: 800; transition: color .25s; }
+.anim-arrow.on { color: var(--accent); }
+.anim-tok {
+  display: inline-block; padding: 5px 9px; border-radius: 7px; font-family: ui-monospace, Menlo, monospace;
+  font-size: .66em; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
+  transition: opacity .2s, background .2s, border-color .2s, color .2s;
+}
+.anim-tok.ctx    { background: var(--accent-weak); border-color: var(--accent-border); color: var(--accent); }
+.anim-tok.pred   { background: var(--new-weak); border-color: var(--new-border); color: var(--new-accent); font-weight: 800; }
+.anim-tok.mask   { background: var(--warn-weak); border-color: var(--warn-border); color: var(--warn-accent); font-weight: 800; }
+.anim-tok.future { opacity: .34; }
+.anim-meter { height: 9px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--border); overflow: hidden; margin-top: .4em; }
+.anim-meter > span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--new-accent)); transition: width .45s ease; }
+.anim-metalabel { font-size: .56em; color: var(--muted); margin-top: .25em; }
+
+/* evolution: weight grid (PEFT) */
+.wgrid { display: inline-grid; grid-template-columns: repeat(8, 1fr); gap: 3px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.wcell { width: 16px; height: 16px; border-radius: 3px; background: var(--surface); border: 1px solid var(--border-strong); transition: all .3s; }
+.wcell.frozen { background: var(--surface-2); opacity: .55; }
+.wcell.train  { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 6px var(--accent-border); }
+.wcell.lowrank{ background: var(--new-accent); border-color: var(--new-accent); }
+.wcell.q4     { background: repeating-linear-gradient(45deg, var(--surface-2), var(--surface-2) 3px, var(--border) 3px, var(--border) 6px); }
+.evo-lanes { display: grid; gap: .5em; }
+.evo-lane { border: 1px solid var(--border); border-radius: 10px; padding: .4em .6em; background: var(--surface); opacity: .35; transition: opacity .3s, border-color .3s; }
+.evo-lane.on { opacity: 1; border-color: var(--accent-border); box-shadow: 0 0 0 2px var(--accent-border); }
+.evo-lane h5 { margin: 0 0 .2em; font-size: .7em; color: var(--accent); }
+.evo-lane .lane-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+/* distribution curves (model collapse) */
+.distbox { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; }
+.dist { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: .3em; }
+.dist h5 { margin: .1em 0 .2em; font-size: .66em; text-align: center; }
+.dist svg { width: 100%; height: 120px; display: block; }
+.dist .curve { fill: none; stroke: var(--accent); stroke-width: 3; transition: d .5s; }
+.dist.collapse .curve { stroke: #dc2626; }
+html.deck-dark .dist.collapse .curve { stroke: #f87171; }
+
+/* ---------- dark toggle + corner ui ---------- */
+.deck-darkbtn {
+  position: fixed; top: 12px; right: 14px; z-index: 60;
+  width: 38px; height: 38px; border-radius: 9px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  font-size: 17px; line-height: 1; display: grid; place-items: center;
+}
+.deck-darkbtn:hover { background: var(--surface-2); }
+
+.anim-title { font-size: .68em; font-weight: 800; color: var(--accent); margin-bottom: .25em; letter-spacing: .01em; }
+
+/* ---------- per-approach fragment diagrams ---------- */
+.approach-steps { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; margin: .3em 0; }
+.approach-steps .anim-node.fragment { opacity: 0; }              /* fragments start hidden, reveal handles fade-in */
+.approach-steps .anim-node.fragment.visible { opacity: 1; }
+.lit { background: var(--accent-weak) !important; border-color: var(--accent-border) !important; color: var(--accent) !important; box-shadow: 0 0 0 2px var(--accent-border); }
+.reveal .fragment.lit-step.visible { background: var(--accent-weak); border-color: var(--accent-border); color: var(--accent); }
+
+/* ---------- click-to-reveal practice answers ---------- */
+.qlist li.qa { cursor: pointer; transition: border-color .15s; }
+.qlist li.qa:hover { border-color: var(--accent-border); }
+.qa .q { font-weight: 600; display: block; }
+.qa .q .reveal-hint { color: var(--muted); font-weight: 600; font-size: .82em; margin-left: .4em; white-space: nowrap; }
+.qa.open .q .reveal-hint::after { content: " (hide)"; }
+.qa .answer {
+  display: none; margin-top: .5em; font-size: .8em; line-height: 1.45; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--border); border-left: 3px solid var(--new-accent);
+  border-radius: 7px; padding: .5em .7em;
+}
+.qa.open .answer { display: block; }
+.qa .answer .watch { display: block; margin-top: .4em; color: var(--warn-accent); font-size: .95em; }
+.qa .answer .watch::before { content: "⚠ "; }
+
+/* respect reduced motion: kill long transitions */
+@media (prefers-reduced-motion: reduce) {
+  .anim-node, .anim-tok, .anim-meter > span, .evo-lane, .wcell { transition: none !important; }
+}

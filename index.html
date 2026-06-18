@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLM Foundations — Teaching Series</title>
+  <meta name="description" content="A local, static teaching site for LLM/AI interview prep: deep, lecture-style walkthroughs of the foundations." />
+
+  <!-- Tailwind (CDN) for layout utilities -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>window.tailwind && (tailwind.config = { darkMode: "class" });</script>
+
+  <!-- KaTeX (math) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <!-- highlight.js themes (light default; dark toggled by site.js) -->
+  <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" />
+  <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" disabled />
+
+  <!-- Shared site styles -->
+  <link rel="stylesheet" href="assets/site.css" />
+
+  <!-- FOUC guard: set theme before first paint -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("theme") ||
+          ((window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+        if (t === "dark") document.documentElement.classList.add("dark");
+        if (localStorage.getItem("sidebar") === "collapsed") document.documentElement.classList.add("sidebar-collapsed");
+        var l = document.getElementById("hljs-light"), d = document.getElementById("hljs-dark");
+        if (l) l.disabled = (t === "dark");
+        if (d) d.disabled = (t !== "dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="app">
+
+    <aside class="sidebar" id="sidebar">
+      <a class="sidebar-brand" href="index.html">
+        <span class="logo">∑</span>
+        <span><b>LLM Foundations</b><span>Interview teaching series</span></span>
+      </a>
+
+      <a class="nav-link active" href="index.html"><span class="num">⌂</span> Home</a>
+
+      <div class="nav-group-title">Phase 1 · Foundations</div>
+      <a class="nav-link" href="topics/foundations-intro.html"><span class="num">↪</span> Intro &amp; overview</a>
+      <a class="nav-link" href="topics/tokenization.html"><span class="num">02</span> Tokenization &amp; Embeddings</a>
+      <a class="nav-link" href="topics/attention.html"><span class="num">04</span> Attention Mechanisms</a>
+      <a class="nav-link" href="topics/transformers.html"><span class="num">03</span> Transformer Architecture</a>
+      <a class="nav-link" href="topics/positional-encoding.html"><span class="num">05</span> Positional Encoding</a>
+      <div class="nav-group-title">Phase 2 · Training &amp; Alignment</div>
+      <a class="nav-link" href="decks/pretraining.html"><span class="num">06</span> Pretraining &amp; Scaling</a>
+      <a class="nav-link" href="decks/finetuning-peft.html"><span class="num">07</span> Fine-tuning &amp; PEFT</a>
+      <a class="nav-link" href="decks/rlhf.html"><span class="num">08</span> RLHF &amp; Alignment</a>
+      <a class="nav-link" href="decks/synthetic-data.html"><span class="num">31</span> Synthetic Data</a>
+
+      <div class="nav-group-title">Phase 3 · Reasoning &amp; Inference</div>
+      <span class="nav-link soon"><span class="num">28</span> Reasoning Models</span>
+      <span class="nav-link soon"><span class="num">11</span> Inference &amp; Serving</span>
+      <span class="nav-link soon"><span class="num">32</span> Small / Edge Models</span>
+
+      <div class="nav-group-title">Phase 4 · Building Apps</div>
+      <span class="nav-link soon"><span class="num">29</span> Context Engineering</span>
+      <span class="nav-link soon"><span class="num">13</span> RAG</span>
+      <span class="nav-link soon"><span class="num">14</span> Vector Databases</span>
+      <span class="nav-link soon"><span class="num">15</span> Agents &amp; Tools</span>
+      <span class="nav-link soon"><span class="num">16</span> MCP</span>
+      <span class="nav-link soon"><span class="num">36</span> GenAI App Dev</span>
+
+      <div class="nav-group-title">Phase 6 · Architectures</div>
+      <span class="nav-link soon"><span class="num">30</span> Beyond Transformers</span>
+    </aside>
+    <div class="scrim" id="scrim"></div>
+
+    <div class="main">
+      <div class="topbar">
+        <button class="icon-btn" data-sidebar-toggle aria-label="Open menu">☰</button>
+        <strong style="color:var(--text-strong)">LLM Foundations</strong>
+        <button class="icon-btn" data-theme-toggle style="margin-left:auto" aria-label="Toggle theme">☾</button>
+      </div>
+      <button class="icon-btn theme-fab" data-theme-toggle aria-label="Toggle theme">☾</button>
+
+      <main class="content">
+
+        <section class="hero">
+          <h1>LLM Foundations</h1>
+          <p>A local, static teaching series for LLM / GenAI interview prep. Each page is a deep, self-contained
+             lecture — built from the question bank in
+             <code>../interview-prep/</code> — that walks a topic from first principles to current SOTA, with
+             diagrams, math, code, and a comparison cheat-sheet of every approach you should know.</p>
+        </section>
+
+        <h2 style="font-size:1.15rem;color:var(--muted);font-weight:700;letter-spacing:.02em;border:0;margin:1.4em 0 .2em;">
+          Phase 1 · Foundations — built &amp; ready to teach
+        </h2>
+        <p style="color:var(--muted);margin-top:0;font-size:.97rem;">One module, split into an overview + four focused pages (~1 hr total). Start with the overview.</p>
+        <div class="card-grid">
+          <a class="topic-card" href="topics/foundations-intro.html">
+            <span class="badge">START HERE · OVERVIEW</span>
+            <h3>Transformer Foundations — Overview</h3>
+            <p>The whole pipeline in ~10 min: text → tokens → vectors → attention → block → position. Links to the four deep dives.</p>
+            <span class="pill">~10 min</span>
+          </a>
+          <a class="topic-card" href="topics/tokenization.html">
+            <span class="badge">MODULE 02</span>
+            <h3>Tokenization &amp; Embeddings</h3>
+            <p>Word → char → BPE → byte-level → WordPiece → Unigram → tokenizer-free; static vs contextual embeddings. Live tokenizer demo.</p>
+            <span class="pill">~12 min</span>
+          </a>
+          <a class="topic-card" href="topics/attention.html">
+            <span class="badge">MODULE 04</span>
+            <h3>Attention Mechanisms</h3>
+            <p>Scaled dot-product, multi-head, MQA/GQA/MLA, FlashAttention, sliding-window/sparse/linear, attention sinks. Heatmap demo.</p>
+            <span class="pill">~15 min</span>
+          </a>
+          <a class="topic-card" href="topics/transformers.html">
+            <span class="badge">MODULE 03</span>
+            <h3>Transformer Architecture</h3>
+            <p>The block (attention + FFN + residual + norm), pre-norm/RMSNorm/SwiGLU, BERT vs GPT vs T5, parameter counting &amp; scaling.</p>
+            <span class="pill">~13 min</span>
+          </a>
+          <a class="topic-card" href="topics/positional-encoding.html">
+            <span class="badge">MODULE 05</span>
+            <h3>Positional Encoding &amp; Long Context</h3>
+            <p>Sinusoidal, learned, relative/T5, RoPE, ALiBi, NoPE; context extension (PI/NTK/YaRN/LongRoPE); lost-in-the-middle &amp; sinks.</p>
+            <span class="pill">~14 min</span>
+          </a>
+        </div>
+
+        <h2 style="font-size:1.15rem;color:var(--muted);font-weight:700;letter-spacing:.02em;border:0;margin:2.2em 0 .2em;">
+          Phase 2 · Training &amp; Alignment — built &amp; ready to teach
+        </h2>
+        <p style="color:var(--muted);margin-top:0;font-size:.97rem;">From a raw pretrained base to an aligned assistant. These four are <strong>reveal.js slide decks</strong> — click to present (<kbd>←</kbd>/<kbd>→</kbd> nav · <kbd>S</kbd> speaker notes · <kbd>O</kbd> overview · <kbd>F</kbd> fullscreen); append <code>?print-pdf</code> to the URL to export a PDF.</p>
+        <div class="card-grid">
+          <a class="topic-card" href="decks/pretraining.html">
+            <span class="badge">MODULE 06 · ▶ DECK</span>
+            <h3>Pretraining &amp; Scaling Laws</h3>
+            <p>Self-supervised objectives (causal LM, MLM, span corruption, UL2, FIM) and the scaling laws — Kaplan, Chinchilla, compute-optimal — that size a run.</p>
+            <span class="pill">~16 min</span>
+          </a>
+          <a class="topic-card" href="decks/finetuning-peft.html">
+            <span class="badge">MODULE 07 · ▶ DECK</span>
+            <h3>Fine-tuning &amp; PEFT</h3>
+            <p>SFT and instruction tuning, then the parameter-efficient toolkit: adapters, prefix/prompt tuning, LoRA, QLoRA, DoRA, IA³. With a LoRA demo.</p>
+            <span class="pill">~17 min</span>
+          </a>
+          <a class="topic-card" href="decks/rlhf.html">
+            <span class="badge">MODULE 08 · ▶ DECK</span>
+            <h3>RLHF &amp; Alignment</h3>
+            <p>Reward modeling + PPO, the DPO shortcut, critic-free GRPO, and AI / verifiable feedback (RLAIF, RLVR). With a PPO-loop demo.</p>
+            <span class="pill">~18 min</span>
+          </a>
+          <a class="topic-card" href="decks/synthetic-data.html">
+            <span class="badge">MODULE 31 · ▶ DECK</span>
+            <h3>Synthetic Data &amp; Data-Centric AI</h3>
+            <p>The data wall, generation (Self-Instruct, Evol-Instruct, distillation), self-improvement (STaR), verification, and model collapse. With a flywheel demo.</p>
+            <span class="pill">~17 min</span>
+          </a>
+        </div>
+
+        <h2 style="font-size:1.15rem;color:var(--muted);font-weight:700;letter-spacing:.02em;border:0;margin:2em 0 .2em;">
+          Coming soon
+        </h2>
+        <p style="color:var(--muted);margin-top:0;font-size:.97rem;">New topics are added ~2 per week; the sidebar fills in as each lands.</p>
+        <div class="card-grid">
+          <span class="topic-card disabled"><span class="badge">28 · PHASE 3</span><h3>Reasoning Models</h3><p>Test-time compute, RLVR, verifiers and self-improvement.</p></span>
+          <span class="topic-card disabled"><span class="badge">13 · PHASE 4</span><h3>RAG</h3><p>Chunking, retrieval, reranking and RAG vs long-context.</p></span>
+          <span class="topic-card disabled"><span class="badge">15 · PHASE 4</span><h3>Agents &amp; Tools</h3><p>The agentic loop, function calling, planning and memory.</p></span>
+          <span class="topic-card disabled"><span class="badge">30 · PHASE 6</span><h3>Beyond Transformers</h3><p>SSMs, Mamba, linear attention and hybrid architectures.</p></span>
+        </div>
+
+        <p style="color:var(--muted);font-size:.92rem;margin-top:2.4em;">
+          Local &amp; offline-friendly: open <code>index.html</code> by double-clicking — no server, no build step.
+          Libraries (Tailwind, KaTeX, highlight.js) load from CDNs.
+        </p>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- CDN libs + shared JS (order matters: libs before site.js) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="assets/site.js"></script>
+</body>
+</html>

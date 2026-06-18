@@ -1,0 +1,91 @@
+================================================================
+  TEACHING SLIDES — WEEKLY KICKOFF  (reveal.js decks)
+================================================================
+
+HOW TO USE THIS (for me)
+------------------------
+Each week, open a new agent IN THIS FOLDER (teaching-site/) and paste the
+prompt below, replacing <TOPICS> with the topic(s) you're teaching that session
+(one or several — comma-separated). The agent reads CLAUDE.md (the full build
+spec) and builds a SEPARATE reveal.js slide DECK for each topic.
+
+- First session ever: build "attention" or "tokenization" FIRST — the first
+  deck sets the visual standard every later deck copies.
+- The agent must leave already-built decks untouched and just add the new one(s)
+  (and add a card to the index.html launcher).
+- Everything is local + static: when done, double-click index.html, click a deck.
+- While teaching: ←/→ to move, S = speaker notes, O = overview, F = fullscreen.
+
+
+PASTE THIS TO THE AGENT  (fill in <TOPICS>)
+-------------------------------------------
+Read CLAUDE.md in this folder fully and follow it exactly. It is the complete
+build spec for a local, static, no-build teaching SLIDE-DECK site built with
+reveal.js (open by double-clicking index.html — no npm, no server, all libraries
+via CDN; slides written as inline HTML <section> elements so file:// works).
+
+Build a separate reveal.js slide DECK for EACH of these topics: <TOPICS>
+
+Requirements:
+- Build ONE separate, complete deck per topic — never merge topics into one deck.
+  Add every new deck as a card on index.html.
+- Follow the 15-section deck structure in CLAUDE.md, in order. Do not skip
+  sections. Make each a real 30-45 minute lecture (~40-60 slides), not a summary.
+  Put the deeper teaching detail in reveal.js speaker notes (<aside class="notes">).
+- The "Approaches — full landscape" section is the heart of the deck — go DEEP:
+  cover EVERY major approach/method/variant for this topic that matters for AI
+  roles, classic → modern → SOTA, each in detail (how it works step by step, what
+  it solves, pros/cons, when used, how it differs from the prior approach). Give
+  EACH major approach its OWN animation/animated diagram — ideally animating the
+  evolution A → B → C — plus the comparison-table cheat-sheet slide.
+- EVERY deck MUST include animations + clear diagrams (see "Animations & diagrams"
+  in CLAUDE.md): reveal.js fragments for step-by-step reveals, Mermaid/SVG
+  diagrams, and at least one custom animated visualization of the core mechanism
+  (Play/Pause/Step/Reset or fragment-driven), with prefers-reduced-motion handling.
+- Pull the topic scope and the practice questions from the matching file in
+  ../interview-prep/ (filenames are NN-topic-name.md) and from
+  ../interview-prep/README.md. Questions only — do NOT use ../interview-prep/
+  answer-keys/. Do not invent facts or fake paper links.
+- Include the "What's new in the industry" section with real, recent papers
+  (title, year, link).
+- If this is the first deck: also create index.html (launcher) and the shared
+  assets/deck.css + assets/deck.js. Otherwise, reuse them and just add the new
+  deck(s) + a card on index.html. Leave other decks untouched.
+- When done, confirm each deck opens correctly via file:// with no console errors
+  (math, code, Mermaid, fragments, speaker notes all working), and run through the
+  "Definition of done" checklist in CLAUDE.md.
+
+-------------------------------------------
+
+
+TOPICS (slugs match ../interview-prep/ files — pick one or several per session)
+--------------------------------------------------------------------
+Core set I'm teaching first (rough teaching order):
+  tokenization        -> ../interview-prep/02-tokenization-and-embeddings.md
+  attention           -> ../interview-prep/04-attention-mechanisms.md
+  transformers        -> ../interview-prep/03-transformers-architecture.md
+  pretraining         -> ../interview-prep/06-pretraining-and-scaling-laws.md
+  fine-tuning (PEFT)  -> ../interview-prep/07-sft-finetuning-and-peft.md
+  rl-alignment        -> ../interview-prep/08-rlhf-and-rl-alignment.md
+  inference           -> ../interview-prep/11-inference-optimization-and-serving.md
+  rag                 -> ../interview-prep/13-rag.md
+  vector-databases    -> ../interview-prep/14-vector-databases-and-retrieval.md   (RAG's companion)
+  agentic-ai          -> ../interview-prep/15-agents-and-tool-use.md
+  mcp                 -> ../interview-prep/16-mcp-model-context-protocol.md
+  genai-app-dev       -> ../interview-prep/36-genai-app-development-and-frameworks.md
+
+Current-market topics, hot in 2025-2026 interviews (teach these early too):
+  reasoning-models    -> ../interview-prep/28-reasoning-models-and-test-time-compute.md
+  context-engineering -> ../interview-prep/29-context-engineering.md
+  efficient-archs     -> ../interview-prep/30-efficient-architectures-beyond-transformers.md
+  synthetic-data      -> ../interview-prep/31-synthetic-data-and-data-centric-ai.md
+  small-models-edge   -> ../interview-prep/32-small-language-models-and-edge.md
+
+Specialization primers (lighter; teach only if relevant to target roles):
+  diffusion-media     -> ../interview-prep/33-diffusion-and-generative-media.md
+  ai-security         -> ../interview-prep/34-ai-security-and-red-teaming.md
+  interpretability    -> ../interview-prep/35-mechanistic-interpretability.md
+
+All 36 topics live in ../interview-prep/ — see README.md there for the full list
+and the suggested learning path. The same prompt works for any of them.
+================================================================

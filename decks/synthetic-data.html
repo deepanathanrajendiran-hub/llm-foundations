@@ -1,0 +1,1196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Synthetic Data & Data-Centric AI — LLM Teaching Decks</title>
+  <meta name="description" content="A reveal.js lecture deck: the data wall, synthetic generation, self-improvement (STaR), verification, and model collapse." />
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/white.css" id="reveal-theme" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <link rel="stylesheet" href="../assets/deck.css?v=2" />
+
+  <!-- FOUC guard: set deck theme before first paint -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("deck-theme") ||
+          ((window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+        if (t === "dark") document.documentElement.classList.add("deck-dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+
+<!-- ============================================================
+     SECTION 1 · TITLE
+     ============================================================ -->
+<section>
+  <section class="deck-title">
+    <div class="logo">∑</div>
+    <p class="kicker">PHASE 2 · TRAINING &amp; ALIGNMENT · MODULE 31</p>
+    <h1>Synthetic Data &amp; Data-Centric AI</h1>
+    <p class="subtitle">When the web runs dry, models make their own training data — generation, self-improvement, verification, and the model-collapse risk you must engineer around.</p>
+    <p class="keyhint"><kbd>←</kbd><kbd>→</kbd> navigate · <kbd>S</kbd> speaker notes · <kbd>O</kbd> overview · <kbd>F</kbd> fullscreen · append <code>?print-pdf</code> to export</p>
+    <aside class="notes">
+      Welcome. This is the module about what happens when the easy game — scrape more web, train a bigger model — stops working. For a decade that was the recipe, but high-quality human text is finite. The field's answer is synthetic data: have a capable model write the training data, then filter it down to the good stuff. The whole lecture turns on one sentence: <em>generation is cheap, verification is the moat.</em> We'll walk the full ladder of approaches classic → SOTA, do the math of model collapse, write the code, and end on the one engineering rule that keeps the whole thing from eating itself — accumulate, don't replace.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 2 · ROADMAP
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Roadmap</p>
+    <h2>What you'll learn <span style="font-weight:500;opacity:.6;font-size:.6em;">(~16 min of content, 30–45 min taught)</span></h2>
+    <div class="callout"><span class="t">📋 The arc</span>
+      <ul>
+        <li class="fragment">The <strong>data wall</strong> — why high-quality public text is running out</li>
+        <li class="fragment">The generation landscape: augmentation → distillation → Self-Instruct → Evol-Instruct → "textbooks" → STaR → self-rewarding → RLAIF</li>
+        <li class="fragment"><strong>Verify, don't trust</strong> — turn a noisy generator into near-ground-truth labels</li>
+        <li class="fragment">Hygiene: quality filtering, dedup (MinHash), mixtures (DoReMi)</li>
+        <li class="fragment"><strong>Model collapse</strong> — and the one rule that avoids it: accumulate, don't replace</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Five ideas to land. One: the data wall is real and it's why this field exists. Two: there's a whole ladder of generation techniques and they each solve a specific weakness of the one before. Three: the single most important concept — verification is what separates a guess from a label. Four: the unglamorous hygiene (dedup, mixtures, contamination checks) that decides whether your synthetic corpus helps or hurts. Five: model collapse, the failure mode, and its surprisingly simple fix. If they remember nothing else, they should remember "verification is the moat" and "accumulate, don't replace."
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Core ideas to land</p>
+    <h2>Five things to take away</h2>
+    <div class="takeaways"><ul>
+      <li class="fragment"><strong>Generation is cheap; verification is the moat.</strong></li>
+      <li class="fragment"><strong>Math &amp; code lead</strong> because you can <em>run</em> the answer.</li>
+      <li class="fragment"><strong>Quality &gt; quantity</strong> — phi, LIMA: small clean sets rival huge scrapes.</li>
+      <li class="fragment"><strong>Self-improvement is a flywheel</strong> — generate → verify → retrain.</li>
+      <li class="fragment"><strong>Collapse = recursive "replace."</strong> Keep real data in the mix.</li>
+    </ul></div>
+    <aside class="notes">
+      This slide is the executive summary — I'll come back to it at the end as the recap. Each bullet is a section of the deck. Notice how they chain: verification matters most → it's easiest where answers are checkable → which is why math/code are the home turf → which lets self-improvement loops work → but only if you guard against collapse by keeping real data. That chain is the spine of the whole lecture.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 3 · WHY IT MATTERS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Why it matters</p>
+    <h2>The recipe just broke</h2>
+    <div class="flow">
+      <span class="box ghost">Scrape web<small>finite</small></span>
+      <span class="arrow">+</span>
+      <span class="box accent">Bigger model<small>more compute</small></span>
+      <span class="arrow">→</span>
+      <span class="box">Better LLM<small>...until the text runs out</small></span>
+    </div>
+    <ul style="margin-top:.6em;">
+      <li class="fragment">For a decade: <strong>scrape more web, train a bigger model.</strong></li>
+      <li class="fragment">But usable human-written text is <strong>finite</strong> — projected exhaustion in the <strong>late 2020s</strong>.</li>
+      <li class="fragment">That ceiling is the <strong>"data wall."</strong></li>
+    </ul>
+    <aside class="notes">
+      Scaling laws say loss keeps falling as you add data and parameters together — but they assume you <em>have</em> the data. Villalobos et al. (2022) estimated the stock of high-quality public text and projected we'd consume the usable stock within a few years. Appetite for tokens grows faster than the supply of good text. So the lever everyone reached for is: stop finding more human text, start <em>making</em> it. That's why this module sits right after pretraining and fine-tuning in the stack — it's the data-supply problem for every training stage downstream.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Where it fits in the LLM stack</p>
+    <h2>Data-centric vs model-centric AI</h2>
+    <div class="cols">
+      <div>
+        <h5>Model-centric</h5>
+        <ul>
+          <li class="fragment">Hold <em>data</em> fixed</li>
+          <li class="fragment">Tune architecture, optimizer, scale</li>
+        </ul>
+      </div>
+      <div>
+        <h5>Data-centric</h5>
+        <ul>
+          <li class="fragment">Hold <em>model</em> fixed</li>
+          <li class="fragment">Improve data: quality, diversity, mixture, labels</li>
+        </ul>
+      </div>
+    </div>
+    <p class="fragment" style="margin-top:.5em;"><strong>Empirically:</strong> on a fixed compute budget, better data often beats another architectural tweak.</p>
+    <aside class="notes">
+      The big mental shift in this module: most ML training treats data as a given and optimizes the model. Data-centric AI flips the lever — freeze the model, and make the data better. Synthetic data is the most aggressive form of that, because you're literally manufacturing the data. Andrew Ng popularized "data-centric AI" as a discipline. The empirical punchline — that curating data beats tweaking architecture on a fixed budget — is exactly what the phi "textbooks" line and LIMA demonstrated, which we'll cover in the approaches section.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 4 · INTUITION
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Intuition</p>
+    <h2>The master chef analogy</h2>
+    <ul>
+      <li class="fragment">A <strong>master chef</strong> (strong teacher model) can't clone themselves...</li>
+      <li class="fragment">...but can write <strong>thousands of annotated recipes</strong> for apprentices (the student).</li>
+      <li class="fragment">The trick isn't the writing — it's <strong>tasting every dish</strong> before it goes in the cookbook (verification).</li>
+      <li class="fragment">A recipe nobody tasted is a <em>guess</em>; one checked in a real kitchen is a <strong>label</strong>.</li>
+      <li class="fragment">Apprentices who only cook from apprentice cookbooks drift into a bland average → <strong>model collapse</strong>.</li>
+    </ul>
+    <aside class="notes">
+      I lean on this analogy the whole lecture. The chef is the teacher model; the apprentices are the students. Writing recipes is generation — cheap and abundant. Tasting is verification — the expensive, decisive step. The key insight is the difference between a guess and a label: a fluent, confident, wrong solution is a guess that <em>looks</em> like a label; only a real check turns it into a label. And the cautionary tale — apprentices cooking only from apprentice books, never tasting real food again — is model collapse: the cuisine slowly forgets its rare dishes and converges to a bland average. Hold onto these three: generation = writing, verification = tasting, collapse = inbreeding.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Intuition · the pipeline</p>
+    <h2>Generation is cheap; the value is downstream</h2>
+    <div class="mermaid">
+flowchart LR
+  A["Web text<br/>finite · data wall"] --> B["Teacher / model<br/>generates"]
+  B --> C["Raw synthetic<br/>noisy, redundant"]
+  C --> D["Verify + filter + dedup<br/>keep trustworthy"]
+  D --> E["Training set<br/>mix with real data"]
+    </div>
+    <p class="eqnote fragment">The value is in <em>verification, filtering, and keeping real data in the mix</em> — not in the generation step.</p>
+    <aside class="notes">
+      This is Figure 1 from the source. Read it left to right: the finite web is the starting fuel; a teacher (or the model itself) generates raw candidates that are noisy and redundant; then the three filters — verify, filter, dedup — keep only the trustworthy ones; and finally you mix with real data before training. The lecture's whole thesis is that everyone fixates on the generation box (B) when the leverage is entirely in boxes D and E. A weak filter lets garbage in; dropping the real data in box E causes collapse. Generation is a solved, cheap problem. Verification and mixture are where the engineering lives.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 5 · HOW IT WORKS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">How it works</p>
+    <h2>Three moving parts — in this order</h2>
+    <ol>
+      <li class="fragment"><strong>Generate.</strong> Prompt a model; for a prompt <code>x</code>, sample <code>k</code> completions <code>y₁…y_k</code> at temperature for diversity.</li>
+      <li class="fragment"><strong>Verify / filter.</strong> Decide which candidates are <em>actually</em> correct. Gold standard: a hard verifier <code>v(x,y)∈{0,1}</code>.</li>
+      <li class="fragment"><strong>Retrain.</strong> Fine-tune on the accepted set; optionally repeat — new outputs become next round's candidates.</li>
+    </ol>
+    <aside class="notes">
+      Three parts, and the order matters. Generate: don't take the greedy answer — sample k completions with temperature so you get diversity to filter from. Verify: this is the crux. The gold standard is a <em>hard</em> verifier that returns 0 or 1 — run the code against unit tests, execute or symbolically check the math, validate JSON against a schema. Where no hard check exists, you fall back to weaker signals: majority-vote self-consistency, a reward model, rubric-graded LLM-as-judge, or human spot-checks — in roughly that order of reliability. Retrain: SFT on the accepted set, then optionally loop. The loop is what makes this a flywheel.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · verification ladder</p>
+    <h2>How do you know a candidate is good?</h2>
+    <div class="flow">
+      <span class="box green">Hard verifier<small>run tests · solver · schema</small></span>
+      <span class="arrow">▸</span>
+      <span class="box accent">Self-consistency<small>majority vote</small></span>
+      <span class="arrow">▸</span>
+      <span class="box">Reward model<small>learned score</small></span>
+      <span class="arrow">▸</span>
+      <span class="box">LLM-as-judge<small>rubric grading</small></span>
+      <span class="arrow">▸</span>
+      <span class="box ghost">Human<small>spot-check</small></span>
+    </div>
+    <p class="eqnote fragment">Left = most reliable, scales best. Prefer the hardest verifier your domain allows.</p>
+    <aside class="notes">
+      Think of verification as a ladder from most trustworthy to least. A hard verifier — execution, a symbolic solver, schema validation — is a ground-truth oracle, not a guess; it's why math and code are the home turf of synthetic data. When you can't run the answer, self-consistency (sample several solutions, require a majority to agree) is a cheap proxy. Below that, a learned reward model. Below that, an LLM grading against a rubric — useful but biased (we'll cover the biases later). Humans are the most reliable for taste but don't scale. The engineering instinct: always climb as high up this ladder as your domain permits.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · the flywheel</p>
+    <h2>The self-improvement data flywheel</h2>
+    <p>One full turn: generate → verify → accumulate → retrain → <em>repeat</em>. Watch the verified yield climb.</p>
+<div data-anim="mech-synthetic-data"></div>
+    <aside class="notes">
+      This is the animation to teach off. Walk through one full turn: start from seed prompts; the model generates many candidates per prompt at high temperature; the verifier keeps only the correct ones — this is the crux, the step that makes synthetic data safe; you <em>accumulate</em> the verified samples onto the real data rather than replacing it; then retrain on the enlarged set and the model improves a little. The quality meter on the right is the payoff: because the model is now slightly better, its next batch of candidates is slightly better, so more pass the filter — the loop ratchets upward. This is exactly the STaR / rejection-sampling pattern behind modern reasoning models. The two things that make or break it: verifier reliability (weak verifier → it learns garbage) and diversity preservation (no fresh real data + no dedup → the distribution narrows every round, the seed of collapse). Hold both and it spins; lose either and it grinds the distribution into mush.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · what breaks it</p>
+    <h2>Two things make or break the loop</h2>
+    <div class="cols">
+      <div>
+        <h5>Verifier reliability</h5>
+        <ul>
+          <li class="fragment">Weak verifier → garbage passes the filter</li>
+          <li class="fragment">The model then <strong>learns the garbage</strong></li>
+        </ul>
+      </div>
+      <div>
+        <h5>Diversity preservation</h5>
+        <ul>
+          <li class="fragment">No fresh real data + no dedup</li>
+          <li class="fragment">Distribution <strong>narrows every round</strong> → collapse</li>
+        </ul>
+      </div>
+    </div>
+    <p class="fragment" style="margin-top:.5em;">Hold both and the flywheel spins. Lose either and it grinds the distribution into mush.</p>
+    <aside class="notes">
+      Make this concrete. Verifier reliability: if your "verifier" is just an LLM judge that approves fluent-looking answers, wrong-but-confident solutions get accepted, you fine-tune on them, and the model gets <em>more</em> confidently wrong each round — the loop amplifies the verifier's blind spots. Diversity preservation: even with a perfect verifier, if every round you train only on the model's own narrow output and never inject fresh real data or dedup, the distribution gets tighter and tighter — you're sampling from your own sampling. These two failure modes are the bridge into the rest of the lecture: verification quality drives the approaches section, diversity preservation drives the model-collapse section.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 6 · THE APPROACHES — the heart
+     ============================================================ -->
+<!-- ============================================================
+     SECTION 6 · THE APPROACHES — the heart (REBUILT)
+     11 approaches · each = summary sub-slide + step-by-step animated sub-slide
+     ============================================================ -->
+<section>
+
+  <!-- ===== LANDSCAPE INTRO ===== -->
+  <section>
+    <p class="kicker">The approaches · landscape</p>
+    <h2>The full ladder, classic → SOTA</h2>
+    <div class="flow" style="font-size:.8em;">
+      <span class="box ghost">Human web</span><span class="arrow">→</span>
+      <span class="box">Augment</span><span class="arrow">→</span>
+      <span class="box accent">Distill</span><span class="arrow">→</span>
+      <span class="box accent">Self-Instruct</span><span class="arrow">→</span>
+      <span class="box accent">Evol-Instruct</span><span class="arrow">→</span>
+      <span class="box accent">Persona</span><span class="arrow">→</span>
+      <span class="box green">Textbooks</span><span class="arrow">→</span>
+      <span class="box green">STaR</span><span class="arrow">→</span>
+      <span class="box green">Self-reward</span><span class="arrow">→</span>
+      <span class="box green">Verifiable</span><span class="arrow">→</span>
+      <span class="box green">RLAIF</span>
+    </div>
+    <p class="eqnote fragment">Each rung solves a specific weakness of the one before it. Let's climb it — for each: <em>what / how / pros &amp; cons</em>, then a step-by-step animation.</p>
+    <aside class="notes">
+      This is the heart of the deck and where interviewers spend the most time — "why did we move from X to Y" gets asked constantly. The ladder: start with the human-data baseline and its data wall; augmentation remixes what you have; distillation borrows a stronger teacher; Self-Instruct lets the model bootstrap its own tasks; Evol-Instruct hardens them; personas force diversity; "textbooks" pushes quality over quantity; STaR closes the verify-retrain loop; self-rewarding removes the human judge; verifiable data is the gold-standard oracle; RLAIF/Constitutional scales alignment data. Each exists because the previous one had a gap. I teach each with: what it is, how it works step by step, what it solves, pros/cons, and crucially how it differs from the rung below.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       1 · HUMAN-CURATED WEB DATA (baseline)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 1 of 11</p>
+    <h3>Human-curated web data <span class="tag classic">baseline</span></h3>
+    <p><strong>What:</strong> the default pretraining corpus — filtered web crawl, books, code, Wikipedia. <strong>How:</strong> scrape → language-ID → dedup → quality-filter → mix domains. <strong>Solves:</strong> nothing to generate — real human text, maximally diverse &amp; grounded.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Real, diverse, grounded in the world</li><li class="fragment">No generator bias / recursion risk</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Finite — exhaustion projected late 2020s (the data wall)</li><li class="fragment">Noisy; now polluted with LLM spam</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> this is the "before" — the baseline every synthetic method tries to extend or replace.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2211.04325" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Common Crawl, books, code, Wikipedia — heavily filtered, but real. The virtue is genuine human text: maximally diverse, grounded, with no recursion risk and no generator bias. The fatal limitation is supply — finite, growing slower than our appetite, and increasingly polluted with LLM-generated spam (an accidental collapse risk in the wild). Reference: Villalobos et al., "Will we run out of data?" — the paper that framed the data wall.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Human-curated web data</p>
+    <h3>Human-curated web data — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Crawl<small>raw web</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Lang-ID<small>keep target</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Dedup<small>MinHash</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Quality filter<small>spam out</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Mix domains<small>corpus</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Crawl — pull raw bytes from the open web (Common Crawl, books, code).</li>
+      <li class="fragment">Language-ID — drop garbled or unwanted languages.</li>
+      <li class="fragment">Dedup — exact then near-dedup (MinHash/LSH) removes copies.</li>
+      <li class="fragment">Quality-filter — heuristics + classifier strip boilerplate &amp; spam.</li>
+      <li class="fragment">Mix domains — blend web/code/books/math into the final corpus.</li>
+    </ol>
+    <aside class="notes">
+      This is the standard pretraining hygiene pipeline. Crawl is cheap and abundant but raw; the value is in the filters. Language-ID first so downstream tools see clean text; dedup spreads gradient budget across unique content and cuts memorization; quality filtering removes the SEO/boilerplate junk; and the final mix decides capability trade-offs (more code → more reasoning). Everything that follows in this section is about what to do once this real supply runs thin.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       2 · AUGMENTATION (cheap)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 2 of 11</p>
+    <h3>Augmentation — back-translation &amp; rephrase <span class="tag classic">cheap</span></h3>
+    <p><strong>What:</strong> the oldest synthetic data — transform <em>existing</em> text into new variants. <strong>How:</strong> back-translation (EN→DE→EN) for paraphrases; LLM rephrasing into cleaner prose / Q&amp;A; synonym &amp; word-order perturbation. <strong>Solves:</strong> boosts diversity &amp; effective token count from text you already have.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Cheap; stays near the real distribution</li><li class="fragment">Great for low-resource languages</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">No new knowledge — just remixing</li><li class="fragment">Paraphrase artifacts; inflates token count</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> doesn't <em>find</em> new text like the baseline — it <em>remixes</em> existing text into variants.</p>
+    <p class="small"><a href="https://huggingface.co/blog/synthetic-data-save-costs" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      The bridge from baseline to synthetic. Back-translation — push English to German and back — is the classic NLP trick; it yields paraphrases that stay close to the real distribution. Modern LLM rephrasing rewrites messy web docs into clean prose or Q&amp;A. The crucial limitation, and the reason we keep climbing: augmentation only recombines knowledge already in the source. It can't add a fact the corpus lacked, can amplify the source's biases, and risks inflating the apparent token count without adding real value.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Augmentation</p>
+    <h3>Augmentation — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Source<small>real doc</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">EN→DE<small>translate out</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">DE→EN<small>back</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Paraphrase<small>new variant</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Filter<small>drop bad</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Start from a real source document.</li>
+      <li class="fragment">Translate out to another language (EN→DE).</li>
+      <li class="fragment">Translate back (DE→EN) — wording shifts, meaning stays.</li>
+      <li class="fragment">Result is a paraphrase: a new training variant grounded in real content.</li>
+      <li class="fragment">Filter out broken or low-fidelity round-trips before keeping.</li>
+    </ol>
+    <aside class="notes">
+      Walk the round-trip. Because the pivot language forces different surface forms, you get genuine paraphrase diversity while the semantics stay anchored to real data — that's why the risk is milder than free generation. LLM rephrasing is the modern equivalent: "rewrite this messy page as a clean tutorial." Always filter: bad translations or hallucinated rewrites slip in, and you do not want to inflate token counts with garbage that merely looks new.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       3 · DISTILLATION (SFT data)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 3 of 11</p>
+    <h3>Distillation from a stronger teacher <span class="tag modern">SFT data</span></h3>
+    <p><strong>What:</strong> a more capable model writes instruction-tuning demos for a weaker student (Alpaca-style). <strong>How:</strong> prompt teacher → collect responses → fine-tune student on <code>(instruction, response)</code> pairs. <strong>Solves:</strong> injects new capability fast — Alpaca cloned much of a strong model on ~52K examples for a few hundred dollars.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Very cheap, very effective for SFT</li><li class="fragment">Transfers format / style fast</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Inherits teacher errors &amp; biases ("style collapse")</li><li class="fragment">ToS / licensing risk; capped near the teacher</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> augmentation only remixed source text; distillation injects <em>new capability</em> from a smarter model.</p>
+    <p class="small"><a href="https://huggingface.co/blog/synthetic-data-save-costs" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Now we cross from remixing to borrowing capability. A strong teacher writes the demonstrations, the weak student learns from them. Stanford Alpaca is the famous proof — ~52K instruction-response pairs from a strong model, fine-tuned into a small model for a few hundred dollars, and it suddenly "talked like" the big one. The catch that motivates the next rung: the student inherits the teacher's style, biases, and factual errors, and can never exceed the teacher. There's also a real ToS/licensing landmine in distilling from commercial models. The field wanted a way to bootstrap without a fixed external teacher.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Distillation</p>
+    <h3>Distillation — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Instructions<small>prompts</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Teacher<small>strong model</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">(instr, resp)<small>~52K pairs</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">SFT<small>fine-tune</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Student<small>mimics teacher</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Collect a pool of instructions (prompts to teach against).</li>
+      <li class="fragment">Prompt a strong teacher to answer each one.</li>
+      <li class="fragment">Pair them into <code>(instruction, response)</code> demonstrations.</li>
+      <li class="fragment">Supervised fine-tune the small student on those pairs.</li>
+      <li class="fragment">Student now imitates the teacher's behavior — capped near it.</li>
+    </ol>
+    <aside class="notes">
+      This is sequence-level imitation: the student trains on the teacher's sampled text, not its full logit distribution (that would be classic "dark-knowledge" distillation). It works because clean, well-structured demonstrations are hard to learn from raw web text but easy to copy. The dotted ceiling at the end is the key teaching point — absent verification or selection, the student is bounded by the teacher and inherits its blind spots.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       4 · SELF-INSTRUCT (bootstrapping) — KEY (keyanim)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 4 of 11</p>
+    <h3>Self-Instruct <span class="tag modern">bootstrapping</span></h3>
+    <p><strong>What:</strong> a model bootstraps its <em>own</em> instruction data from a tiny seed set (Wang et al., 2022). <strong>How:</strong> seed ~175 tasks → prompt model to invent new instructions in-context → generate input–output instances → filter near-dups &amp; invalid ones → loop. <strong>Solves:</strong> removes the fixed external teacher — a tiny seed grows into tens of thousands of tasks.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Tiny seed → tens of thousands of tasks</li><li class="fragment">Diversity (ROUGE) filter built in</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Quality bounded by the generator itself</li><li class="fragment">Noisy instances; needs aggressive filtering</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> distillation needs a stronger external teacher; Self-Instruct lets the model bootstrap from a tiny seed instead.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2212.10560" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      The template the whole field copied — generate → filter → loop. The clever move over distillation: no fixed external teacher; the model bootstraps from ~175 hand-written seed tasks. It prompts itself to invent new instructions, decides whether each is a classification task (which needs different instance generation), produces input-output pairs, then — critically — filters near-duplicates using ROUGE overlap plus invalid ones. The built-in diversity filter is what keeps it from collapsing onto one topic. Limitation: quality is still bounded by the generator, and raw instances are noisy, so the filter must be aggressive.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Self-Instruct</p>
+    <h3>Self-Instruct — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Seed pool<small>~175 tasks</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Generate<small>new instr</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Instances<small>input/output</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">ROUGE filter<small>drop dups</small></span>
+      <span class="anim-arrow fragment fade-in">↺</span>
+      <span class="anim-node fragment fade-in">Grow pool<small>loop back</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Start with ~175 hand-written seed tasks.</li>
+      <li class="fragment">Prompt the model (seeds in-context) to generate new instructions.</li>
+      <li class="fragment">Classify each (classification-or-not) → generate input–output instances.</li>
+      <li class="fragment">Filter: drop near-dups (ROUGE overlap) &amp; invalid ones.</li>
+      <li class="fragment">Add survivors to the pool → loop, so coverage compounds.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Self-Instruct — seed → generate → filter → loop",
+     "nodes":[["Seed","~175 tasks"],["Generate","new instructions"],["Instances","input/output"],["ROUGE filter","drop near-dups"],["Pool ↑","grows each round"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"Start from ~175 <strong>hand-written seed tasks</strong> — the only human input."},
+       {"on":[1],"done":[0],"cap":"Prompt the model with seeds in-context to <em>generate new instructions</em>."},
+       {"on":[2],"done":[0,1],"cap":"For each, decide classification-or-not, then create <code>input/output</code> instances."},
+       {"on":[3],"done":[0,1,2],"cap":"<strong>Filter:</strong> drop near-duplicates by ROUGE overlap &amp; invalid formats — keeps diversity."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Add survivors back to the pool → <strong>loop</strong>; coverage compounds cheaply."}],
+     "interval":1900}
+    </script></div>
+    <aside class="notes">
+      Drive the loop off the widget. The seed is the only human input — everything after is bootstrapped. The classification branch matters: classification tasks generate the output first then the input, others go input→output. The ROUGE filter is the load-bearing step; without it the pool collapses onto redundant near-duplicate instructions. Each accepted item conditions the next round, so coverage grows — a self-amplifying instruction set built from almost nothing.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       5 · EVOL-INSTRUCT (difficulty control) — KEY (keyanim)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 5 of 11</p>
+    <h3>Evol-Instruct / WizardLM <span class="tag modern">difficulty control</span></h3>
+    <p><strong>What:</strong> evolve simple instructions into harder, more varied ones (Xu et al., 2023). <strong>How:</strong> <em>in-depth</em> evolution adds constraints / reasoning steps / complicates input; <em>in-breadth</em> evolution mutates into a rarer topic; then eliminate failed or trivial evolutions. <strong>Solves:</strong> Self-Instruct gave breadth but not difficulty control — too many easy questions.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Dials difficulty up on demand</li><li class="fragment">Broadens topic coverage</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Over-evolution → unnatural / unanswerable</li><li class="fragment">Controls the question, not answer correctness — still needs a verifier</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> Self-Instruct's generation is flat in difficulty; Evol-Instruct adds a controllable complexity gradient.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2304.12244" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Self-Instruct gave breadth but not control over difficulty — you got a lot of easy questions. Evol-Instruct fixes that by repeatedly rewriting each seed along two axes. In-depth makes a question harder: add constraints, deepen reasoning, increase steps, complicate the input. In-breadth mutates into a brand-new, rarer topic for coverage. After each evolution you eliminate the ones that failed or became trivial. WizardLM, trained on Evol-Instruct data, beat models trained on plain Self-Instruct data. The danger is over-evolution — push too hard and prompts become unnatural or unanswerable — and note this controls question difficulty, not answer correctness; you still need a verifier for that.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Evol-Instruct</p>
+    <h3>Evol-Instruct — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Simple instr<small>easy seed</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">In-depth<small>+ constraints</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">In-breadth<small>new topic</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Eliminate<small>drop trivial/fail</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Harder set<small>WizardLM</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Take a simple seed instruction.</li>
+      <li class="fragment">In-depth: add constraints, deepen reasoning, complicate the input → harder.</li>
+      <li class="fragment">In-breadth: mutate it into a brand-new, rarer topic → wider.</li>
+      <li class="fragment">Eliminate evolutions that failed or stayed trivial.</li>
+      <li class="fragment">Result: a difficulty-graded, broadly-covering instruction set (WizardLM).</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Evol-Instruct — evolve easy prompts into hard, varied ones",
+     "nodes":[["Simple","easy seed"],["In-depth","harder"],["In-breadth","new topic"],["Eliminate","drop fail/trivial"],["Hard set","difficulty-graded"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"Start from a <em>simple</em> instruction — the kind Self-Instruct over-produces."},
+       {"on":[1],"done":[0],"cap":"<strong>In-depth:</strong> add constraints, deepen reasoning, add steps, complicate the input → harder."},
+       {"on":[2],"done":[0,1],"cap":"<strong>In-breadth:</strong> mutate into a brand-new, rarer topic → wider coverage."},
+       {"on":[3],"done":[0,1,2],"cap":"<strong>Eliminate</strong> evolutions that failed or collapsed back to trivial."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Net: a <strong>difficulty-graded</strong>, broad set — WizardLM beat plain Self-Instruct."}],
+     "interval":1900}
+    </script></div>
+    <aside class="notes">
+      Two orthogonal axes — depth (harder) and breadth (more topics) — applied repeatedly, with an elimination step between rounds. Push the depth too hard and you get over-evolution: unnatural or unanswerable prompts, the main failure mode. Critically, evolving the question does nothing for the answer's correctness — a harder question with a wrong reference answer is worse than useless, which is exactly why a verifier (next rungs) becomes the missing piece.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       6 · PERSONA / TEMPLATED (diversity)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 6 of 11</p>
+    <h3>Persona-driven / templated generation <span class="tag modern">diversity</span></h3>
+    <p><strong>What:</strong> condition generation on a <em>persona</em> or structured <em>template</em> to force breadth. <strong>How:</strong> sample a persona ("a tax auditor," "a 9-year-old," "a Rust engineer") from a large pool, or fill schema slots and let the LLM realize them. <strong>Solves:</strong> free-form prompting collapses onto the model's favorite topics &amp; one default voice.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Strong, controllable diversity</li><li class="fragment">Templates enforce structural validity</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Persona pool must itself be diverse</li><li class="fragment">Templates can feel rigid / unnatural</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> Evol-Instruct controls difficulty; personas/templates control <em>diversity</em> — they sit alongside, not replace, it.</p>
+    <p class="small"><a href="https://huggingface.co/blog/synthetic-data-save-costs" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      A diversity tool that sits alongside Self-Instruct and Evol-Instruct. The problem it solves: say "generate a question" and the model collapses onto its favorite handful of topics and its one default voice. Conditioning on a persona — sampled from a pool of thousands of roles (Persona Hub scales this to ~1B personas) — spreads coverage across viewpoints and styles. Templates do the same for structured data: fill schema slots and let the LLM realize them, which also enforces structural validity, essential for function-call JSON or tabular rows. The meta-catch: your persona pool or template set must itself be diverse, or you've just moved the bottleneck up a level.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Persona / templated</p>
+    <h3>Persona / templated — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Persona pool<small>1000s of roles</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Sample<small>one persona</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Condition<small>+ template slots</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Generate<small>in that voice</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Validate<small>schema check</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Maintain a large pool of distinct personas (and/or schema templates).</li>
+      <li class="fragment">Sample one persona per example for breadth.</li>
+      <li class="fragment">Condition the prompt on that persona, filling any template slots.</li>
+      <li class="fragment">Generate — each persona writes from a different viewpoint &amp; style.</li>
+      <li class="fragment">Validate structured output against the schema; reject invalid rows.</li>
+    </ol>
+    <aside class="notes">
+      The trick is that diversity comes from the conditioning, not from asking the model to "be creative." Sampling a different persona per example spreads topical and stylistic coverage cheaply and breaks single-teacher style collapse. For structured data, the template slots plus a schema validator give you both diversity and guaranteed validity — JSON-schema/grammar-constrained decoding is the production version. Remember the meta-bottleneck: a bland persona pool produces bland diversity.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       7 · TEXTBOOKS / phi (quality-first)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 7 of 11</p>
+    <h3>"Textbooks Are All You Need" — phi <span class="tag sota">quality-first</span></h3>
+    <p><strong>What:</strong> a little <em>textbook-quality</em> synthetic data beats a mountain of raw scrape (Gunasekar et al., 2023). <strong>How:</strong> generate clean, pedagogical content (textbooks + exercises); train phi-1 (1.3B) on it. <strong>Solves:</strong> shifts the goal from <em>more</em> data to <em>better</em> data — quality &amp; information density &gt; raw quantity.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Tiny models punch far above weight</li><li class="fragment">Dense, clean, low-noise signal</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Narrow coverage; teacher-bounded</li><li class="fragment">Hard to audit for contamination</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> everything before pushed for more or more-diverse data; phi pushes for <em>denser, cleaner</em> data instead.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2306.11644" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      A philosophical shift, not just a technique. Gunasekar et al. generated clean, pedagogical, textbook-style content with exercises and trained phi-1, a 1.3B model, reaching strong coding ability at a tiny fraction of the usual data and parameters. The core hypothesis — quality and information density matter more than raw quantity — pairs with LIMA (≈1K curated examples rival massive SFT). Honest limits: the generator is a strong teacher, so it's partly distillation; coverage can be narrow; and because the teacher may have seen benchmarks, contamination is hard to audit.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Textbooks (phi)</p>
+    <h3>Textbooks (phi) — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Topic spec<small>+ persona</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Generate<small>textbook prose</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Exercises<small>+ solutions</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Filter<small>keep dense/clean</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Train phi-1<small>1.3B</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Specify a topic (and persona) to steer coverage.</li>
+      <li class="fragment">Generate clean, pedagogical "textbook" prose for it.</li>
+      <li class="fragment">Generate matching exercises with worked solutions.</li>
+      <li class="fragment">Filter for density &amp; clarity — keep only high-signal docs.</li>
+      <li class="fragment">Train a tiny model (phi-1, 1.3B) — strong coding at a fraction of the data.</li>
+    </ol>
+    <aside class="notes">
+      The mechanism is "manufacture a curriculum." Topic + persona steering gives coverage; the textbook+exercise format packs structured reasoning and worked solutions into every token, which is exactly the high-information-density signal the hypothesis bets on. The filter is what makes it "quality-first" — only the cleanest, densest docs survive. The punchline: a 1.3B model reaches coding ability that brute-force scrape needs far more data and parameters to match.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       8 · STaR / RFT (on-policy) — KEY (keyanim)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 8 of 11</p>
+    <h3>STaR / rejection-sampling fine-tuning <span class="tag sota">on-policy</span></h3>
+    <p><strong>What:</strong> generate solutions, keep only the <em>verified-correct</em> ones, fine-tune, repeat (Zelikman et al., 2022; aka RFT). <strong>How:</strong> sample chains-of-thought for problems with known answers → keep traces whose final answer matches → <em>rationalize</em> the rest → retrain → loop. <strong>Solves:</strong> the central weakness of every rung above — <em>label correctness</em>, via a verifier.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">On-policy: trains on the model's own correct reasoning</li><li class="fragment">Verifier guarantees label correctness</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Needs a reliable verifier / known answers</li><li class="fragment">Can reinforce lucky-but-wrong reasoning</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> textbooks/distillation trust the generator's output; STaR closes the loop with a verifier that filters to correct.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2203.14465" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      The engine behind modern reasoning-model data pipelines. The big leap: it closes the loop with a verifier. For each problem with a known answer, sample several chains-of-thought, keep only the traces whose final answer matches, fine-tune on those. STaR's twist is rationalization — for problems the model can't solve, give it the answer as a hint and keep whatever rationale reaches it, so you still harvest a reasoning trace. Then loop. "On-policy" because you train on the model's own correct reasoning, not a teacher's. The danger is lucky-but-wrong traces — flawed reasoning that hits the right number — which get reinforced. This is the rejection-sampling math formalized in the math section.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · STaR / RFT</p>
+    <h3>STaR / RFT — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Problem<small>known answer</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Sample CoT<small>k traces</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Verify<small>answer matches?</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Keep correct<small>+ rationalize</small></span>
+      <span class="anim-arrow fragment fade-in">↺</span>
+      <span class="anim-node fragment fade-in">Retrain<small>loop</small></span>
+    </div>
+    <ol>
+      <li class="fragment">For each problem with a known answer, sample several chains-of-thought.</li>
+      <li class="fragment">Verify: keep only traces whose final answer matches the known answer.</li>
+      <li class="fragment"><em>Rationalization:</em> for unsolved ones, give the answer as a hint, keep the rationale that reaches it.</li>
+      <li class="fragment">Retrain (SFT) on the accepted rationales.</li>
+      <li class="fragment">Loop — the better model samples better traces, so more pass.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"STaR — generate → verify → retrain (the flywheel)",
+     "nodes":[["Problem","known answer"],["Sample CoT","k traces"],["Verify","answer matches?"],["Keep + rationalize","correct traces"],["Retrain","loop ↑"]],
+     "meter":true,
+     "steps":[
+       {"on":[0],"done":[],"q":20,"cap":"Take a problem with a <strong>known answer</strong> (math/code — checkable)."},
+       {"on":[1],"done":[0],"q":30,"cap":"Sample <code>k</code> chains-of-thought at temperature for diversity."},
+       {"on":[2],"done":[0,1],"q":35,"cap":"<strong>Verify:</strong> keep only traces whose final answer <em>matches</em> — the crux."},
+       {"on":[3],"done":[0,1,2],"q":55,"cap":"Keep correct traces; <em>rationalize</em> unsolved ones from the given answer."},
+       {"on":[4],"done":[0,1,2,3],"q":80,"cap":"<strong>Retrain</strong> on accepted traces → better model → higher yield next round."}],
+     "interval":1900}
+    </script></div>
+    <aside class="notes">
+      Drive the flywheel off the widget — watch the yield meter climb. The verifier is the load-bearing step: on math/code it's near-perfect, turning a noisy generator into clean supervised data. Rationalization rescues hard problems by working backward from the answer, but it is also where lucky-but-wrong reasoning sneaks in, so process-level checks matter. Because each retrained model samples slightly better, a larger fraction passes the filter — the loop ratchets upward, the defining property of self-improvement.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       9 · SELF-REWARDING / SELF-PLAY (frontier)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 9 of 11</p>
+    <h3>Self-rewarding / self-play <span class="tag sota">frontier</span></h3>
+    <p><strong>What:</strong> one model is both author and judge — generates responses <em>and</em> scores them to build its own DPO preference pairs (Yuan et al., 2024). <strong>How:</strong> generate several responses → same model ranks them → form chosen/rejected pairs → run DPO; the improved model judges better next round. <strong>Solves:</strong> removes even the external judge STaR needed.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">No human/teacher labels for preferences</li><li class="fragment">Reward model improves alongside the policy</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Self-preference / verbosity bias; reward hacking</li><li class="fragment">Drift if not anchored to real data &amp; checks</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> STaR needed a verifier or known answer; self-rewarding tries to remove even the external judge.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2401.10020" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      The frontier of removing humans from the loop. One model plays both roles: generates several responses per prompt, ranks them itself with LLM-as-judge, forms chosen/rejected pairs, runs DPO — and because the policy improves, it becomes a better judge next round, a virtuous spiral. The danger is the whole story of the collapse section: a model judging itself can reward-hack its own biases — self-preference, verbosity. Guardrails matter: keep a real seed set, cap iterations, monitor the judge's calibration against gold, use external verifiers wherever possible. Without those anchors, self-judging drifts.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Self-rewarding</p>
+    <h3>Self-rewarding — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Prompt<small>one task</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Generate k<small>responses</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Self-judge<small>same model ranks</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Pairs<small>chosen/rejected</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">DPO<small>better judge ↺</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Generate several responses for each prompt.</li>
+      <li class="fragment">The <em>same</em> model judges/ranks them (LLM-as-judge).</li>
+      <li class="fragment">Form chosen/rejected preference pairs from the ranking.</li>
+      <li class="fragment">Run DPO on the pairs to update the policy.</li>
+      <li class="fragment">The improved model is a better judge next round → loop (with guardrails).</li>
+    </ol>
+    <aside class="notes">
+      The author-and-judge collapse into one model is the whole idea — and the whole danger. The spiral is virtuous when judgments track truth, but a model judging itself can reward-hack its own self-preference and verbosity biases, drifting away from real quality. The guardrails — real seed, capped iterations, gold-calibration of the judge, external verifiers where they exist — are what keep the loop from grinding into sycophantic, over-long outputs.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       10 · VERIFIABLE / EXECUTION-CHECKED (gold standard)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 10 of 11</p>
+    <h3>Verifiable / execution-checked data <span class="tag sota">gold standard</span></h3>
+    <p><strong>What:</strong> for math &amp; code you can <em>run</em> the answer — <code>v(x,y)</code> is a ground-truth oracle, not a guess. <strong>How:</strong> generate code → execute against unit tests; generate math → check the final answer vs a solver; generate JSON → validate against a schema; keep only what passes. <strong>Solves:</strong> the central weakness of every approach above — <em>label correctness.</em></p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Near-perfect labels (ground-truth checks)</li><li class="fragment">Scales without humans</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Only works in checkable domains</li><li class="fragment">Tests can be gamed; coverage gaps remain</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> self-rewarding's judge is a biased guess; here <code>v(x,y)</code> is an oracle — it's what makes STaR trustworthy.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2203.14465" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      Not really a separate generation method — it's the verification ideal that makes STaR and the self-improvement loop trustworthy. The key distinction: <code>v(x,y)</code> here is a ground-truth oracle, not a guess. You generate code and run it against unit tests; generate math and check the final answer with a solver like SymPy; generate JSON and validate against a schema; keep only what passes. This solves the one weakness that haunts every rung — label correctness — and it's precisely why math and code are where self-improvement works best. Limits: only checkable domains, tests can be gamed (passes weak tests but is wrong), and coverage gaps remain.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Verifiable data</p>
+    <h3>Verifiable data — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Generate<small>code / math / JSON</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Execute<small>tests / solver / schema</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">v(x,y)∈{0,1}<small>pass?</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Keep pass<small>drop fail</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Near-perfect labels<small>train</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Generate a candidate (program, proof/answer, or JSON object).</li>
+      <li class="fragment">Run the hard check: unit tests, a CAS/solver, or schema validation.</li>
+      <li class="fragment">The check returns \( v(x,y) \in \{0,1\} \) — a real oracle, not a vibe.</li>
+      <li class="fragment">Keep only the passing candidates; discard the rest.</li>
+      <li class="fragment">Survivors are near-ground-truth labels — train on them.</li>
+    </ol>
+    <p class="eqnote">A perplexity filter asks "does it <em>look</em> right?"; execution asks "is it <em>actually</em> right?"</p>
+    <aside class="notes">
+      This slide makes "verification is the moat" concrete. The check is deterministic and cheap, so it scales without humans and produces near-perfect labels — the opposite of a fluency proxy like perplexity, which a confident lie passes. The honest caveats: it only applies where you can run the answer, weak test suites can be gamed (a wrong solution that passes thin tests), and whole regions of a domain may have no easy oracle.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       11 · RLAIF / CONSTITUTIONAL (AI feedback)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 11 of 11</p>
+    <h3>RLAIF / Constitutional preference data <span class="tag sota">AI feedback</span></h3>
+    <p><strong>What:</strong> generate the alignment <em>preference labels</em> with an AI instead of human raters. <strong>How:</strong> RLAIF — an LLM compares two responses, picks the better → preference pairs; Constitutional AI — the model critiques &amp; revises its own responses against written principles. <strong>Solves:</strong> scales RLHF-style alignment data in domains you <em>can't</em> run the answer.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Cheap, fast, scalable alignment data</li><li class="fragment">Constitution makes values explicit / auditable</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Inherits judge biases (position, verbosity, self-preference)</li><li class="fragment">Only as good as the constitution / judge prompt</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> verifiable data needs a runnable answer; RLAIF covers the <em>uncheckable</em> (open-ended alignment) — at the cost of judge bias.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2309.00267" target="_blank" rel="noopener noreferrer">Read more ↗</a></p>
+    <aside class="notes">
+      The last rung handles the domain where you can't run the answer — open-ended alignment. RLAIF (Lee et al., 2023) replaces the human rater: an LLM compares two responses and picks the better, producing preference pairs for a reward model or DPO at near-human quality on some tasks but far cheaper. Constitutional AI (Bai et al., 2022) goes further: the model critiques and revises its own responses against a written "constitution" of principles, generating harmlessness data with zero human harm labels — also sparing annotators traumatic content. Cost: they inherit the judge's biases — position, verbosity, self-preference — and are only as good as the constitution or judge prompt. The recurring theme: in checkable domains use verifiers; in uncheckable ones use AI feedback, but audit the judge.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · RLAIF / Constitutional</p>
+    <h3>RLAIF / Constitutional — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Two responses<small>A, B</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">AI judge<small>+ constitution</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Pick better<small>preference pair</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Reward model<small>or DPO</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Align policy<small>scaled, no humans</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Produce two candidate responses to a prompt.</li>
+      <li class="fragment">An LLM judge (guided by a written constitution/rubric) picks the better.</li>
+      <li class="fragment">Record the choice as a chosen/rejected preference pair.</li>
+      <li class="fragment">Train a reward model (or run DPO) on the AI-labeled pairs.</li>
+      <li class="fragment">Optimize the policy — alignment data scaled without human raters.</li>
+    </ol>
+    <aside class="notes">
+      The mechanism mirrors RLHF but swaps the human labeler for an AI one — that is the entire difference and the entire risk. The constitution makes values explicit and auditable, which is the Constitutional AI contribution (plus a self-critique/revise SFT stage). The biases — position, verbosity, self-preference — silently corrupt the preference signal, so the production version randomizes positions, controls for length, ensembles judges, and calibrates against a gold set. In checkable domains prefer the oracle; here, audit the judge.
+    </aside>
+  </section>
+
+</section>
+
+<!-- ============================================================
+     SECTION 7 · COMPARE
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Compare</p>
+    <h2>Cheat-sheet: the ten approaches</h2>
+    <table class="cmp">
+      <thead><tr><th>Approach</th><th>Core idea</th><th>Pros</th><th>Cons</th><th>When</th><th>Maturity</th></tr></thead>
+      <tbody>
+        <tr class="fragment"><td>Augmentation</td><td>Transform existing text into variants</td><td>Cheap; near-real</td><td>No new knowledge</td><td>Low-resource langs</td><td>Classic</td></tr>
+        <tr class="fragment"><td>Distillation (Alpaca)</td><td>Strong teacher writes SFT demos</td><td>Cheap transfer</td><td>Teacher-bounded; ToS</td><td>Small model mimics big</td><td>Standard</td></tr>
+        <tr class="fragment"><td>Self-Instruct</td><td>Seed → generate → filter own tasks</td><td>Tiny seed → big set</td><td>Noisy; bounded</td><td>Few-label instruction sets</td><td>Standard</td></tr>
+        <tr class="fragment"><td>Evol-Instruct</td><td>Evolve prompts deeper &amp; broader</td><td>Difficulty control</td><td>Over-evolution</td><td>Harden an SFT set</td><td>Standard</td></tr>
+        <tr class="fragment"><td>Persona / templated</td><td>Condition on roles / schemas</td><td>Controllable diversity</td><td>Pool must be rich</td><td>Coverage; structured data</td><td>Standard</td></tr>
+        <tr class="fragment"><td>"Textbooks" (phi)</td><td>Few, ultra-high-quality docs</td><td>Tiny models, big results</td><td>Narrow; contamination</td><td>Quality-over-quantity</td><td>SOTA</td></tr>
+        <tr class="fragment"><td>STaR / RFT</td><td>Generate → verify → retrain loop</td><td>On-policy; verified</td><td>Needs verifier</td><td>Checkable reasoning</td><td>SOTA</td></tr>
+        <tr class="fragment"><td>Self-rewarding</td><td>Model authors &amp; judges itself</td><td>No human prefs</td><td>Self-bias; drift</td><td>Iterative alignment</td><td>Frontier</td></tr>
+        <tr class="fragment"><td>Verifiable (exec)</td><td>Run the answer as ground truth</td><td>Near-perfect labels</td><td>Checkable only</td><td>Math/code/JSON at scale</td><td>SOTA</td></tr>
+        <tr class="fragment"><td>RLAIF / Constitutional</td><td>AI generates preference labels</td><td>Cheap, scalable</td><td>Judge biases</td><td>Scale RLHF data</td><td>SOTA</td></tr>
+      </tbody>
+    </table>
+    <aside class="notes">
+      This is the interview cheat-sheet — if they memorize one table, it's this. I reveal rows top to bottom, classic to SOTA. The thread to point out as I go: the "Cons" column tells the story of why we kept climbing. Augmentation adds no knowledge → distillation does but is teacher-bounded → Self-Instruct removes the fixed teacher but is noisy → Evol-Instruct hardens it but over-evolves → textbooks push quality but go narrow → STaR adds verification but needs a verifier → self-rewarding removes the verifier but drifts → verifiable gives perfect labels but only where checkable → RLAIF covers the uncheckable but inherits judge bias. Every step trades one limitation for a new one.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 8 · THE MATH
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">The math · (a) rejection sampling</p>
+    <h2>STaR / rejection-sampling as a set</h2>
+    <p>Sample from the current policy, keep only what the verifier accepts:</p>
+    $$ \mathcal{D}^+ = \{(x,y) : y \sim \pi(\cdot \mid x),\; v(x,y)=1\} $$
+    <p class="eqnote fragment"><b>\(\mathcal{D}^+\)</b> = the accepted ("positive") set you train on; <b>\(x\)</b> = a prompt/problem; <b>\(y\)</b> = a sampled completion (CoT + answer).</p>
+    <p class="eqnote fragment"><b>\(\pi(\cdot\mid x)\)</b> = the model's current sampling distribution given \(x\); <b>\(v(x,y)\in\{0,1\}\)</b> = the verifier — 1 if \(y\) is correct, 0 otherwise.</p>
+    <p class="eqnote fragment">Keep a sample only when \(v=1\), run SFT on \(\mathcal{D}^+\), then <strong>repeat</strong>.</p>
+    <aside class="notes">
+      The whole STaR loop in one line. You're constructing a dataset by sampling completions y from the current policy π given prompt x, and admitting the pair (x,y) only when the verifier v returns 1. Everything that fails verification is thrown away — that's the "rejection" in rejection sampling. Then you do ordinary supervised fine-tuning on D-plus and repeat, because the updated policy samples slightly better completions next round. The elegance is that v converts a stochastic, noisy generator into a clean supervised signal — but only as reliable as v itself. On math/code v can be near-perfect; on open chat v is a biased judge, which is exactly why the loop is trustworthy in some domains and dangerous in others.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math · (b) model collapse</p>
+    <h2>Why "replace" shrinks the variance</h2>
+    <p>Fit gen \(n\), then train gen \(n{+}1\) on \(M_n\) finite samples from that fit (replacing real data):</p>
+    $$ \mathbb{E}\!\left[\sigma_{n+1}^{2}\right] = \sigma_n^{2}\Big(1 - \tfrac{1}{M_n}\Big) $$
+    <p class="eqnote fragment"><b>\(\sigma_n^2\)</b> = variance (spread) at generation \(n\); <b>\(M_n\)</b> = samples drawn to build gen \(n{+}1\); <b>\(\mathbb{E}[\cdot]\)</b> = expectation over the draw.</p>
+    <p class="eqnote fragment">The biased MLE variance is \( \mathbb{E}[\sigma^2_{\text{MLE}}] = \sigma^2(1-\tfrac{1}{M}) \) — slightly smaller than truth.</p>
+    <p class="eqnote fragment">The factor \((1-\tfrac{1}{M_n})<1\) ⇒ spread <strong>decays every round</strong>; iterate and \(\sigma_n^2 \to 0\) — tails forgotten, modes merge. <strong>Tail collapse.</strong></p>
+    <aside class="notes">
+      This is the mathematical heart of model collapse, the most important equation in the deck. The intuition: when you estimate variance from a finite sample using maximum likelihood, you systematically underestimate it — the biased estimator is sigma-squared times (1 minus 1 over M). Now make that recursive: each generation fits the previous generation's finite output and <em>replaces</em> the real data. So the variance gets multiplied by a factor slightly below one, every single round. Multiply a number by 0.99 forever and it goes to zero. Concretely: the distribution narrows, the rare tails vanish first, the modes merge, and in the Gaussian-fit case it collapses to a single point. This is "tail collapse" — and notice the cause is specifically <em>replacing</em> real data. Keep real data in the mix and you break the recursion, which is the next equation's worth of intuition.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math · (c) near-dedup</p>
+    <h2>Jaccard similarity &amp; MinHash</h2>
+    <p>Represent each doc as a set of shingles (overlapping n-grams), measure overlap:</p>
+    $$ J(A,B) = \frac{|A \cap B|}{|A \cup B|} $$
+    <p class="eqnote fragment"><b>\(A,B\)</b> = shingle sets of two docs (e.g. all 5-word windows); <b>\(|A\cap B|\)</b> = shingles shared; <b>\(|A\cup B|\)</b> = shingles in either. <b>\(J\)</b> ranges 0 (disjoint) → 1 (identical).</p>
+    <p class="eqnote fragment">The MinHash trick: for a random hash permutation \(h\), \(\Pr[\min h(A) = \min h(B)] = J(A,B)\).</p>
+    <p class="eqnote fragment">So comparing many MinHash signatures estimates \(J\) cheaply; LSH bands find pairs above a threshold without all-pairs comparison.</p>
+    <aside class="notes">
+      Dedup is the other half of preserving diversity, so here's the math behind near-dedup. Two documents are "near-duplicate" if their shingle sets — all overlapping 5-word windows, say — overlap a lot, which we quantify with Jaccard similarity: intersection over union, between 0 and 1. The problem is that comparing every pair of documents is quadratic and infeasible at corpus scale. The MinHash trick is beautiful: for a random hash permutation, the probability that two sets share the same minimum hash equals exactly their Jaccard similarity. So a short signature of 128 min-hashes estimates J cheaply, and LSH banding lets you bucket likely-similar docs so you only compare candidates, not all pairs. This is the standard near-dedup pipeline for both real and synthetic corpora.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 9 · IN CODE
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">In code · rejection sampling</p>
+    <h2>One generate → verify → dedup round</h2>
+    <pre><code class="language-python" data-trim data-line-numbers="1-13|14-17">def rejection_sampling_round(model, tokenizer, prompts, verify_fn,
+                             k=8, temperature=0.8, seen_hashes=None):
+    """One generate -&gt; verify -&gt; dedup round."""
+    seen_hashes = seen_hashes if seen_hashes is not None else set()
+    accepted = []
+    for x in prompts:
+        cands = [sample(model, tokenizer, x, temperature=temperature)
+                 for _ in range(k)]                 # 1) sample k diverse
+        for y in cands:
+            if not verify_fn(x, y):                 # 2) HARD verify: v(x,y)==1?
+                continue
+            h = minhash_signature(y)                # 3) near-dedup
+            key = tuple(h[:8])
+            if key in seen_hashes:
+                continue
+            seen_hashes.add(key)
+            accepted.append((x, y))
+    return accepted</code></pre>
+    <aside class="notes">
+      Walk the three numbered steps. Step 1: for each prompt sample k completions with temperature — diversity is the whole point, you want variety to filter from, not the single greedy answer. Step 2: the hard verify — verify_fn is your v(x,y); it runs the unit tests, checks the math, or validates the schema, and anything that fails is dropped with continue. Step 3: near-dedup — compute a MinHash signature and use the first few hashes as a cheap bucket key so you don't pile up identical solutions. Only survivors of all three make it into accepted. This is the literal implementation of the D-plus set equation from the math section. Note what's NOT here: there's no perplexity filter and no "looks good to me" — correctness is decided by execution, not fluency.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">In code · the loop</p>
+    <h2>The self-improvement loop &amp; MinHash sketch</h2>
+    <pre><code class="language-python" data-trim data-line-numbers>def self_improve(model, tokenizer, prompts, verify_fn, rounds=3):
+    dataset, seen = [], set()
+    for r in range(rounds):
+        new = rejection_sampling_round(model, tokenizer, prompts,
+                                       verify_fn, seen_hashes=seen)
+        dataset += new                 # ACCUMULATE — don't replace
+        sft(model, dataset)            # fine-tune on accepted set
+        print(f"round {r}: +{len(new)} accepted, {len(dataset)} total")
+    return model, dataset
+
+def shingles(text, n=5):
+    toks = text.split()
+    return {" ".join(toks[i:i+n]) for i in range(len(toks) - n + 1)}
+
+def is_near_dup(sig, buckets, bands=16):
+    """Near-dup if ANY LSH band collides with a seen doc."""
+    hit = False
+    for b, key in enumerate(lsh_bands(sig, bands)):
+        if key in buckets[b]: hit = True
+        buckets[b].add(key)
+    return hit</code></pre>
+    <aside class="notes">
+      Top: the loop. Note the load-bearing line — <code>dataset += new</code>. We <em>accumulate</em>: the dataset grows each round, and we re-fine-tune on the whole accumulated set, never throwing away earlier data. This single design choice is what keeps the loop from collapsing, the code embodiment of "accumulate, don't replace." Each round prints how many new accepted samples we got; when that yield stops rising you stop. Bottom: the dedup primitives — shingles turns text into overlapping 5-grams, and is_near_dup checks whether any LSH band collides with a previously-seen doc, which catches high-Jaccard pairs cheaply. Together these two snippets are a minimal but real STaR pipeline.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 10 · WORKED EXAMPLE
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Worked example</p>
+    <h2>Build 1,000,000 verified math word problems</h2>
+    <p>Goal: a training set where the <strong>answer label is trustworthy.</strong> Insight: over-generate and verify hard — verification, not generation, is the quality bottleneck.</p>
+    <ol>
+      <li class="fragment"><strong>Seed / template.</strong> A few hundred human templates (rate, work, geometry, algebra) with parameter slots + a persona/topic pool for breadth.</li>
+      <li class="fragment"><strong>Generate ~3,000,000.</strong> Instantiate templates into NL problem + step-by-step solution ending in a machine-readable answer (<code>#### 42</code>), temperature for diversity.</li>
+    </ol>
+    <aside class="notes">
+      The headline insight, repeated because it's the exam answer: verification is the bottleneck on quality, not generation, so you deliberately over-generate. Start from a few hundred human-written templates with parameter slots — rate problems, work problems, geometry, algebra — plus a pool of personas and topics for breadth. Then instantiate each template into a natural-language problem AND a step-by-step solution that ends in a machine-readable final answer, like the GSM8K "#### 42" convention. Generate roughly three million candidates with temperature so you have variety to filter. We're going to throw most of them away — that's fine and expected.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Worked example · the crux</p>
+    <h2>Verify hard, then dedup &amp; mix</h2>
+    <ol start="3">
+      <li class="fragment"><strong>Verify (the crux).</strong> Parse to symbolic form / run the derivation; check the answer with SymPy. Then self-consistency: sample 5 solutions, require a majority to agree. Yield ~35% → <strong>~1.05M</strong>.</li>
+      <li class="fragment"><strong>Dedup.</strong> MinHash-LSH near-dedup removes ~5% near-dup phrasings → <strong>~1.0M unique, verified.</strong></li>
+      <li class="fragment"><strong>Mix &amp; ship.</strong> Blend with real human problems (don't train on synthetic alone — <em>accumulate</em>), hold out a contamination-checked test split, train.</li>
+    </ol>
+    <p class="eqnote fragment">Why this beats perplexity filtering: a perplexity filter asks "does it <em>look</em> like fluent math?" — a confidently-wrong solution scores great. Execution/symbolic checks ask "is the answer <em>actually right</em>?"</p>
+    <aside class="notes">
+      Step 3 is where the quality is made. For each candidate, parse the problem into symbolic/computational form (or run the model's own derivation as code) and check the stated answer with SymPy or a calculator. Then layer self-consistency on top: sample 5 independent solutions and require a majority to agree on the final number. A candidate must pass BOTH to survive. A plausible yield is about 35%, so 3M candidates give roughly 1.05M survivors. Step 4: MinHash-LSH dedup removes ~5% near-duplicate phrasings, landing at ~1.0M unique verified problems. Step 5: blend with real human problems — accumulate, never train on synthetic alone — and hold out a contamination-checked test split. The eqnote is the punchline of the whole worked example: perplexity filtering only checks fluency, and a confident lie is fluent. Execution checks correctness. On a checkable domain that converts a noisy generator into near-ground-truth labels — which is exactly why math and code are the home turf of synthetic data.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 11 · WHEN TO USE WHAT
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">When to use what</p>
+    <h2>Decision guide</h2>
+    <div class="mermaid">
+flowchart TD
+  Q1{"Domain checkable?<br/>math · code · JSON"} -->|Yes| V["Verifiable gen + STaR / RFT<br/>execution checks = near-perfect labels"]
+  Q1 -->|No| Q2{"Need preferences<br/>for alignment?"}
+  Q2 -->|Yes| R["RLAIF / Constitutional / self-reward<br/>anchor to real seed, audit judge"]
+  Q2 -->|No| Q3{"Goal?"}
+  Q3 -->|Mimic big model| D["Distillation - Alpaca<br/>mind the ToS"]
+  Q3 -->|Broad instruction set| S["Self-Instruct then Evol-Instruct<br/>+ personas for diversity"]
+  Q3 -->|Max signal per token| T["Textbooks recipe<br/>few, ultra-clean docs"]
+    </div>
+    <aside class="notes">
+      The decision tree mirrors the source's "when to use what." First and most important fork: is the domain checkable? If you can run the answer — math, code, JSON — always prefer verifiable generation plus STaR/RFT, because execution gives near-perfect labels. If it's not checkable, ask whether you need preference data for alignment; if so, RLAIF, Constitutional AI, or self-rewarding, but always anchor to a real seed set and audit the judge for bias. Otherwise it's about your goal: distillation to quickly make a small model mimic a big one (mind the ToS); Self-Instruct then Evol-Instruct plus personas to build a broad instruction set from few labels; or the textbooks recipe when you have tiny compute and want maximum signal per token. And underlying all of it, two standing rules: accumulate real + synthetic every round, and use a principled mixture search like DoReMi rather than hand-tuned domain weights.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">When to use what · standing rules</p>
+    <h2>Two rules that always apply</h2>
+    <ul>
+      <li class="fragment"><strong>Iterating a flywheel?</strong> <em>Accumulate</em> real + synthetic each round (never replace), cap rounds, monitor for collapse.</li>
+      <li class="fragment"><strong>Choosing data proportions?</strong> Use a principled mixture search like <strong>DoReMi</strong>, not hand-tuned weights.</li>
+    </ul>
+    <aside class="notes">
+      These two rules sit above the decision tree and apply no matter which generation method you picked. One: whenever you run an iterative loop, accumulate — keep the real data and all prior synthetic in the training mix, cap the number of rounds, and actively monitor diversity metrics for early signs of collapse. Two: when you're deciding how much weight to give each data source (web vs code vs your synthetic math), don't hand-tune; use a principled mixture optimizer like DoReMi, which learns domain weights that speed up pretraining. Hand-tuned mixture weights are a classic source of silent underperformance.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 12 · PITFALLS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Pitfalls · misconceptions</p>
+    <h2>People think X, but actually Y (1/2)</h2>
+    <div class="callout warn"><span class="t">⚠ Pitfall</span>
+      <ul>
+        <li class="fragment"><strong>Think:</strong> synthetic data breaks the wall by adding knowledge. <strong>Actually:</strong> a generator mostly <em>recycles</em> what it knows — new facts come from the real world or verifiers/tools.</li>
+        <li class="fragment"><strong>Think:</strong> training on your own outputs always degrades. <strong>Actually:</strong> the failure mode is <em>replacing</em> real data; if you <em>accumulate</em>, collapse is largely avoided.</li>
+        <li class="fragment"><strong>Think:</strong> a stronger teacher can't cause collapse. <strong>Actually:</strong> distillation still narrows diversity &amp; propagates blind spots — even good teachers degrade tails.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      First three misconceptions. One — the biggest: people imagine synthetic data conjures new knowledge and breaks the data wall. It doesn't; a generator reorganizes and densifies what it already knows. New <em>facts</em> still come from the real world, from verifiers, or from tools. Synthetic data buys you signal density and coverage, not new ground truth. Two: "training on your own outputs is always poison" — false, and the nuance is the whole module: the poison is specifically <em>replacing</em> real data each generation. Accumulate and you're largely fine. Three: "use a strong enough teacher and you're safe from collapse" — no; distillation still narrows diversity and propagates the teacher's blind spots and any contamination, so even excellent teachers degrade the tails over many rounds.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Pitfalls · misconceptions</p>
+    <h2>People think X, but actually Y (2/2)</h2>
+    <div class="callout warn"><span class="t">⚠ Pitfall</span>
+      <ul>
+        <li class="fragment"><strong>Think:</strong> low perplexity = high quality. <strong>Actually:</strong> perplexity measures fluency — a fluent lie scores well; aggressive filtering wipes out valid minority dialects.</li>
+        <li class="fragment"><strong>Think:</strong> an LLM judge is unbiased. <strong>Actually:</strong> it has position bias, verbosity bias, and self-preference — silently corrupting AI-feedback data.</li>
+        <li class="fragment"><strong>Think:</strong> clean benchmarks = no contamination. <strong>Actually:</strong> synthetic data inherits <em>transitive</em> leakage — if the teacher saw the test set, its outputs encode the answers.</li>
+        <li class="fragment"><strong>Think:</strong> more synthetic tokens always help. <strong>Actually:</strong> without dedup you pile up near-dups that inflate counts &amp; boost memorization.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Four more. Perplexity is a fluency/typicality measure, not a truth measure — a confident lie has low perplexity, and over-aggressive perplexity filtering deletes valid minority dialects and rare-but-correct text. The LLM judge: it is NOT a neutral grader. It has position bias (favors the first or last option), verbosity bias (favors longer answers), and self-preference (favors its own style) — these silently corrupt every AI-feedback dataset, so you must randomize positions, control for length, and calibrate against gold. Transitive contamination is the sneakiest: even if YOUR data has no direct overlap with the test set, if the teacher that generated it had seen the test set, the answers can be encoded in its generations — contamination with nothing to flag. And finally, more tokens isn't more value: without dedup you accumulate near-duplicates that inflate token counts, boost memorization, and add zero diversity.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 13 · WHAT'S NEW + PAPERS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">What's new</p>
+    <h2>The synthetic-data era is here</h2>
+    <div class="callout whatsnew"><span class="t">🚀 What's new</span>
+      <ul>
+        <li class="fragment"><strong>Verifiable data is the frontier.</strong> Reasoning models train on huge pools of execution-checked math/code (STaR/RFT lineage) — the verifier is the moat.</li>
+        <li class="fragment"><strong>Accumulate, don't replace.</strong> 2024 result: collapse is <em>not</em> inevitable — accumulating keeps test error bounded across generations.</li>
+        <li class="fragment"><strong>AI feedback at scale.</strong> RLAIF &amp; Constitutional AI now produce most alignment preference data; self-rewarding pushes the human further out (with guardrails).</li>
+        <li class="fragment"><strong>Quality &gt; quantity, proven.</strong> phi "textbooks" + LIMA (≈1K examples) — curation is a first-class research area.</li>
+        <li class="fragment"><strong>Principled mixtures.</strong> DoReMi reweighting + contamination auditing (canaries, n-gram overlap, transitive-leakage) are now standard hygiene.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Where the field is right now. Verifiable data is the frontier — the big reasoning models are trained on enormous pools of execution-checked math and code with rejection sampling, and the consensus is that the verifier, not the generator, is the competitive moat. The 2024 collapse result is genuinely reassuring: Gerstgrasser et al. showed collapse is not inevitable; if synthetic data accumulates alongside real data instead of replacing it, test error stays bounded across generations. AI feedback (RLAIF, Constitutional) now generates most alignment preference data, with self-rewarding loops pushing humans further out under guardrails. The quality-over-quantity thesis (phi, LIMA) is now mainstream, making curation a real research area. And the hygiene — DoReMi mixtures plus contamination auditing with canaries and n-gram and transitive-leakage checks — is now table stakes.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">What's new · papers</p>
+    <h2>Papers — verified links (1/2)</h2>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2211.04325">Will we run out of data? Limits of LLM scaling based on human-generated data</a> <span class="meta">— Villalobos et al., 2022. Frames the "data wall."</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2212.10560">Self-Instruct: Aligning LMs with Self-Generated Instructions</a> <span class="meta">— Wang et al., 2022. The seed → generate → filter template.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2304.12244">WizardLM: Empowering LLMs to Follow Complex Instructions (Evol-Instruct)</a> <span class="meta">— Xu et al., 2023. In-depth &amp; in-breadth evolution.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2306.11644">Textbooks Are All You Need (phi-1)</a> <span class="meta">— Gunasekar et al., 2023. High-quality synthetic beats scrape.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2305.11206">LIMA: Less Is More for Alignment</a> <span class="meta">— Zhou et al., 2023. ~1K curated examples rival massive SFT.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2203.14465">STaR: Bootstrapping Reasoning With Reasoning</a> <span class="meta">— Zelikman et al., 2022. Generate → verify → retrain.</span></div>
+    <aside class="notes">
+      These are the verified primary sources from the doc — keep the exact arXiv IDs. First half spans the foundation: Villalobos for the data wall; Self-Instruct as the bootstrapping template everyone copied; WizardLM/Evol-Instruct for difficulty control; the phi "Textbooks" paper and LIMA for the quality-over-quantity thesis; and STaR as the generate-verify-retrain engine. If a student reads only two of these, I'd pick Self-Instruct (to understand the generation template) and STaR (to understand the self-improvement loop).
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">What's new · papers</p>
+    <h2>Papers — verified links (2/2)</h2>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2401.10020">Self-Rewarding Language Models</a> <span class="meta">— Yuan et al., 2024. Model authors and judges its own data.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2309.00267">RLAIF: Scaling RL from Human Feedback with AI Feedback</a> <span class="meta">— Lee et al., 2023. AI-generated preference labels.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2212.08073">Constitutional AI: Harmlessness from AI Feedback</a> <span class="meta">— Bai et al., 2022. Self-critique against a written constitution.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2305.10429">DoReMi: Optimizing Data Mixtures Speeds Up LM Pretraining</a> <span class="meta">— Xie et al., 2023. Principled mixture weights.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2305.17493">The Curse of Recursion: Training on Generated Data Makes Models Forget</a> <span class="meta">— Shumailov et al., 2023. Model collapse &amp; tail forgetting.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2404.01413">Is Model Collapse Inevitable? Breaking the Curse by Accumulating Real and Synthetic Data</a> <span class="meta">— Gerstgrasser et al., 2024. Accumulate vs replace.</span></div>
+    <aside class="notes">
+      Second half covers feedback and collapse: Self-Rewarding (model judges itself), RLAIF and Constitutional AI (AI-generated preference and harmlessness data), DoReMi (principled mixtures), and the two collapse papers that bookend the whole module — "The Curse of Recursion" (Shumailov), which proved tail forgetting under recursive training, and "Is Model Collapse Inevitable?" (Gerstgrasser), which showed the cure: accumulate real plus synthetic. Those last two are the most cited in interviews about model collapse, so make sure students can name both and state the replace-vs-accumulate distinction.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 14 · PRACTICE
+     ============================================================ -->
+<!-- ============================================================
+     SECTION 14 · PRACTICE (REBUILT) — click a question to reveal the answer
+     12 questions · 4 vertical sub-slides · max 3 each
+     ============================================================ -->
+<section>
+  <p class="kicker">Practice</p>
+  <h2>Practice — click a question to reveal the answer</h2>
+  <p class="small muted">Full bank: <a href="../../interview-prep/31-synthetic-data-and-data-centric-ai.md">31 · Synthetic Data &amp; Data-Centric AI</a> — from the answer key, condensed.</p>
+
+  <!-- ===== SET 1 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">What is the "data wall," and why worry about running out of high-quality public text tokens? <span class="diff easy">Easy</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">The projected point (roughly 2026–2032) where the stock of high-quality public text is exhausted relative to models' growing appetite. Chinchilla scaling wants proportionally more tokens, but unique good text grows slowly. <span class="watch">It's high-quality <em>unique</em> tokens running out, not all text/bytes.</span></div></li>
+
+      <li class="qa"><span class="q">Define data-centric AI and contrast it with model-centric AI; give an example where improving data beats improving the model. <span class="diff easy">Easy</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Data-centric AI holds the model fixed and improves the dataset (cleaning, labeling, filtering); model-centric fixes data and tweaks architecture/loss/hyperparameters. Example: fixing mislabels or deduping an SFT set often beats swapping optimizers — LIMA's ~1K curated examples rivaled much larger noisy sets.</div></li>
+
+      <li class="qa"><span class="q">What is distillation from a stronger teacher for generating SFT data, and what makes it effective? <span class="diff easy">Easy</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Prompt a stronger teacher for high-quality responses, then fine-tune a smaller student on the (instruction, response) pairs. It works because the teacher supplies clean, well-structured demonstrations hard to learn from raw web text. <span class="watch">The student is roughly capped near the teacher and inherits its biases; also ToS/legal limits.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 2 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Explain the Self-Instruct pipeline — roles of seed tasks, generation, and filtering. <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">From ~175 human seed tasks, the model (seeds in-context) generates new instructions, then inputs/outputs for them. Filtering drops near-duplicates (ROUGE-L overlap) and invalid formats; survivors rejoin the pool so coverage compounds cheaply. <span class="watch">Without the dedup/filter step diversity collapses into redundant instructions.</span></div></li>
+
+      <li class="qa"><span class="q">How does Evol-Instruct differ from Self-Instruct? What do "in-depth" and "in-breadth" evolution mean? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Evol-Instruct (WizardLM) evolves existing instructions rather than generating afresh. In-depth rewrites a prompt to be harder (more constraints, reasoning, steps); in-breadth creates new related-but-distinct topics. An elimination step drops failed/trivial evolutions, giving a controllable difficulty gradient Self-Instruct lacks.</div></li>
+
+      <li class="qa"><span class="q">Describe persona-driven and templated generation. When would you prefer personas over free-form prompting? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Templates fill structured slots for schema-consistent data; personas condition on a large library of distinct viewpoints (e.g. ~1B personas) for diversity. Prefer personas when you need broad stylistic/topical diversity and want to avoid single-teacher style collapse; templates when you need tight structural validity.</div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 3 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">What is rejection-sampling fine-tuning (STaR / RFT): generate, filter to correct, retrain? Why does it work? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Generate many solutions per problem, keep those whose final answer is verified correct, fine-tune on them, repeat; STaR adds rationalization for unsolved ones. It works because the model already puts nonzero mass on correct reasoning — filtering amplifies it, turning search/compute into training signal. <span class="watch">It's SFT on filtered positives, not RL/policy-gradient.</span></div></li>
+
+      <li class="qa"><span class="q">Explain self-rewarding / self-play where a model generates and judges its own training data. What stops it from drifting? <span class="diff hard">Hard</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">One model produces candidates and judges them (LLM-as-judge) to build DPO pairs across rounds. Guards against drift/reward-hacking: ground in verifiable signals where possible, keep real anchor data, cap iterations, hold out gold evals, ensemble/rotate judges, monitor diversity/length. <span class="watch">Self-judging is not inherently stable — self-preference &amp; verbosity bias cause runaway hacking without external grounding.</span></div></li>
+
+      <li class="qa"><span class="q">Compare exact dedup, near-dedup (MinHash/LSH), and semantic/embedding dedup — when do you use each? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Exact (hash docs/lines) removes identical copies — cheap first pass, always. Near-dedup (MinHash+LSH on shingles, Jaccard threshold) catches reformatted near-duplicates at web scale — the workhorse. Semantic (embedding cosine + ANN) catches paraphrases/translations sharing meaning not tokens — for high-value SFT sets, but costlier and risks over-merging.</div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 4 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">You want 1M math word problems with verified answers — sketch a pipeline that maximizes label correctness. <span class="diff hard">Hard</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Prefer generate-from-solution: sample structured problems with known ground truth (templates + a CAS like SymPy), then have an LLM render natural-language problems around the verified answer. For LLM-generated problems, verify with a symbolic checker, majority vote, and cross-model agreement; drop non-consensus; dedup, stratify, human spot-check. <span class="watch">Never trust an LLM's self-reported answer without an independent verifier.</span></div></li>
+
+      <li class="qa"><span class="q">Define model collapse. What happens to tails, variance, and modes under recursive self-training? <span class="diff med">Med</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">A degenerative process where recursive training on model outputs loses the true distribution: tails vanish first, variance shrinks, modes merge toward a narrow over-smoothed set. Sampling, finite-sample, and approximation errors compound each generation. <span class="watch">It's not just "quality drops" — the signature is tail loss and variance collapse.</span></div></li>
+
+      <li class="qa"><span class="q">Synthetic data from a teacher that saw the benchmark can leak downstream. How do you guard against transitive leakage? <span class="diff hard">Hard</span><span class="reveal-hint">▸ reveal</span></span>
+        <div class="answer">Assume the teacher leaks. Decontaminate the <em>generated</em> data (n-gram + embedding/semantic overlap against all test sets, drop matches); avoid prompting near benchmark items; evaluate on freshly-created/post-cutoff held-outs; use canaries; track provenance end-to-end. <span class="watch">Decontaminating only your raw scrape misses the leak carried by teacher-generated synthetic data.</span></div></li>
+    </ul>
+  </section>
+
+</section>
+
+<!-- ============================================================
+     SECTION 15 · TAKEAWAYS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Takeaways</p>
+    <h2>What to remember</h2>
+    <div class="takeaways"><ul>
+      <li class="fragment"><strong>The data wall is real:</strong> high-quality public text is finite, so models train on data they or a teacher generate.</li>
+      <li class="fragment"><strong>Generation is cheap; verification is the moat.</strong> A hard verifier turns a noisy generator into near-ground-truth labels — math/code lead.</li>
+      <li class="fragment"><strong>The ladder:</strong> augment → distill → Self-Instruct → Evol-Instruct → textbooks → STaR → self-reward → RLAIF.</li>
+      <li class="fragment"><strong>Self-improvement is a flywheel:</strong> generate → verify → retrain — spins only with diversity + a reliable verifier.</li>
+      <li class="fragment"><strong>Collapse = recursive "replace."</strong> Accumulating real + synthetic largely prevents it.</li>
+      <li class="fragment"><strong>Hygiene is non-negotiable:</strong> dedup (MinHash-LSH), mixtures (DoReMi), judge-bias audits, contamination checks.</li>
+      <li class="fragment"><strong>Quality over quantity:</strong> phi &amp; LIMA — small clean sets rival massive scrapes.</li>
+    </ul></div>
+    <aside class="notes">
+      The recap — same seven points as the roadmap, now earned. Read them back as the through-line: finite real text forces synthetic; verification is what makes synthetic safe; there's a ladder of methods each fixing the last one's gap; the loop is a flywheel that needs diversity and a verifier; collapse comes from replacing not from using synthetic; hygiene is mandatory; and small clean beats large dirty. If a student leaves with two sentences, make them "verification is the moat" and "accumulate, don't replace."
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Further reading · closing</p>
+    <h2>Go deeper</h2>
+    <div class="paper"><a href="https://arxiv.org/abs/2404.01413">Is Model Collapse Inevitable? (accumulate vs replace)</a> <span class="meta">— Gerstgrasser et al., 2024.</span></div>
+    <div class="paper"><a href="https://huggingface.co/blog/synthetic-data-save-costs">Synthetic data for cheaper, faster models</a> <span class="meta">— Hugging Face blog.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2305.17493">The Curse of Recursion (model collapse)</a> <span class="meta">— Shumailov et al., 2023.</span></div>
+    <p style="margin-top:1em;text-align:center;font-size:1.1em;"><strong>Generation is cheap. Verification is the moat. Accumulate, don't replace.</strong></p>
+    <p style="text-align:center;opacity:.6;font-size:.85em;">End of Module 31 — thank you. Press <kbd>O</kbd> for overview.</p>
+    <aside class="notes">
+      Closing. Two arXiv reads to go deeper — the two collapse papers — plus the Hugging Face practitioner blog for the applied side. And the one-line crystallization of the whole lecture: generation is cheap, verification is the moat, accumulate don't replace. That's the sentence I want them repeating on the way out. Next module steps into Phase 3, reasoning models, which run exactly this verified-data flywheel at scale. Thank them, and offer to open the overview or jump to any approach.
+    </aside>
+  </section>
+</section>
+
+    </div>
+  </div>
+
+  <!-- reveal.js core + plugins + mermaid (CDN), then shared deck runtime -->
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/math/math.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+  <script src="../assets/deck.js?v=2"></script>
+</body>
+</html>

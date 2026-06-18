@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Transformer Foundations — Overview</title>
+  <meta name="description" content="The big picture: how text becomes tokens, vectors, attention, a Transformer block, and positional encoding — an overview linking four deep-dive pages." />
+
+  <!-- Tailwind (CDN) for layout utilities -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>window.tailwind && (tailwind.config = { darkMode: "class" });</script>
+
+  <!-- KaTeX (math) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <!-- highlight.js themes (light default; dark toggled by site.js) -->
+  <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" />
+  <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" disabled />
+
+  <!-- Shared site styles -->
+  <link rel="stylesheet" href="../assets/site.css" />
+
+  <!-- FOUC guard: set theme before first paint -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("theme") ||
+          ((window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+        if (t === "dark") document.documentElement.classList.add("dark");
+        if (localStorage.getItem("sidebar") === "collapsed") document.documentElement.classList.add("sidebar-collapsed");
+        var l = document.getElementById("hljs-light"), d = document.getElementById("hljs-dark");
+        if (l) l.disabled = (t === "dark");
+        if (d) d.disabled = (t !== "dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="app">
+
+    <aside class="sidebar" id="sidebar">
+      <a class="sidebar-brand" href="../index.html">
+        <span class="logo">∑</span>
+        <span><b>LLM Foundations</b><span>Interview teaching series</span></span>
+      </a>
+
+      <a class="nav-link" href="../index.html"><span class="num">⌂</span> Home</a>
+
+      <div class="nav-group-title">Phase 1 · Foundations</div>
+      <a class="nav-link active" href="foundations-intro.html"><span class="num">↪</span> Intro &amp; overview</a>
+      <a class="nav-link" href="tokenization.html"><span class="num">02</span> Tokenization &amp; Embeddings</a>
+      <a class="nav-link" href="attention.html"><span class="num">04</span> Attention Mechanisms</a>
+      <a class="nav-link" href="transformers.html"><span class="num">03</span> Transformer Architecture</a>
+      <a class="nav-link" href="positional-encoding.html"><span class="num">05</span> Positional Encoding</a>
+      <div class="nav-group-title">Phase 2 · Training &amp; Alignment</div>
+      <a class="nav-link" href="../decks/pretraining.html"><span class="num">06</span> Pretraining &amp; Scaling</a>
+      <a class="nav-link" href="../decks/finetuning-peft.html"><span class="num">07</span> Fine-tuning &amp; PEFT</a>
+      <a class="nav-link" href="../decks/rlhf.html"><span class="num">08</span> RLHF &amp; Alignment</a>
+      <a class="nav-link" href="../decks/synthetic-data.html"><span class="num">31</span> Synthetic Data</a>
+
+      <div class="nav-group-title">Phase 3 · Reasoning &amp; Inference</div>
+      <span class="nav-link soon"><span class="num">28</span> Reasoning Models</span>
+      <span class="nav-link soon"><span class="num">11</span> Inference &amp; Serving</span>
+      <span class="nav-link soon"><span class="num">32</span> Small / Edge Models</span>
+
+      <div class="nav-group-title">Phase 4 · Building Apps</div>
+      <span class="nav-link soon"><span class="num">29</span> Context Engineering</span>
+      <span class="nav-link soon"><span class="num">13</span> RAG</span>
+      <span class="nav-link soon"><span class="num">14</span> Vector Databases</span>
+      <span class="nav-link soon"><span class="num">15</span> Agents &amp; Tools</span>
+      <span class="nav-link soon"><span class="num">16</span> MCP</span>
+      <span class="nav-link soon"><span class="num">36</span> GenAI App Dev</span>
+
+      <div class="nav-group-title">Phase 6 · Architectures</div>
+      <span class="nav-link soon"><span class="num">30</span> Beyond Transformers</span>
+    </aside>
+    <div class="scrim" id="scrim"></div>
+
+    <div class="main">
+      <div class="topbar">
+        <button class="icon-btn" data-sidebar-toggle aria-label="Open menu">☰</button>
+        <strong style="color:var(--text-strong)">Foundations — Overview</strong>
+        <button class="icon-btn" data-theme-toggle style="margin-left:auto" aria-label="Toggle theme">☾</button>
+      </div>
+      <button class="icon-btn theme-fab" data-theme-toggle aria-label="Toggle theme">☾</button>
+
+      <main class="content lecture">
+
+        <p style="font-size:13px;font-weight:700;letter-spacing:.04em;color:var(--accent);text-transform:uppercase;margin:0 0 6px;">
+          Phase 1 · Foundations · Start here
+        </p>
+        <h1>Transformer Foundations — Overview</h1>
+        <p class="subtitle">
+          The complete stack that turns text into predictions — <strong>tokenization → embeddings → attention →
+          the Transformer block → positional encoding</strong>. This overview gives you the whole picture in ~10
+          minutes; the four deep-dive pages then take each piece classic → SOTA. It’s the bedrock every other LLM
+          topic builds on.
+        </p>
+
+        <div class="callout roadmap">
+          <div class="callout-title">📋 This module, in four parts <span style="font-weight:500;color:var(--muted);font-size:.9rem;">(~1 hr total)</span></div>
+          <ol>
+            <li><a href="tokenization.html"><strong>Tokenization &amp; Embeddings</strong></a> — how raw text becomes a list of integer IDs, and how IDs become vectors. <span style="color:var(--muted)">(Module 02)</span></li>
+            <li><a href="attention.html"><strong>Attention Mechanisms</strong></a> — the soft content-based lookup at the heart of every block, and its efficient variants. <span style="color:var(--muted)">(Module 04)</span></li>
+            <li><a href="transformers.html"><strong>Transformer Architecture</strong></a> — how attention + FFN + residual + norm stack into a model; BERT vs GPT vs T5. <span style="color:var(--muted)">(Module 03)</span></li>
+            <li><a href="positional-encoding.html"><strong>Positional Encoding &amp; Long Context</strong></a> — how order is injected, and how models reach 100K+ tokens. <span style="color:var(--muted)">(Module 05)</span></li>
+          </ol>
+          <div class="goals">
+            <strong>Six ideas to land across the module:</strong>
+            <ol style="margin:.3em 0 0;">
+              <li>Subword tokenization beats both words and characters by trading vocabulary size against sequence length.</li>
+              <li>Embeddings turn discrete IDs into geometry; context (attention) is what disambiguates meaning.</li>
+              <li>Attention is a <em>soft, content-based lookup</em>: <code>softmax(QKᵀ/√d)·V</code>.</li>
+              <li>A Transformer block = attention (mix across tokens) + FFN (think per token), wrapped in residual + norm.</li>
+              <li>Attention is order-blind, so position must be injected — and <em>how</em> you inject it decides long-context behavior.</li>
+              <li>Almost every “modern” trick (GQA, FlashAttention, RoPE scaling) exists to fight the <strong>n² and KV-cache costs</strong>.</li>
+            </ol>
+          </div>
+        </div>
+
+        <h2><span class="sec-num">1.</span> Why it matters / where it fits</h2>
+        <p class="lead">
+          Every large language model is the same four-layer sandwich: <strong>(1)</strong> a tokenizer chops text into
+          a fixed vocabulary of pieces, <strong>(2)</strong> an embedding table maps each piece to a vector,
+          <strong>(3)</strong> a stack of Transformer blocks — built around <strong>attention</strong> — mixes those
+          vectors using context, with <strong>positional encoding</strong> telling the model what order things came in,
+          and <strong>(4)</strong> an output layer turns the final vectors back into a probability over the next token.
+        </p>
+        <p>
+          These four topics are inseparable in practice and constantly cross-examined in interviews, because almost every
+          downstream concept reduces to them. RAG is “what extra tokens do I put in the context window?” Inference
+          optimization is “how do I make attention and the KV cache cheaper?” Long-context models live or die by their
+          positional scheme. Fine-tuning, MoE, quantization — all operate on this skeleton. If you can draw the pipeline
+          below from memory and explain <em>why</em> each choice was made, you can reason about the rest of the field.
+        </p>
+
+        <h2><span class="sec-num">2.</span> Intuition</h2>
+        <p>
+          <strong>Tokenization</strong> is like writing with LEGO bricks instead of whole pre-built houses. Whole-word
+          “houses” mean you need a brick for <em>every</em> word that exists (millions, and you still miss new ones).
+          Single-letter bricks are universal but you need hundreds of them to build anything. <strong>Subwords</strong>
+          are the sweet spot: a few common chunks (<code>token</code>, <code>##ization</code>, <code>▁the</code>) compose
+          into any word, even ones never seen in training.
+        </p>
+        <p>
+          <strong>Embeddings</strong> turn each brick into a point in a high-dimensional “map of meaning,” where nearness
+          encodes similarity: <em>cat</em> and <em>kitten</em> land close together, <em>cat</em> and <em>thermodynamics</em>
+          far apart. But a static map can’t tell which sense of <em>bank</em> you mean. That’s the job of attention.
+        </p>
+        <p>
+          <strong>Attention</strong> is a spotlight with a search engine attached. To understand the word <em>it</em> in
+          “the trophy didn’t fit in the suitcase because <em>it</em> was too big,” the model lets <em>it</em> issue a
+          <em>query</em> (“what am I referring to?”), every other word advertises a <em>key</em> (“I’m a noun, I’m the
+          subject…”), and the words whose keys best match the query get the most spotlight — their <em>values</em> are
+          blended into the new representation of <em>it</em>. The Transformer just stacks this “look around and update”
+          step many times. <strong>Positional encoding</strong> is the timestamp on each word, because the spotlight
+          mechanism, on its own, is blind to order — to it, a sentence is an unordered bag of words.
+        </p>
+
+        <div class="diagram">
+          <div class="flow">
+            <span class="box ghost">raw text<small>"unhappiness"</small></span>
+            <span class="arrow">→</span>
+            <span class="box">tokenizer<small>un · happi · ness</small></span>
+            <span class="arrow">→</span>
+            <span class="box">token IDs<small>[ 581, 9032, 1655 ]</small></span>
+            <span class="arrow">→</span>
+            <span class="box accent">embeddings<small>3 × d vectors</small></span>
+            <span class="arrow">→</span>
+            <span class="box accent">+ position</span>
+            <span class="arrow">→</span>
+            <span class="box green">N × Transformer blocks<small>attention + FFN</small></span>
+            <span class="arrow">→</span>
+            <span class="box">unembed → softmax<small>P(next token)</small></span>
+          </div>
+          <div class="caption">Figure 1 — The end-to-end pipeline. Each colored stage is one of the four deep-dive pages.</div>
+        </div>
+
+        <h2><span class="sec-num">3.</span> How it all fits — one forward pass</h2>
+        <p>Follow one sentence through the machine; each step is unpacked on its own page:</p>
+        <ul>
+          <li><strong>Text → tokens → IDs.</strong> A deterministic tokenizer normalizes, splits, applies a subword model (BPE/WordPiece/Unigram), and emits a list of integers — the only thing the network ever sees. → <a href="tokenization.html">Tokenization</a></li>
+          <li><strong>IDs → vectors.</strong> An embedding matrix of shape <code>(V, d)</code> maps each ID to a learned vector; similar tokens land near each other. → <a href="tokenization.html">Embeddings</a></li>
+          <li><strong>Inject position.</strong> Because attention is order-blind, a position signal is added (sinusoidal), rotated in (RoPE), or biased into the scores (ALiBi). → <a href="positional-encoding.html">Positional Encoding</a></li>
+          <li><strong>Attention mixes tokens.</strong> Each token forms a query/key/value; <code>softmax(QKᵀ/√d)·V</code> blends in the most relevant other tokens. Multi-head runs several in parallel; a causal mask hides the future. → <a href="attention.html">Attention</a></li>
+          <li><strong>The block thinks, and stacks.</strong> A position-wise FFN processes each token, residual + norm wrap both sub-layers, and <code>L</code> blocks stack before a final norm + unembed → next-token probabilities. → <a href="transformers.html">Transformers</a></li>
+        </ul>
+
+        <h2><span class="sec-num">4.</span> The four deep dives</h2>
+        <p>Work through them in order (each links to the next), or jump to what you need:</p>
+        <div class="card-grid">
+          <a class="topic-card" href="tokenization.html">
+            <span class="badge">MODULE 02</span>
+            <h3>Tokenization &amp; Embeddings</h3>
+            <p>Word → char → BPE → byte-level → WordPiece → Unigram → tokenizer-free; static vs contextual embeddings. With a live tokenizer demo.</p>
+            <span class="pill">~12 min</span>
+          </a>
+          <a class="topic-card" href="attention.html">
+            <span class="badge">MODULE 04</span>
+            <h3>Attention Mechanisms</h3>
+            <p>Scaled dot-product, multi-head, MQA/GQA/MLA, FlashAttention, sliding-window/sparse/linear, attention sinks. With a heatmap demo.</p>
+            <span class="pill">~15 min</span>
+          </a>
+          <a class="topic-card" href="transformers.html">
+            <span class="badge">MODULE 03</span>
+            <h3>Transformer Architecture</h3>
+            <p>The block (attention + FFN + residual + norm), pre-norm/RMSNorm/SwiGLU, BERT vs GPT vs T5, parameter counting &amp; scaling.</p>
+            <span class="pill">~13 min</span>
+          </a>
+          <a class="topic-card" href="positional-encoding.html">
+            <span class="badge">MODULE 05</span>
+            <h3>Positional Encoding &amp; Long Context</h3>
+            <p>Sinusoidal, learned, relative/T5, RoPE, ALiBi, NoPE; context extension (PI/NTK/YaRN/LongRoPE); lost-in-the-middle &amp; sinks.</p>
+            <span class="pill">~14 min</span>
+          </a>
+        </div>
+
+        <nav class="page-footer">
+          <a class="footlink home" href="../index.html"><span class="dir">⌂</span><span class="ttl">Home</span></a>
+          <a class="footlink next" href="tokenization.html"><span class="dir">Next: Tokenization →</span><span class="ttl">02 · Tokenization &amp; Embeddings</span></a>
+        </nav>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- CDN libs + shared JS (order matters: libs before site.js) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../assets/site.js"></script>
+
+</body>
+</html>

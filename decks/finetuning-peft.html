@@ -1,0 +1,1195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fine-tuning & PEFT — LLM Teaching Decks</title>
+  <meta name="description" content="A reveal.js lecture deck: supervised fine-tuning and the parameter-efficient toolkit — adapters, prefix/prompt tuning, LoRA, QLoRA, DoRA, IA3." />
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/white.css" id="reveal-theme" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <link rel="stylesheet" href="../assets/deck.css?v=2" />
+
+  <!-- FOUC guard: set deck theme before first paint -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("deck-theme") ||
+          ((window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+        if (t === "dark") document.documentElement.classList.add("deck-dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+
+<!-- ============================ SECTION 1 · TITLE ============================ -->
+<section>
+  <section class="deck-title">
+    <div class="logo">∑</div>
+    <p class="kicker">PHASE 2 · TRAINING &amp; ALIGNMENT · MODULE 07</p>
+    <h1>Fine-tuning &amp; PEFT</h1>
+    <p class="subtitle">How a pretrained base becomes a helpful assistant — supervised fine-tuning, then the parameter-efficient toolkit (LoRA, QLoRA &amp; friends) that makes it cheap.</p>
+    <p class="keyhint"><kbd>←</kbd><kbd>→</kbd> navigate · <kbd>S</kbd> speaker notes · <kbd>O</kbd> overview · <kbd>F</kbd> fullscreen · append <code>?print-pdf</code> to export</p>
+    <aside class="notes">
+      Welcome. This module is the bridge between a raw pretrained model and a usable assistant. The arc: SFT teaches behavior, PEFT makes that affordable, and LoRA/QLoRA are the workhorses you will actually use in industry. Tell the audience the two questions interviewers always probe: "why did we move from full FT to LoRA?" and "why does LoRA add no inference latency?" — we will answer both with animations. Press S any time to see this script.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================ SECTION 2 · ROADMAP ============================ -->
+<section>
+  <section>
+    <p class="kicker">Roadmap</p>
+    <h2>What we'll land in ~40 min</h2>
+    <div class="callout"><span class="t">📋 Roadmap</span>
+      <ul>
+        <li class="fragment">Why pretraining alone isn't enough → <strong>SFT</strong></li>
+        <li class="fragment">Chat templates &amp; <strong>loss masking</strong> (the response-only objective)</li>
+        <li class="fragment">The full <strong>PEFT landscape</strong>: adapters · soft prompts · BitFit · LoRA · QLoRA · DoRA · IA³</li>
+        <li class="fragment">The low-rank update math: <code>ΔW = (α/r)BA</code></li>
+        <li class="fragment">Merging, multi-adapter serving &amp; catastrophic forgetting</li>
+        <li class="fragment">A decision guide: <strong>full vs LoRA vs QLoRA</strong></li>
+      </ul>
+    </div>
+    <aside class="notes">
+      This is the agenda slide — advance the fragments one at a time so people see the shape of the lecture. The six core ideas to land: (1) SFT is just next-token prediction on curated pairs; (2) loss masking is non-negotiable; (3) PEFT freezes the base and trains a tiny add-on; (4) LoRA's low-rank assumption; (5) merge = zero latency; (6) pick the method by your constraint. If you only remember one equation today, make it ΔW = (α/r)BA.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Roadmap · the one-sentence version</p>
+    <h2>The whole module in a line</h2>
+    <div class="flow">
+      <span class="box ghost">Base LM</span>
+      <span class="arrow">→</span>
+      <span class="box accent">SFT</span>
+      <span class="arrow">→</span>
+      <span class="box green">Assistant</span>
+      <span class="arrow">→</span>
+      <span class="box">RLHF / DPO</span>
+    </div>
+    <p class="fragment"><strong>PEFT</strong> is <em>how</em> we do the SFT step cheaply — it doesn't change <em>what</em> SFT does.</p>
+    <aside class="notes">
+      Keep this slide as a mental scaffold for the whole deck. SFT teaches the behavior; preference optimization (Module 08) refines which good answer is preferred. PEFT is orthogonal — it is a way to run the SFT step with a tiny fraction of the memory. People conflate "PEFT" with "a different objective"; it is not — same loss, fewer trainable parameters.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================ SECTION 3 · WHY IT MATTERS ============================ -->
+<section>
+  <section>
+    <p class="kicker">Why it matters</p>
+    <h2>A base model knows text, not behavior</h2>
+    <ul>
+      <li class="fragment">Pretraining → brilliant at <strong>predicting the next token</strong></li>
+      <li class="fragment">Ask it a question → it may continue with <em>more questions</em></li>
+      <li class="fragment">It learned the <strong>shape</strong> of text, not the <strong>behavior</strong> of a helpful assistant</li>
+      <li class="fragment">Fine-tuning = the short, supervised <strong>second act</strong> that teaches behavior</li>
+    </ul>
+    <aside class="notes">
+      The core motivation. A base model has read much of the internet and is great at one thing: next-token prediction. But behavior — answering rather than rambling, stopping at the right place, using the right format — is not in there yet. SFT shows the model thousands of (instruction → good response) pairs and nudges its weights to answer the way you want. This is the cheapest, highest-leverage post-training step.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Why it matters · where it fits</p>
+    <h2>Where fine-tuning sits in the stack</h2>
+    <div class="mermaid">
+flowchart LR
+  A["Base LM<br/>next-token only"] --> B["SFT<br/>instruction to response"]
+  B --> C["Assistant<br/>follows instructions"]
+  C --> D["RLHF / DPO<br/>preference tuning"]
+</div>
+    <p class="fragment">SFT teaches the behavior · preference optimization (Mod 08) refines <em>which</em> good answer wins.</p>
+    <aside class="notes">
+      This is Figure 1 from the source, redrawn. Post-training has two stages: SFT first (this module), then preference optimization (RLHF/DPO, next module). PEFT is how we do the SFT step cheaply. A common interview question: "what is the difference between SFT and RLHF?" SFT imitates good answers (supervised); RLHF/DPO ranks among good answers using preference signal. We are entirely in the SFT box today.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================ SECTION 4 · INTUITION ============================ -->
+<section>
+  <section>
+    <p class="kicker">Intuition</p>
+    <h2>Med school → residency → sticky notes</h2>
+    <div class="cols">
+      <div>
+        <ul>
+          <li class="fragment"><strong>Pretraining</strong> = a med-school grad who memorized every textbook</li>
+          <li class="fragment"><strong>SFT</strong> = residency: shadow senior doctors on real cases until knowledge becomes bedside manner</li>
+          <li class="fragment"><strong>PEFT</strong> = a cheat-sheet of sticky notes riding alongside the frozen brain</li>
+        </ul>
+      </div>
+      <div>
+        <p class="fragment">Same behavior change, a tiny fraction of the cost.</p>
+        <p class="fragment">Peel the notes off → you get the original doctor back.</p>
+      </div>
+    </div>
+    <aside class="notes">
+      The analogy is worth lingering on because it pre-loads three later points. "Rewiring the whole brain" = full fine-tuning: expensive and risky — the doctor might forget anatomy (catastrophic forgetting). "Sticky notes" = a few million extra parameters that ride alongside frozen weights. "Peel them off" = LoRA adapters are separable; you can revert to the base model exactly. This is why PEFT resists forgetting: the base weights never move.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Intuition · the picture</p>
+    <h2>The frozen brain + a small detour</h2>
+    <div class="mermaid">
+flowchart LR
+  X["x"] --> W["W0 x<br/>frozen base"]
+  X --> A["A<br/>r x k"]
+  A --> B["B<br/>d x r"]
+  W --> S["h = W0 x + alpha/r BA x"]
+  B --> S
+</div>
+    <p class="fragment">Only <code>A</code> and <code>B</code> train. <code>W₀</code> stays frozen — and <code>B=0</code> at init, so we start exactly at the base.</p>
+    <aside class="notes">
+      This is the LoRA forward pass at an intuitive level — we will make it rigorous in How-it-works and in The Math. The two key facts to seed now: only the small detour (A then B) is trainable, and because B is initialized to zero, the detour contributes nothing at step zero. So training begins exactly at the base model and the update grows gradually. No heavy math here — that comes later.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================ SECTION 5 · HOW IT WORKS ============================ -->
+<section>
+  <section>
+    <p class="kicker">How it works</p>
+    <h2>SFT is just more next-token prediction</h2>
+    <ul>
+      <li class="fragment">…but on curated <strong>prompt + ideal response</strong> pairs</li>
+      <li class="fragment">…formatted with a <strong>chat template</strong></li>
+      <li class="fragment">Special role markers <code>&lt;|user|&gt;</code> / <code>&lt;|assistant|&gt;</code>, a <strong>BOS</strong> and an <strong>EOS</strong> token</li>
+      <li class="fragment">Wrong template → quality <em>silently</em> collapses</li>
+    </ul>
+    <aside class="notes">
+      SFT uses the exact same loss as pretraining — cross-entropy on next tokens — but the data is different: curated instruction/response pairs, wrapped in the chat template the model was aligned on. The chat template is the literal string scaffold: role markers, begin-of-sequence, and crucially end-of-sequence so the model learns when to stop. Use the wrong template and the model never sees the cue pattern it learned during alignment, so quality drops with no error message. This is a classic silent failure.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · the key trick</p>
+    <h2>Loss masking: score only the response</h2>
+    <ul>
+      <li class="fragment">Compute cross-entropy on <strong>response tokens only</strong>, not the prompt</li>
+      <li class="fragment">The prompt is <em>context we condition on</em>, not text to learn to generate</li>
+      <li class="fragment">Set prompt-token labels to the ignore index <code>-100</code> → zero gradient</li>
+      <li class="fragment">Forget it → the model wastes capacity parroting questions; EOS gets noisy</li>
+    </ul>
+    <aside class="notes">
+      This is the single most asked SFT implementation detail. We only want the model to learn to produce the response, so we mask the prompt: in PyTorch, set those label positions to -100, which cross_entropy skips. If you skip masking, the model spends capacity learning to generate the user's question, and its end-of-sequence behavior degrades. Always mask the prompt. We will see the exact code for this later.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · the cost problem</p>
+    <h2>Full fine-tuning is memory-hungry</h2>
+    <div class="cols">
+      <div>
+        <ul>
+          <li class="fragment">Full FT updates <strong>every</strong> weight</li>
+          <li class="fragment">Needs weights + gradients + <strong>two Adam moment buffers</strong></li>
+          <li class="fragment">A 7B model in mixed precision → often <strong>60–80 GB</strong></li>
+        </ul>
+      </div>
+      <div>
+        <p class="fragment"><strong>PEFT</strong> freezes the base and trains a tiny add-on.</p>
+        <p class="fragment">The dominant PEFT method: <strong>LoRA</strong>.</p>
+      </div>
+    </div>
+    <aside class="notes">
+      The memory accounting is why PEFT exists. Adam keeps two buffers (first and second moment) per trainable parameter, on top of the weights and gradients — roughly 4× the model size in fp16. A 7B model balloons to 60–80 GB, beyond a single consumer GPU. PEFT freezes W₀ so there are no gradients or optimizer states for it; you only pay for the tiny add-on. LoRA is the dominant such method.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · the low-rank idea</p>
+    <h2>LoRA assumes ΔW is low-rank</h2>
+    <ul>
+      <li class="fragment">The <em>change</em> a task needs, <code>ΔW</code>, has low <strong>intrinsic rank</strong></li>
+      <li class="fragment">Don't learn a full <code>d×k</code> update — factorize it</li>
+      <li class="fragment"><code>ΔW = B·A</code> with <code>B</code> (<code>d×r</code>), <code>A</code> (<code>r×k</code>), rank <code>r ≪ min(d,k)</code></li>
+      <li class="fragment">Scale by <code>α/r</code></li>
+    </ul>
+    <div class="flow fragment">
+      <span class="box ghost">x</span><span class="arrow">→</span>
+      <span class="box">W₀x</span><span class="arrow">+</span>
+      <span class="box accent">A r×k</span><span class="arrow">→</span>
+      <span class="box accent">B d×r</span><span class="arrow">×α/r</span>
+      <span class="box green">h</span>
+    </div>
+    <aside class="notes">
+      The conceptual leap behind LoRA: empirically the update a downstream task needs lives in a low-dimensional subspace, so its rank is small. Instead of learning the full d×k matrix (millions of params per projection), factorize ΔW into two skinny matrices B (d×r) and A (r×k). With r much smaller than d or k, you train r(d+k) numbers instead of dk. The α/r scale decouples the update's magnitude from the rank. A is random Gaussian; B is zero at init so ΔW starts at zero.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · mechanism</p>
+    <h2>Watch one vector flow through a LoRA layer</h2>
+    <p>Step through the frozen path and the tiny LoRA detour, then watch them sum.</p>
+<div data-anim="mech-finetuning-peft"></div>
+    <aside class="notes">
+      Use the Play / Step / Reset controls. Narrate each step: (1) W₀ is frozen and still computes the base output W₀x; (2) A down-projects x into the rank-r bottleneck; (3) B up-projects back to d — together BA is the low-rank ΔW and only A,B train; (4) scale by α/r, and note B=0 at init so ΔW=0; (5) add the two paths: h = W₀x + (α/r)BAx; (6) optionally merge (α/r)BA into W₀ for zero added latency. This is the heart of the whole module — let the animation do the talking.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · the payoff</p>
+    <h2>Merge → zero inference latency</h2>
+    <ul>
+      <li class="fragment"><code>ΔW = (α/r)BA</code> is a plain matrix, same shape as <code>W₀</code></li>
+      <li class="fragment">Merge once trained: <code>W = W₀ + (α/r)BA</code></li>
+      <li class="fragment">Merged model = <strong>same architecture &amp; FLOPs</strong> as the base → zero added latency</li>
+      <li class="fragment">Or keep adapters separate &amp; <strong>hot-swap per request</strong> → multi-adapter serving</li>
+    </ul>
+    <aside class="notes">
+      This is the property that made LoRA win over adapters. Because the update is a plain matrix of the same shape as W₀, you can fold it in: W = W₀ + (α/r)BA. The merged model is byte-for-byte the same architecture as the base, so it adds zero inference latency — unlike bottleneck adapters which insert extra layers in series. Alternatively, keep the adapter separate and swap adapters per request, which underpins multi-adapter serving (S-LoRA). One base, many tasks.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================ SECTION 6 · THE APPROACHES ============================ -->
+<!-- ============================ SECTION 6 · THE APPROACHES ============================ -->
+<section>
+
+  <!-- ===== INTRO ===== -->
+  <section>
+    <p class="kicker">The approaches</p>
+    <h2>The full PEFT landscape</h2>
+    <p class="fragment">From full fine-tuning &rarr; soft-prompt &amp; adapter families &rarr; the modern LoRA / QLoRA stack.</p>
+    <div class="flow fragment">
+      <span class="box ghost">Full FT</span><span class="arrow">&rarr;</span>
+      <span class="box">Adapters</span><span class="arrow">&rarr;</span>
+      <span class="box">Soft prompts</span><span class="arrow">&rarr;</span>
+      <span class="box accent">LoRA</span><span class="arrow">&rarr;</span>
+      <span class="box green">QLoRA</span>
+    </div>
+    <p class="fragment"><em>classic &rarr; modern &rarr; SOTA</em> &mdash; and for each, how it differs from the one before.</p>
+    <aside class="notes">
+      This is the heart of the deck. We walk the family tree roughly chronologically: full fine-tuning (the baseline), the SFT objective itself, bottleneck adapters (first PEFT), the soft-prompt family (prefix, prompt, P-tuning v2), BitFit, then LoRA, QLoRA, the LoRA refinements (DoRA, rsLoRA), IA&sup3;, and finally S-LoRA for serving. For each, emphasize what it solves and how it differs from the previous one &mdash; that contrast is exactly what interviewers probe.
+    </aside>
+  </section>
+
+  <!-- ============ 1 · FULL FINE-TUNING ============ -->
+  <section>
+    <p class="kicker">Approaches &middot; 1 of 12</p>
+    <h3>Full fine-tuning <span class="tag classic">baseline</span></h3>
+    <p><strong>What:</strong> update <em>all</em> weights on your task data. <strong>How:</strong> standard backprop, small LR (&approx;1e-5&ndash;2e-5), whole network. <strong>Solves:</strong> maximum expressiveness &mdash; best with lots of data and a big behavior shift.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Highest quality ceiling; handles large shifts</li><li class="fragment">No architectural assumptions</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Huge memory &amp; storage &mdash; one full model per task</li><li class="fragment">Forgets general abilities most easily</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> this <em>is</em> the reference point &mdash; everything that follows trades a little of its ceiling for a fraction of its cost.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2203.02155" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      Full FT can move the model anywhere in weight space, so it has the highest ceiling, but it is the most expensive and the most prone to catastrophic forgetting because every weight moves. You also store a separate full-size model per task, and you pay weights + grads + two Adam moment buffers (&approx;4&times; the model in fp16). Everything that follows is a way to get most of this quality for a fraction of the cost.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Full fine-tuning</p>
+    <h3>Full fine-tuning &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">data<small>(x, y) pairs</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">forward<small>cross-entropy</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">backprop<small>grad for every W</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">Adam<small>2 buffers / param</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">all W updated</span>
+    </div>
+    <ol>
+      <li class="fragment">Feed curated (instruction, response) pairs through the whole network.</li>
+      <li class="fragment">Compute next-token cross-entropy on the response, backprop to <em>every</em> weight.</li>
+      <li class="fragment">Adam keeps first + second moment buffers per trainable param &rarr; &approx;4&times; model in fp16.</li>
+      <li class="fragment">Step the optimizer: a 7B model balloons to 60&ndash;80&nbsp;GB and you store a full copy per task.</li>
+    </ol>
+    <aside class="notes">
+      The memory accounting is why PEFT exists. Adam keeps two buffers (first and second moment) per trainable parameter, on top of weights and gradients &mdash; roughly 4&times; the model size in fp16. A 7B model balloons past a single consumer GPU. Because every weight moves, the model can drift far from the base, which is both why it has the highest ceiling and why it forgets the most.
+    </aside>
+  </section>
+
+  <!-- ============ 2 · SFT / INSTRUCTION TUNING ============ -->
+  <section>
+    <p class="kicker">Approaches &middot; 2 of 12</p>
+    <h3>SFT / instruction tuning <span class="tag modern">the SFT stage</span></h3>
+    <p><strong>What:</strong> the <em>objective</em>, not a parameter trick &mdash; train on (instruction, response) pairs. <strong>How:</strong> loss masking (labels = <code>-100</code> on the prompt), keep EOS, optionally pack multi-turn. <strong>Solves:</strong> turns a next-token predictor into an instruction-follower; runs with full FT <em>or</em> any PEFT below.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Cheapest, highest-leverage post-training step</li><li class="fragment">&sim;1k high-quality examples can teach style (LIMA)</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Wrong template / EOS silently degrades quality</li><li class="fragment">Teaches format &amp; style well; new <em>facts</em> only weakly</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> orthogonal to "how" &mdash; full FT is one way to <em>run</em> SFT; instruction tuning is SFT on a <em>broad</em> mixture so it generalizes to unseen instructions (FLAN, InstructGPT).</p>
+    <p class="small"><a href="https://arxiv.org/abs/2305.11206" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      Important framing: SFT is an objective, not a parameter-efficiency method. You can do SFT with full FT or any PEFT method on this list. Instruction tuning is SFT on a broad task mixture so the model generalizes to instructions it never saw &mdash; the FLAN / InstructGPT idea. LIMA showed &sim;1,000 carefully curated examples can already produce a strong assistant, which shifted effort from scraping to curation.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; SFT / instruction tuning</p>
+    <h3>SFT / instruction tuning &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">prompt + response</span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">chat template<small>role markers, EOS</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">mask prompt<small>label = -100</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">score response only</span>
+    </div>
+    <ol>
+      <li class="fragment">Wrap each pair in the model's <strong>chat template</strong> &mdash; role markers, BOS, and crucially EOS so it learns to stop.</li>
+      <li class="fragment">Set prompt-token labels to <code>-100</code> &mdash; the prompt is context we condition on, not text to generate.</li>
+      <li class="fragment">Compute cross-entropy on <strong>response tokens only</strong>; same loss as pretraining, restricted sum.</li>
+      <li class="fragment">For instruction tuning, repeat across a broad mixture &rarr; generalizes to unseen instructions.</li>
+    </ol>
+    <aside class="notes">
+      SFT uses the exact same loss as pretraining &mdash; cross-entropy on next tokens &mdash; but the data is curated pairs wrapped in the chat template the model was aligned on. The masking (label -100) implements "score the response only" in code. Use the wrong template and the model never sees the cue pattern it learned during alignment, so quality drops silently. Always include EOS in the loss so the model learns to terminate.
+    </aside>
+  </section>
+
+  <!-- ============ 3 · BOTTLENECK ADAPTERS ============ -->
+  <section>
+    <p class="kicker">Approaches &middot; 3 of 12</p>
+    <h3>Bottleneck adapters <span class="tag classic">first PEFT</span></h3>
+    <p><strong>What:</strong> small trainable modules inserted <em>between</em> frozen Transformer sub-layers (Houlsby 2019). <strong>How:</strong> down-project &rarr; nonlinearity &rarr; up-project, with a residual; Pfeiffer uses one per layer. <strong>Solves:</strong> first way to fine-tune BERT-era models with &lt;5% of params.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Tiny footprint; modular per task</li><li class="fragment">Strong, well-studied results</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Adds depth <em>in series</em> &rarr; real inference latency (no merge)</li><li class="fragment">Changes the forward graph</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> first method to freeze the base and train a tiny add-on instead of all weights &mdash; but unlike LoRA, adapters sit in series so they can't be folded away.</p>
+    <p class="small"><a href="https://arxiv.org/abs/1902.00751" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      Adapters were the first popular PEFT method. Each is a tiny MLP bottleneck (down, nonlinearity, up) with a residual, dropped between sub-layers. The key difference from LoRA, and why LoRA replaced it: adapters sit in series in the forward graph, so they cannot be folded into existing weights &mdash; they add real depth and therefore real latency at inference. LoRA's parallel low-rank branch is mergeable; adapters are not.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Bottleneck adapters</p>
+    <h3>Bottleneck adapters &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">h<small>d-dim activation</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">down W<sub>d</sub><small>d &rarr; m, m &Lt; d</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">nonlinearity</span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">up W<sub>u</sub><small>m &rarr; d</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">+ residual</span>
+    </div>
+    <ol>
+      <li class="fragment">Take the activation <em>between</em> two frozen sub-layers (e.g. after attention).</li>
+      <li class="fragment">Down-project to a small bottleneck dim <code>m</code>, apply a nonlinearity, up-project back to <code>d</code>.</li>
+      <li class="fragment">Add a residual so the module starts near identity; only the adapter trains.</li>
+      <li class="fragment">Because the block sits <em>in series</em>, it adds depth &rarr; cannot be merged &rarr; real latency.</li>
+    </ol>
+    <aside class="notes">
+      Walk the bottleneck: the adapter sees an activation, squeezes it through a low-dim hidden layer (down, nonlinearity, up), and adds the result back via a residual so at init it is close to the identity. Only the two small projections train. The structural cost is that this block is inserted serially into the forward graph, so it genuinely lengthens the computation &mdash; that serial placement is exactly what LoRA's parallel branch avoids.
+    </aside>
+  </section>
+
+  <!-- ============ 4 · PREFIX TUNING (soft prompts — KEY) ============ -->
+  <section>
+    <p class="kicker">Approaches &middot; 4 of 12</p>
+    <h3>Prefix tuning <span class="tag modern">soft prompts</span></h3>
+    <p><strong>What:</strong> prepend trainable "virtual token" vectors to the keys &amp; values at <em>every</em> layer (Li &amp; Liang 2021). <strong>How:</strong> optimize continuous prefix vectors while the model stays frozen, steering attention. <strong>Solves:</strong> very few trainable params; good for generation.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Influences all layers, not just the input</li><li class="fragment">Tiny parameter count</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Trickier to train (often reparam'd via an MLP); eats context budget</li><li class="fragment">Usually below LoRA on modern LLMs</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> adapters add <em>parameters inside</em> the network; prefix tuning leaves all weights untouched and instead prepends learned <em>virtual tokens</em> &mdash; it conditions the frozen model rather than modifying it.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2101.00190" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      Now the soft-prompt family. Prefix tuning learns continuous prefix vectors prepended to the keys and values at every layer &mdash; they don't occupy real input slots but they do consume context length. They steer attention without touching weights. The trade-off: harder to optimize (often reparameterized through a small MLP for stability) and usually below LoRA in quality on modern LLMs.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Prefix tuning (soft prompts)</p>
+    <h3>Prefix tuning &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">prefix vectors<small>trainable, frozen LM</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">prepend to K, V<small>every layer</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">attention attends<small>real tokens + prefix</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">steered output</span>
+    </div>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Soft prompts — prefix / prompt / P-tuning","nodes":[["frozen LM","weights never move"],["soft vectors","continuous, trainable"],["prepend","to input or K/V"],["attention","real tokens see prefix"],["steered y","behavior shifts"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"The base LM is <strong>frozen</strong> — no weight ever updates, so the base abilities stay intact."},
+       {"on":[1],"done":[0],"cap":"We learn a handful of <em>continuous</em> vectors — \"virtual tokens\" with no fixed word, optimized by gradient descent."},
+       {"on":[2],"done":[0,1],"cap":"<strong>Prompt tuning</strong> prepends them at the input embedding only; <strong>prefix / P-tuning v2</strong> prepend to K,V at <em>every</em> layer."},
+       {"on":[3],"done":[0,1,2],"cap":"Real tokens now attend over <code>prefix + sequence</code> — the prefix biases what attention retrieves."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Net effect: the frozen model is <em>steered</em> toward the task. Cost: the prefix eats context budget every layer."}
+     ],"interval":1900}
+    </script></div>
+    <ol>
+      <li class="fragment">Initialize a small set of trainable continuous vectors; the whole LM stays frozen.</li>
+      <li class="fragment">Prepend them to the keys and values at every layer (prompt tuning does input only).</li>
+      <li class="fragment">Real tokens attend over <code>prefix + sequence</code>, so the prefix biases attention.</li>
+      <li class="fragment">Backprop updates <em>only</em> the prefix &mdash; a few thousand to a few hundred-k params.</li>
+    </ol>
+    <aside class="notes">
+      Use the Play / Step / Reset controls. Narrate: the LM is frozen; we learn continuous "virtual token" vectors that have no fixed word; prefix tuning prepends them to keys and values at every layer (prompt tuning is the input-only special case); real tokens then attend over prefix + sequence so the prefix steers attention; only the prefix trains. The cost is that the prefix consumes context length at every layer and these are trickier to optimize than LoRA.
+    </aside>
+  </section>
+
+  <!-- ============ 5 · PROMPT TUNING ============ -->
+  <section>
+    <p class="kicker">Approaches &middot; 5 of 12</p>
+    <h3>Prompt tuning <span class="tag modern">soft prompts</span></h3>
+    <p><strong>What:</strong> learn a soft prompt only at the <em>input</em> embedding layer (Lester 2021). <strong>How:</strong> prepend <code>p</code> trainable embedding vectors to the input; nothing else changes. <strong>Solves:</strong> the extreme of efficiency &mdash; a few thousand params per task.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Fewest params of any method</li><li class="fragment">Trivially swappable per task</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Needs a very large base to shine (&ge;10B)</li><li class="fragment">Limited expressiveness; input-only</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> the input-only special case of prefix tuning &mdash; even cheaper (no per-layer prefix), but its expressiveness drops and it only matches full FT at very large scale.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2104.08691" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      Prompt tuning is the input-only special case of prefix tuning: just prepend p trainable embedding vectors to the input; the rest of the model is untouched. This is the most parameter-efficient method on the list &mdash; a few thousand numbers per task. Its famous catch, from the Lester et&nbsp;al. title "The Power of Scale": it only becomes competitive with full FT at very large scale (&ge;10B). At small/medium scale LoRA wins.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Prompt tuning</p>
+    <h3>Prompt tuning &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">p soft embeddings<small>trainable</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">prepend at input<small>embedding layer only</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">frozen Transformer</span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">task output</span>
+    </div>
+    <ol>
+      <li class="fragment">Allocate <code>p</code> trainable embedding vectors (e.g. 20&ndash;100) at the <em>input</em> only.</li>
+      <li class="fragment">Concatenate them in front of the real token embeddings; everything downstream is frozen.</li>
+      <li class="fragment">The signal must propagate through the whole frozen stack from a single input nudge.</li>
+      <li class="fragment">That is why a <em>large</em> base is needed &mdash; only then is the input lever expressive enough.</li>
+    </ol>
+    <aside class="notes">
+      Prompt tuning is the minimal soft prompt: p learnable vectors prepended at the input embedding layer, then a fully frozen Transformer. Because the only lever is at the very input, the model has to be large for that lever to be expressive enough &mdash; the "power of scale" result. Per task you store just those p vectors, so swapping tasks is trivial, but at small scale LoRA is materially better.
+    </aside>
+  </section>
+
+  <!-- ============ 6 · P-TUNING v2 ============ -->
+  <section>
+    <p class="kicker">Approaches &middot; 6 of 12</p>
+    <h3>P-tuning v2 <span class="tag modern">deep prompts</span></h3>
+    <p><strong>What:</strong> trainable prompts at <em>every</em> layer (like prefix tuning) so soft prompts work across sizes (Liu 2021). <strong>How:</strong> deep prompt vectors per layer + stabilized optimization &mdash; a universal alternative to FT for NLU. <strong>Solves:</strong> the "soft prompts only work at huge scale" limit.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Works across scales, unlike shallow prompt tuning</li><li class="fragment">Still very parameter-light</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">More to tune than input-only prompts</li><li class="fragment">Consumes context at every layer</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> fixes prompt tuning's scale problem by going <em>deep</em> &mdash; prompts at every layer (like prefix tuning) plus stable optimization, so it matches full FT at base/medium sizes, not just 10B+.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2110.07602" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      P-tuning v2 fixes prompt tuning's scale problem by going deep &mdash; prompts at every layer, like prefix tuning, with stabilized optimization. The headline: it matches full fine-tuning on many NLU tasks at base and medium model sizes, not just at 10B+. The trade-off versus input-only prompts is more to tune and it consumes context at every layer.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; P-tuning v2</p>
+    <h3>P-tuning v2 &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">per-layer prompts<small>L &times; deep vectors</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">inject at every layer<small>not just input</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">stabilized optim<small>better init / LR</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">FT-level NLU</span>
+    </div>
+    <ol>
+      <li class="fragment">Allocate trainable prompt vectors for <em>each</em> layer, not just the input embedding.</li>
+      <li class="fragment">Inject them at every layer so the steering signal is refreshed throughout depth.</li>
+      <li class="fragment">Use a stabilized optimization recipe so training is reliable across model sizes.</li>
+      <li class="fragment">Result: matches full FT on NLU at base/medium sizes &mdash; closing the scale gap.</li>
+    </ol>
+    <aside class="notes">
+      The mechanism is "deep prompts": instead of relying on a single input nudge propagating through a frozen stack, P-tuning v2 places trainable prompt vectors at every layer so the steering signal is re-applied throughout depth. Combined with a stabilized optimization recipe, this is what lets soft prompts match full fine-tuning on NLU at base and medium sizes, not only at 10B+.
+    </aside>
+  </section>
+
+  <!-- ============ 7 · BITFIT ============ -->
+  <section>
+    <p class="kicker">Approaches &middot; 7 of 12</p>
+    <h3>BitFit <span class="tag classic">bias-only</span></h3>
+    <p><strong>What:</strong> train <em>only the bias terms</em>, freeze everything else (Ben Zaken 2021). <strong>How:</strong> unfreeze biases (sometimes final layernorm/classifier) and update those alone. <strong>Solves:</strong> a startlingly strong baseline with &lt;0.1% of params on smaller models.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Almost no new params; dead simple</li><li class="fragment">Great sanity-check baseline</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Limited ceiling on big tasks/models</li><li class="fragment">Scales poorly to large generative LLMs</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> soft prompts <em>add</em> virtual tokens; BitFit adds <em>nothing</em> &mdash; it just unfreezes the existing bias parameters, the minimalist extreme of PEFT.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2106.10199" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      BitFit is the minimalist's PEFT: train only the bias terms. It is mostly interesting as a proof of how little capacity adaptation actually needs &mdash; under 0.1% of parameters and still a strong baseline on smaller models. It scales poorly to large generative LLMs, so in practice it is a sanity-check baseline rather than a production method, but it is a great talking point about the low intrinsic dimensionality of adaptation.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; BitFit</p>
+    <h3>BitFit &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">all weights W<small>frozen</small></span>
+      <span class="anim-arrow fragment fade-in">&middot;</span>
+      <span class="anim-node fragment fade-in">unfreeze biases b<small>&lt;0.1% of params</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">backprop to b only</span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">shifted activations</span>
+    </div>
+    <ol>
+      <li class="fragment">Freeze every weight matrix; leave only the additive <code>bias</code> vectors trainable.</li>
+      <li class="fragment">Optionally also unfreeze the final layernorm / classifier head.</li>
+      <li class="fragment">Backprop touches only the biases &mdash; an additive shift of each layer's activations.</li>
+      <li class="fragment">Tiny capacity is enough on small models; it underfits big generative LLMs.</li>
+    </ol>
+    <aside class="notes">
+      The whole trick: every weight matrix stays frozen and only the bias vectors (and sometimes the final layernorm/classifier) are unfrozen. A bias is a pure additive shift of the activations, so BitFit can only translate, not rotate, each layer's representation. That is why it is a beautiful demonstration of low intrinsic dimensionality but underfits when the task needs a larger, richer change.
+    </aside>
+  </section>
+
+  <!-- ============ 8 · LoRA (KEY) ============ -->
+  <section>
+    <p class="kicker">Approaches &middot; 8 of 12</p>
+    <h3>LoRA &mdash; Low-Rank Adaptation <span class="tag sota">the default</span></h3>
+    <p><strong>What:</strong> learn a low-rank update \( \Delta W = \frac{\alpha}{r}BA \) beside frozen weights (Hu 2021). <strong>How:</strong> <code>A</code> random Gaussian, <code>B=0</code> at start (so \( \Delta W = 0 \)); applied to q/v (often k/o &amp; MLP). <strong>Solves:</strong> train \( r(d{+}k) \) not \( dk \) params &mdash; and <strong>merge</strong> for zero added latency.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">&sim;0.1&ndash;1% trainable params; merge = no latency</li><li class="fragment">Hot-swappable; resists forgetting</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Assumes a low-rank update (can underfit big shifts)</li><li class="fragment">Rank / alpha / target-module choices matter</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> unlike adapters it runs <em>in parallel</em> and folds into <code>W&#8320;</code> &rarr; zero serving latency; unlike soft prompts it modifies the weight transform directly, so it works at any scale.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2106.09685" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <p class="eqnote fragment">\( h = W_0 x + \frac{\alpha}{r} B A x \), with \( r \ll \min(d,k) \).</p>
+    <aside class="notes">
+      LoRA is the default you reach for. It learns the low-rank update, initialized so &Delta;W=0 at the start. Typically applied to the attention query and value projections, often also k/o and MLP. Two superpowers: &sim;0.1&ndash;1% trainable parameters (so the optimizer state shrinks dramatically) and mergeability for zero added inference latency. Its main limitation is the low-rank assumption &mdash; a genuinely high-rank shift can underfit, which motivates rsLoRA.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; LoRA</p>
+    <h3>LoRA &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">x</span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">W&#8320;x<small>frozen base path</small></span>
+      <span class="anim-arrow fragment fade-in">&nbsp;</span>
+      <span class="anim-node fragment fade-in">A<small>r&times;k down</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">B<small>d&times;r up, B=0 init</small></span>
+      <span class="anim-arrow fragment fade-in">&times;&alpha;/r</span>
+      <span class="anim-node fragment fade-in">h = sum</span>
+    </div>
+    <div class="keyanim"><script type="application/json">
+    {"title":"LoRA — the low-rank detour","nodes":[["x","input vector"],["W₀x","frozen base"],["A","down r×k"],["B","up d×r, =0"],["×α/r","scale"],["h","W₀x + ΔWx"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"An input \\( x \\) enters the layer. <code>W₀</code> is the frozen pretrained weight — it never updates."},
+       {"on":[1],"done":[0],"cap":"The <strong>frozen path</strong> computes <code>W₀x</code> exactly as the base model would."},
+       {"on":[2],"done":[0,1],"cap":"The detour starts: <code>A</code> <em>down-projects</em> \\( x \\) into a rank-\\( r \\) bottleneck — only \\( r(d{+}k) \\) params total."},
+       {"on":[3],"done":[0,1,2],"cap":"<code>B</code> <em>up-projects</em> back to \\( d \\). Together <code>BA</code> is the low-rank \\( \\Delta W \\). At init <strong>B=0</strong> so \\( \\Delta W = 0 \\)."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Scale the detour by \\( \\alpha/r \\) — decouples update magnitude from rank, so you don't re-tune the LR."},
+       {"on":[5],"done":[0,1,2,3,4],"cap":"Sum both paths: \\( h = W_0 x + \\tfrac{\\alpha}{r}BAx \\). Merge \\( \\Delta W \\) into \\( W_0 \\) later for <strong>zero added latency</strong>."}
+     ],"interval":1900}
+    </script></div>
+    <ol>
+      <li class="fragment"><strong>Frozen path:</strong> <code>W&#8320;</code> still computes the base output <code>W&#8320;x</code>; no gradients flow to it.</li>
+      <li class="fragment"><strong>Down-project:</strong> <code>A</code> maps <code>x</code> into a rank-<code>r</code> bottleneck (random Gaussian init).</li>
+      <li class="fragment"><strong>Up-project:</strong> <code>B</code> maps back to <code>d</code>; <code>B=0</code> at init &rarr; \( \Delta W = BA = 0 \), so we start exactly at the base.</li>
+      <li class="fragment"><strong>Scale &amp; sum:</strong> \( h = W_0 x + \frac{\alpha}{r}BAx \); merge later for zero added latency.</li>
+    </ol>
+    <p class="eqnote">\( \Delta W = \frac{\alpha}{r}BA \), trainable params \( r(d{+}k) \ll dk \).</p>
+    <aside class="notes">
+      Use Play / Step / Reset. Narrate each step: W&#8320; is frozen and still computes the base output; A down-projects x into the rank-r bottleneck; B up-projects back to d so BA is the low-rank &Delta;W and only A,B train; scale by &alpha;/r, and note B=0 at init so &Delta;W=0; add the two paths h = W&#8320;x + (&alpha;/r)BAx; optionally merge (&alpha;/r)BA into W&#8320; for zero added latency. This is the heart of the module.
+    </aside>
+  </section>
+
+  <!-- ============ 9 · QLoRA (KEY) ============ -->
+  <section>
+    <p class="kicker">Approaches &middot; 9 of 12</p>
+    <h3>QLoRA &mdash; 4-bit base + LoRA <span class="tag sota">memory frontier</span></h3>
+    <p><strong>What:</strong> fine-tune a <strong>4-bit quantized</strong> frozen base with higher-precision LoRA adapters (Dettmers 2023). <strong>How:</strong> NF4 storage, double quantization, paged optimizers; matmuls in <strong>bf16</strong>. <strong>Solves:</strong> fit a 65B/70B fine-tune on one 48&nbsp;GB GPU at near-full quality.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Huge models on one consumer/pro GPU</li><li class="fragment">Quality close to 16-bit LoRA</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Slower per step (dequantize on the fly)</li><li class="fragment">Merging into 4-bit weights can lose quality</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> LoRA shrank <em>trainable</em> params; QLoRA also shrinks the <em>frozen</em> base by storing it in 4-bit &mdash; train less, then store less.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2305.14314" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      QLoRA pushes the memory frontier. Three ingredients: NF4 quantization (an information-theoretically optimal 4-bit datatype for roughly-Gaussian weights), double quantization (quantize the quantization constants, saving &sim;0.4 bits/param), and paged optimizers (offload optimizer state to CPU RAM on spikes instead of OOM-crashing). Critically the matmuls happen in a bf16 compute dtype &mdash; storage is 4-bit, compute is 16-bit. Result: fine-tune a 65B/70B model on a single 48GB GPU at near-full quality.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; QLoRA</p>
+    <h3>QLoRA &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">base &rarr; NF4<small>4-bit storage</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">double-quant<small>quantize the scales</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">dequant &rarr; bf16<small>per block, on the fly</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">+ LoRA adapter<small>bf16, trainable</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">paged optimizer</span>
+    </div>
+    <div class="keyanim"><script type="application/json">
+    {"title":"QLoRA — 4-bit base + bf16 adapter","nodes":[["base W","fp16, frozen"],["NF4","4-bit storage"],["double-quant","quantize scales"],["dequant→bf16","per block"],["+ LoRA","bf16 adapter"],["paged Adam","CPU on spikes"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"Start from the frozen base weights — in fp16 a 70B model is ~140&nbsp;GB, far too big for one GPU."},
+       {"on":[1],"done":[0],"cap":"<strong>NF4</strong> stores each weight in 4 bits using levels matched to a normal distribution → ~35&nbsp;GB."},
+       {"on":[2],"done":[0,1],"cap":"<strong>Double quantization</strong> quantizes the per-block scale constants too, saving ~0.4 bits/param."},
+       {"on":[3],"done":[0,1,2],"cap":"At compute time each block is <em>dequantized to bf16</em> on the fly — storage is 4-bit, math is 16-bit."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Gradients reach only the <strong>bf16 LoRA adapter</strong> \\( (\\alpha/r)BA \\); the 4-bit base stays frozen."},
+       {"on":[5],"done":[0,1,2,3,4],"cap":"<strong>Paged optimizers</strong> offload Adam state to CPU on memory spikes instead of OOM-crashing. 70B fits on 48&nbsp;GB."}
+     ],"interval":1900}
+    </script></div>
+    <ol>
+      <li class="fragment"><strong>Quantize:</strong> store the frozen base in 4-bit NF4 (&sim;35&nbsp;GB for 70B vs &sim;140&nbsp;GB fp16).</li>
+      <li class="fragment"><strong>Double-quant:</strong> quantize the per-block scale constants too &rarr; &sim;0.4 bits/param saved.</li>
+      <li class="fragment"><strong>Dequant for math:</strong> each block is restored to bf16 on the fly &mdash; storage 4-bit, compute 16-bit.</li>
+      <li class="fragment"><strong>Train + page:</strong> gradients update only the bf16 LoRA adapter; paged Adam survives memory spikes.</li>
+    </ol>
+    <aside class="notes">
+      Walk the three QLoRA ingredients on top of LoRA. NF4 stores the frozen base in 4 bits; double quantization compresses the quantization constants themselves; at compute time each block is dequantized to bf16, so the matmul precision is unchanged. Gradients only ever touch the bf16 adapter &mdash; the base is frozen and quantized, acting as a fixed function. Paged optimizers offload optimizer state to CPU on spikes so a 70B fine-tune fits on a single 48GB GPU.
+    </aside>
+  </section>
+
+  <!-- ============ 10 · DoRA & rsLoRA ============ -->
+  <section>
+    <p class="kicker">Approaches &middot; 10 of 12</p>
+    <h3>DoRA &amp; rsLoRA <span class="tag sota">refinements</span></h3>
+    <p><strong>What:</strong> two surgical fixes to vanilla LoRA. <strong>DoRA</strong> (Liu 2024) splits each weight into a <em>magnitude</em> vector (one per column) + a <em>direction</em>, putting LoRA only on direction &rarr; closes much of the gap to full FT, especially at low rank. <strong>rsLoRA</strong> (Kalajdzievski 2023) scales by \( \alpha/\sqrt{r} \) instead of \( \alpha/r \) &rarr; high ranks no longer vanish.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Better quality, same serving story as LoRA</li><li class="fragment">rsLoRA unlocks usable high ranks</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">DoRA adds a little training overhead</li><li class="fragment">One more knob; gains are task-dependent</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> vanilla LoRA underfits at low rank (&rarr; DoRA) and its \( \alpha/r \) scaling makes high ranks vanish (&rarr; rsLoRA's \( \alpha/\sqrt{r} \)); both keep LoRA's zero-latency merge.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2402.09353" target="_blank" rel="noopener noreferrer">Read more (DoRA) &#8599;</a> &middot; <a href="https://arxiv.org/abs/2312.03732" target="_blank" rel="noopener noreferrer">rsLoRA &#8599;</a></p>
+    <aside class="notes">
+      Two surgical fixes. DoRA decomposes each weight into a magnitude vector (one value per output column) and a direction, applying LoRA only to the direction &mdash; this recovers much of full FT's quality, especially at low rank. rsLoRA changes scaling from &alpha;/r to &alpha;/&radic;r: with &alpha;/r, larger r shrinks the per-direction contribution toward vanishing gradients so high ranks don't help; &alpha;/&radic;r keeps the update's scale stable as r grows. Both keep LoRA's zero-latency merge story.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; DoRA &amp; rsLoRA</p>
+    <h3>DoRA &amp; rsLoRA &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">W</span>
+      <span class="anim-arrow fragment fade-in">=</span>
+      <span class="anim-node fragment fade-in">magnitude m<small>per column</small></span>
+      <span class="anim-arrow fragment fade-in">&times;</span>
+      <span class="anim-node fragment fade-in">direction V/&#8214;V&#8214;<small>LoRA here</small></span>
+      <span class="anim-arrow fragment fade-in">&nbsp;&nbsp;</span>
+      <span class="anim-node fragment fade-in">rsLoRA: &times;&alpha;/&radic;r<small>stable at high r</small></span>
+    </div>
+    <ol>
+      <li class="fragment"><strong>DoRA:</strong> decompose \( W = m \cdot \frac{V}{\lVert V \rVert} \) &mdash; a magnitude vector and a unit direction.</li>
+      <li class="fragment">Learn the magnitude <code>m</code> directly; apply the LoRA low-rank update only to the <em>direction</em> <code>V</code>.</li>
+      <li class="fragment">This mirrors full-FT learning dynamics &rarr; closes much of the gap, especially at low rank.</li>
+      <li class="fragment"><strong>rsLoRA:</strong> swap the scale \( \alpha/r \rightarrow \alpha/\sqrt{r} \) so the per-direction contribution stays stable as <code>r</code> grows.</li>
+    </ol>
+    <p class="eqnote">DoRA: \( W = m\,\frac{V}{\lVert V\rVert} \) &middot; rsLoRA: \( \Delta W = \frac{\alpha}{\sqrt{r}}BA \).</p>
+    <aside class="notes">
+      DoRA's mechanism: every weight is rewritten as a magnitude (one scalar per output column) times a unit-norm direction. The magnitude is learned directly and LoRA is applied only to the direction, which better matches how full fine-tuning moves weights and recovers quality at low rank. rsLoRA is a one-line change to the scaling constant: dividing by &radic;r rather than r keeps the effective update magnitude roughly constant as you raise rank, so higher ranks finally help. Both merge exactly like LoRA.
+    </aside>
+  </section>
+
+  <!-- ============ 11 · IA³ ============ -->
+  <section>
+    <p class="kicker">Approaches &middot; 11 of 12</p>
+    <h3>IA&sup3; &mdash; learned scaling vectors <span class="tag modern">few-shot</span></h3>
+    <p><strong>What:</strong> rescale internal activations with learned vectors &mdash; no matrices (Liu 2022, T-Few). <strong>How:</strong> three small vectors per layer multiply keys, values, and the FFN intermediate element-wise. <strong>Solves:</strong> even fewer params than LoRA, strong few-shot, foldable into weights &rarr; no extra cost.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Even tinier than LoRA; mergeable</li><li class="fragment">Excellent few-shot (T-Few)</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Lower ceiling than LoRA on big shifts</li><li class="fragment">Less ecosystem support</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> LoRA <em>adds</em> a low-rank matrix; IA&sup3; instead <em>multiplies</em> activations by learned vectors &mdash; far fewer params, ideal for tiny datasets where LoRA might overfit.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2205.05638" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      IA&sup3; takes a different tack: instead of adding low-rank matrices, it learns three small vectors per layer that rescale the keys, values, and FFN intermediate activations element-wise. Only those vectors train, so it is even smaller than LoRA, and like LoRA the scalings fold into the weights for no extra inference cost. It shines in few-shot settings (the T-Few recipe) and on tiny datasets where LoRA might overfit. Trade-off: lower ceiling on big shifts and less tooling.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; IA&sup3;</p>
+    <h3>IA&sup3; &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">keys k</span>
+      <span class="anim-arrow fragment fade-in">&times; l<sub>k</sub></span>
+      <span class="anim-node fragment fade-in">values v<small>&times; l<sub>v</sub></small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">FFN intermediate<small>&times; l<sub>ff</sub></small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">fold into weights<small>no extra cost</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Learn three per-feature vectors per layer: \( \ell_k, \ell_v, \ell_{ff} \).</li>
+      <li class="fragment">Multiply the keys, values, and FFN intermediate activations by them <em>element-wise</em> (a gate).</li>
+      <li class="fragment">Only these vectors train &mdash; far fewer params than LoRA's \( r(d{+}k) \) matrices.</li>
+      <li class="fragment">Being multiplicative scalings, they fold straight into the weights &rarr; zero inference overhead.</li>
+    </ol>
+    <p class="eqnote">Rescale: \( k \rightarrow \ell_k \odot k,\;\; v \rightarrow \ell_v \odot v \).</p>
+    <aside class="notes">
+      The mechanism is multiplicative, not additive: IA&sup3; learns three element-wise scaling vectors per layer that gate the keys, the values, and the FFN intermediate activations. Because a scaling vector has one number per feature (not an r&times;(d+k) matrix) it is even lighter than LoRA, and since scaling commutes with the linear layers it folds into the weights with no inference overhead. This is what makes it the go-to for few-shot and tiny datasets.
+    </aside>
+  </section>
+
+  <!-- ============ 12 · S-LoRA ============ -->
+  <section>
+    <p class="kicker">Approaches &middot; 12 of 12</p>
+    <h3>S-LoRA &mdash; multi-adapter serving <span class="tag sota">systems</span></h3>
+    <p><strong>What:</strong> serve <em>thousands</em> of LoRA adapters on one base model concurrently (Sheng 2023). <strong>How:</strong> keep adapters <em>unmerged</em> in a unified paged memory pool, swap GPU&harr;host on demand; custom batched kernels share one base forward pass. <strong>Solves:</strong> per-customer / per-task adapters without a model copy each.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">One base serves many tasks/tenants</li><li class="fragment">High throughput across mixed adapters</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Unmerged &rarr; small per-token overhead</li><li class="fragment">Systems complexity (paging, kernels)</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> the others <em>train</em> adapters; S-LoRA is the <em>deployment</em> side &mdash; instead of merging one adapter, it keeps thousands unmerged and batches them over a shared base.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2311.03285" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      S-LoRA is the deployment side of LoRA. Instead of merging, you keep adapters separate in a unified paged memory pool, page them between GPU and host on demand, and use custom batched kernels so requests targeting different adapters share a single base forward pass. This makes per-customer or per-task fine-tunes economical: one base model, thousands of adapters. The cost is a small per-token overhead from staying unmerged and real systems complexity.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; S-LoRA</p>
+    <h3>S-LoRA &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">1 base on GPU<small>frozen, shared</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">paged adapter pool<small>thousands, GPU&harr;host</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">batched kernels<small>shared base matmul</small></span>
+      <span class="anim-arrow fragment fade-in">&rarr;</span>
+      <span class="anim-node fragment fade-in">per-request &Delta;W</span>
+    </div>
+    <ol>
+      <li class="fragment">Keep <em>one</em> frozen base in GPU memory; store many small adapters in a unified paged pool.</li>
+      <li class="fragment">Page adapters between GPU and host on demand &mdash; only the active ones occupy fast memory.</li>
+      <li class="fragment">A custom batched kernel computes the <strong>shared base matmul once</strong> for the whole batch.</li>
+      <li class="fragment">Then applies each request's own low-rank \( (\alpha/r)BAx \) &mdash; mixed adapters, one forward pass.</li>
+    </ol>
+    <aside class="notes">
+      The systems idea: amortize the expensive shared base compute across every request in the batch, regardless of which adapter each uses. One frozen base lives on the GPU; adapters live in a unified paged memory pool and are paged in/out like virtual memory. A custom gathered/batched kernel does the base matmul once and then applies each request's own &Delta;W, so thousands of adapters share one forward pass &mdash; the basis of multi-tenant LoRA serving.
+    </aside>
+  </section>
+
+  <!-- ===== EVOLUTION CAPSTONE (no fragments of its own) ===== -->
+  <section>
+    <p class="kicker">The approaches &middot; how they evolved</p>
+    <h2>Full FT &rarr; LoRA &rarr; QLoRA</h2>
+    <p>The memory story: train less, then store less &mdash; advance to step through &rarr;</p>
+<div data-anim="evo-finetuning-peft"></div>
+    <aside class="notes">
+      This is the capstone of the approaches section. Advancing the slide steps the evolution animation: (1) Full fine-tuning &mdash; every weight is trainable, best quality but you store a full-size copy plus optimizer states, one model per task. (2) LoRA &mdash; freeze W&#8320;, train only a low-rank BA stripe: &sim;0.1&ndash;1% of params, a few MB per task, mergeable. (3) QLoRA &mdash; same adapter, but the frozen base is 4-bit NF4 (hatched), fitting a 65B fine-tune on one 48GB GPU. The throughline: first we trained fewer parameters (LoRA), then we stored the frozen base more cheaply (QLoRA).
+    </aside>
+  </section>
+
+</section>
+
+<!-- ============================ SECTION 7 · COMPARE ============================ -->
+<section>
+  <section>
+    <p class="kicker">Compare</p>
+    <h2>The cheat-sheet</h2>
+    <table class="cmp">
+      <thead><tr><th>Approach</th><th>Core idea</th><th>Cost</th><th>When to use</th></tr></thead>
+      <tbody>
+        <tr class="fragment"><td><strong>Full FT</strong></td><td>Update all weights</td><td>Highest (≈4× model)</td><td>Lots of data + big shift + budget</td></tr>
+        <tr class="fragment"><td><strong>Adapters</strong></td><td>MLP blocks between sub-layers</td><td>Low train, +latency serve</td><td>Legacy; encoder models</td></tr>
+        <tr class="fragment"><td><strong>Prefix tuning</strong></td><td>Trainable K/V prefixes / layer</td><td>Very low</td><td>Generation, many tasks</td></tr>
+        <tr class="fragment"><td><strong>Prompt tuning</strong></td><td>Soft prompt at input only</td><td>Lowest</td><td>Many tasks, very large base</td></tr>
+        <tr class="fragment"><td><strong>P-tuning v2</strong></td><td>Deep prompts every layer</td><td>Very low</td><td>NLU across model sizes</td></tr>
+        <tr class="fragment"><td><strong>BitFit</strong></td><td>Train biases only</td><td>Lowest</td><td>Quick baseline; small models</td></tr>
+        <tr class="fragment"><td><strong>LoRA</strong></td><td>Low-rank ΔW=(α/r)BA</td><td>Low</td><td>Default for most fine-tuning</td></tr>
+        <tr class="fragment"><td><strong>QLoRA</strong></td><td>4-bit NF4 base + LoRA</td><td>Low mem, +compute</td><td>Big model, limited VRAM</td></tr>
+        <tr class="fragment"><td><strong>DoRA / rsLoRA</strong></td><td>Mag+dir / α√r scaling</td><td>Low</td><td>LoRA under/over-ranks</td></tr>
+        <tr class="fragment"><td><strong>IA³</strong></td><td>Learned activation scalings</td><td>Lowest</td><td>Tiny datasets / few-shot</td></tr>
+      </tbody>
+    </table>
+    <aside class="notes">
+      This is the interview cheat-sheet — reveal rows one at a time. The two columns I dropped for space (Pros and Maturity) are: LoRA and its refinements are SOTA default; QLoRA is SOTA when VRAM-bound; adapters and BitFit are classic; the soft-prompt family is modern. If asked to rank by trainable parameter count: prompt tuning / BitFit / IA³ are the smallest, then LoRA, then full FT is the largest. The decisive practical axes are "can it merge?" (LoRA yes, adapters no) and "does it need a huge base?" (prompt tuning yes).
+    </aside>
+  </section>
+</section>
+
+<!-- ============================ SECTION 8 · THE MATH ============================ -->
+<section>
+  <section>
+    <p class="kicker">The math</p>
+    <h2>SFT loss — response tokens only</h2>
+    $$ \mathcal{L} = -\sum_{t \in \text{response}} \log p_\theta(y_t \mid y_{&lt;t}, x) $$
+    <p class="eqnote fragment"><b>\(x\)</b> = prompt/instruction (conditioned on, never scored); <b>\(y_t\)</b> = the \(t\)-th <em>response</em> token; <b>\(y_{&lt;t}\)</b> = response tokens before it; <b>\(p_\theta\)</b> = model's predicted next-token probability. The sum runs <em>only over response positions</em> — prompt tokens are masked (label <code>-100</code>) so they give no gradient.</p>
+    <aside class="notes">
+      Walk through it slowly. It is the ordinary autoregressive cross-entropy, but the summation index is restricted: t ranges over response positions only. x is the prompt — we condition on it but never score it. y_{&lt;t} is teacher-forced, the true previous response tokens. The masking (label -100) is what implements "t in response" in code. Stress that this is the same loss as pretraining, just on different data with a restricted sum.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math · LoRA</p>
+    <h2>The LoRA forward pass</h2>
+    $$ h = W_0 x + \Delta W x = W_0 x + \frac{\alpha}{r} B A x $$
+    <p class="eqnote fragment"><b>\(W_0 \in \mathbb{R}^{d\times k}\)</b> = frozen pretrained weight; <b>\(B \in \mathbb{R}^{d\times r}\)</b> and <b>\(A \in \mathbb{R}^{r\times k}\)</b> = low-rank factors, rank <b>\(r \ll \min(d,k)\)</b>; <b>\(\alpha\)</b> = fixed scaling constant; <b>\(h\)</b> = layer output.</p>
+    <p class="eqnote fragment">At init <b>\(A \sim \mathcal{N}(0,\sigma^2)\)</b> and <b>\(B=0\)</b>, so <b>\(\Delta W = BA = 0\)</b> — training starts exactly at the base model and the update grows gradually.</p>
+    <aside class="notes">
+      This is the equation to know cold. h is the sum of the frozen path W₀x and the learned detour (α/r)BAx. Emphasize the init asymmetry: A is random Gaussian (so gradients can flow), B is zero (so the product BA is zero at the start). If you initialized both randomly you would perturb the base model before any learning. Because BA starts at zero, the first forward pass equals the base model exactly.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math · parameter count</p>
+    <h2>Why it's so cheap</h2>
+    $$ \underbrace{r(d+k)}_{\text{LoRA}} \;\;\ll\;\; \underbrace{d\,k}_{\text{full update}} $$
+    <p class="eqnote fragment"><b>\(r(d+k)\)</b> = params in <code>A</code> (\(r\times k\)) plus <code>B</code> (\(d\times r\)); <b>\(dk\)</b> = a full dense update. For a square <code>4096×4096</code> projection at <code>r=8</code>: \(8(4096+4096)=65{,}536\) vs \(4096^2 \approx 16.8\)M — about <b>0.39%</b>.</p>
+    <aside class="notes">
+      The savings come from replacing a quadratic dk with a linear r(d+k). For a 4096×4096 projection at rank 8, that is 65,536 trainable numbers versus 16.8 million — 0.39%. Multiply across all q/v projections in a 7B model and you go from billions of trainable params to a few million, which is why the Adam optimizer state shrinks from tens of GB to under a gigabyte. That memory drop is the whole point.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math · scaling</p>
+    <h2>α/r — and rsLoRA's α/√r</h2>
+    $$ \Delta W = \frac{\alpha}{r}\,BA \qquad\text{vs.}\qquad \Delta W_{\text{rs}} = \frac{\alpha}{\sqrt{r}}\,BA $$
+    <p class="eqnote fragment">The factor <b>\(\alpha/r\)</b> decouples the update's <em>magnitude</em> from the rank, so changing <code>r</code> doesn't force re-tuning the learning rate.</p>
+    <p class="eqnote fragment">But with <code>α/r</code>, larger <code>r</code> <em>shrinks</em> the per-direction contribution and stalls learning; <b>rsLoRA</b> uses <b>\(\alpha/\sqrt{r}\)</b> so the scale stays stable as <code>r</code> grows.</p>
+    <aside class="notes">
+      The α/r factor is a normalization so that tuning r and tuning the learning rate are decoupled — handy in practice. But it has a side effect: as r grows, dividing by r shrinks each direction's contribution toward zero, so high ranks barely move validation loss. rsLoRA's fix is to divide by √r instead, which keeps the effective update scale roughly constant as r grows, letting larger ranks actually help. Use it only when you genuinely need high rank.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================ SECTION 9 · IN CODE ============================ -->
+<section>
+  <section>
+    <p class="kicker">In code</p>
+    <h2>A LoRA linear layer</h2>
+    <pre><code class="language-python" data-trim data-line-numbers>import torch, torch.nn as nn
+
+class LoRALinear(nn.Module):
+    def __init__(self, base: nn.Linear, r=8, alpha=16):
+        super().__init__()
+        self.base = base                       # frozen pretrained Linear (d_out x d_in)
+        for p in self.base.parameters():       # freeze W0 (and bias)
+            p.requires_grad = False
+        d_out, d_in = base.weight.shape
+        self.scale = alpha / r                 # the alpha/r factor
+        self.A = nn.Parameter(torch.empty(r, d_in))   # r x k
+        self.B = nn.Parameter(torch.zeros(d_out, r))  # d x r, init 0 -&gt; dW = 0
+        nn.init.normal_(self.A, std=1.0 / r)          # A ~ N(0, sigma^2)
+
+    def forward(self, x):
+        # frozen path + low-rank path:  h = W0 x + (alpha/r) B A x
+        return self.base(x) + self.scale * (x @ self.A.t() @ self.B.t())
+</code></pre>
+    <aside class="notes">
+      Read the code as the equation made literal. Line by line: freeze every base parameter (no gradients); compute scale = alpha/r; A is a learnable r×d_in tensor initialized random Gaussian; B is d_out×r initialized to zeros so ΔW=0 at step zero. In forward, return the frozen path base(x) plus scale times x @ Aᵀ @ Bᵀ. Note B requires_grad is True by default since it's a fresh Parameter — only the base is frozen. This is exactly what the mechanism animation showed.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">In code · loss masking</p>
+    <h2>Mask the prompt with -100</h2>
+    <pre><code class="language-python" data-trim data-line-numbers>import torch.nn.functional as F
+
+IGNORE = -100  # cross_entropy skips these positions
+
+def build_labels(input_ids, prompt_len):
+    labels = input_ids.clone()
+    labels[:, :prompt_len] = IGNORE     # mask the instruction tokens
+    return labels
+
+# logits: (batch, seq, vocab); labels: (batch, seq) with IGNORE on the prompt
+def sft_loss(logits, labels):
+    # shift so position t predicts token t+1
+    logits = logits[:, :-1, :].reshape(-1, logits.size(-1))
+    labels = labels[:, 1:].reshape(-1)
+    return F.cross_entropy(logits, labels, ignore_index=IGNORE)  # only response counts
+</code></pre>
+    <aside class="notes">
+      Two things to call out. First, build_labels sets the prompt span to -100 so the loss ignores it — this is loss masking in code. Second, the shift: logits at position t predict token t+1, so we slice logits[:, :-1] against labels[:, 1:]. ignore_index=-100 tells cross_entropy to skip the masked positions entirely. Get the shift wrong and you train the model to predict the current token from itself — a subtle, common bug.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================ SECTION 10 · WORKED EXAMPLE ============================ -->
+<section>
+  <section>
+    <p class="kicker">Worked example · Part A</p>
+    <h2>Parameter savings for one projection</h2>
+    <p>One query projection at <code>d = k = 4096</code>, LoRA rank <code>r = 8</code>:</p>
+    $$ \text{full} = d\,k = 4096 \times 4096 = 16{,}777{,}216 \;\approx\; 16.78\text{M} $$
+    <p class="fragment">$$ \text{LoRA} = r(d+k) = 8 \times (4096 + 4096) = 65{,}536 $$</p>
+    <p class="eqnote fragment">LoRA trains <b>65,536</b> params vs <b>16.78M</b> — about <b>0.39%</b>. Across all q/v projections of a 7B model that's billions → a few million trainable params, so Adam's two buffers shrink from tens of GB to under a gigabyte.</p>
+    <aside class="notes">
+      Do the arithmetic live. Full update of a 4096×4096 matrix is 4096² ≈ 16.78M parameters. LoRA at rank 8 is 8×(4096+4096) = 65,536. The ratio is 0.39%. The punchline isn't just fewer weights — it's that Adam keeps two moment buffers per trainable parameter, so shrinking trainable params from billions to millions is what collapses the optimizer-state memory from tens of GB to under a GB.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Worked example · Part B</p>
+    <h2>70B QLoRA on a 48 GB GPU</h2>
+    <ul>
+      <li class="fragment"><strong>4-bit base weights:</strong> 70B × ~4 bits ≈ <strong>35 GB</strong> — dominant, and <em>frozen</em> (no grads/optimizer)</li>
+      <li class="fragment"><strong>LoRA adapters + grads + Adam:</strong> a few tens of M bf16 params → <strong>under ~1 GB</strong></li>
+      <li class="fragment"><strong>Paged optimizer:</strong> offloads state to CPU on spikes instead of OOM-crashing</li>
+      <li class="fragment"><strong>Activations:</strong> the rest; <strong>gradient checkpointing</strong> recomputes them to save memory</li>
+    </ul>
+    <p class="eqnote fragment">The trick: those 35 GB of frozen 4-bit weights would normally also demand grads + optimizer state (past 200 GB for full FT) — QLoRA trains only the tiny adapters on top.</p>
+    <aside class="notes">
+      This is the canonical "estimate the memory budget" interview question. The dominant term is the 35 GB of 4-bit frozen base weights — and because it is frozen, it carries no gradients or optimizer state. The adapters plus their gradients and Adam buffers are under a GB. Paged optimizers prevent OOM on spikes by offloading to CPU RAM. Gradient checkpointing recomputes activations in the backward pass to keep the activation footprint small. Contrast: full FT of 70B would push past 200 GB because every weight needs grads + two Adam buffers.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================ SECTION 11 · WHEN TO USE WHAT ============================ -->
+<section>
+  <section>
+    <p class="kicker">When to use what</p>
+    <h2>The decision flow</h2>
+    <div class="mermaid">
+flowchart TD
+  S["Fine-tuning job"] --> Q1{"Model fits<br/>in VRAM?"}
+  Q1 -- "No" --> QL["QLoRA<br/>4-bit base"]
+  Q1 -- "Yes" --> Q2{"Big shift +<br/>lots of data<br/>+ budget?"}
+  Q2 -- "Yes" --> FF["Full fine-tuning"]
+  Q2 -- "No" --> Q3{"Tiny<br/>dataset?"}
+  Q3 -- "Yes" --> IA["IA3 or low-rank LoRA"]
+  Q3 -- "No" --> LO["LoRA  (default)"]
+</div>
+    <aside class="notes">
+      Default to LoRA — full-FT-ish quality at a fraction of the memory, mergeable. If the model doesn't fit in VRAM, go QLoRA: a 70B model fits on one 48GB card at slightly slower steps. Lots of data plus a big behavior shift plus budget? Full FT for the highest ceiling. Tiny dataset (a few hundred examples)? IA³ or low-rank LoRA (r=4–8) to avoid overfitting, plus replay data to protect general ability. And remember the knobs: LoRA underfits at low rank → DoRA; higher rank not helping → rsLoRA.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">When to use what · the knobs</p>
+    <h2>Two more rules</h2>
+    <ul>
+      <li class="fragment">Many tasks from one base? → keep adapters <strong>unmerged</strong>, serve S-LoRA-style; merge only to ship one dedicated model</li>
+      <li class="fragment">LoRA underfits at low rank? → <strong>DoRA</strong> · higher rank not helping? → <strong>rsLoRA</strong> (α/√r)</li>
+      <li class="fragment">Need new <em>facts</em>, not new style? → consider <strong>RAG</strong> instead of (or with) fine-tuning</li>
+    </ul>
+    <aside class="notes">
+      The last bullet is the one people get wrong most often. Fine-tuning teaches format and behavior far better than it injects fresh knowledge. If your real need is "the model should know my company's docs," RAG is usually the right tool — retrieve the facts at inference rather than trying to bake them into weights. You can combine the two: RAG for knowledge, a light SFT/LoRA for the house style and format.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================ SECTION 12 · PITFALLS ============================ -->
+<section>
+  <section>
+    <p class="kicker">Pitfalls</p>
+    <h2>People think X, but actually Y</h2>
+    <div class="callout warn"><span class="t">⚠ Pitfall</span>
+      <ul>
+        <li class="fragment">"Fine-tuning is how you add <strong>knowledge</strong>." → mostly no — SFT is great at style/format/behavior, unreliable for new facts. Use RAG for knowledge.</li>
+        <li class="fragment">"LoRA adds inference latency." → only if unmerged; merge <code>W = W₀ + (α/r)BA</code> → zero added latency.</li>
+        <li class="fragment">"The chat template is cosmetic." → wrong template silently tanks quality.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      First three misconceptions. Knowledge: SFT shifts behavior, not facts — reach for RAG when you need fresh knowledge. Latency: unmerged LoRA adds a tiny overhead, but once merged the model is identical in shape to the base, so zero added latency — say this clearly, it is a frequent interview gotcha. Template: it is not decoration; the model was aligned on an exact role-marker/BOS/EOS pattern and silently degrades if you change it.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Pitfalls · continued</p>
+    <h2>Four more traps</h2>
+    <div class="callout warn"><span class="t">⚠ Pitfall</span>
+      <ul>
+        <li class="fragment">"Skip loss masking, it's fine." → without it the model parrots prompts &amp; EOS degrades — always set prompt labels to <code>-100</code>.</li>
+        <li class="fragment">"Higher LoRA rank is always better." → with α/r more rank barely moves val loss; use rsLoRA if you truly need high <code>r</code>.</li>
+        <li class="fragment">"QLoRA's compute dtype = storage dtype." → no — stored 4-bit NF4, computed in <strong>bf16</strong>; misconfigure → NaNs.</li>
+        <li class="fragment">"PEFT and full FT forget equally." → PEFT resists forgetting more; base weights stay frozen.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Four more. Loss masking: non-negotiable; without it capacity leaks into generating the prompt. Rank: with standard α/r, more rank often just slows training without helping — a sign the update is already low-rank; only go high-rank with rsLoRA. QLoRA dtype: storage is 4-bit NF4 but compute is bf16; conflating them causes instability or NaNs. Forgetting: PEFT freezes the base, so only a small add-on moves — that is why it resists catastrophic forgetting better than full FT.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================ SECTION 13 · WHAT'S NEW ============================ -->
+<section>
+  <section>
+    <p class="kicker">What's new</p>
+    <h2>Cheaper, smaller, many-adapter serving</h2>
+    <div class="callout whatsnew"><span class="t">🚀 What's new</span>
+      <ul>
+        <li class="fragment"><strong>QLoRA democratized big-model tuning</strong> — 33B–70B on one GPU, near-16-bit quality</li>
+        <li class="fragment"><strong>DoRA &amp; rsLoRA</strong> close the gap to full FT at low &amp; high rank, same zero-latency merge</li>
+        <li class="fragment"><strong>Data quality &gt; quantity</strong> — LIMA: ~1,000 curated examples make a strong assistant</li>
+        <li class="fragment"><strong>Multi-adapter serving is production-ready</strong> — S-LoRA runs thousands of per-tenant adapters</li>
+        <li class="fragment"><strong>PEFT as a standard interface</strong> — HF PEFT + TRL make the method a one-line config</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      The industry trend is "the method is now a hyperparameter, not a research project." QLoRA made 33B–70B tuning accessible on a single GPU; DoRA and rsLoRA recovered quality; LIMA reframed the data problem as curation, not scraping; S-LoRA made per-customer fine-tunes economically serveable; and Hugging Face PEFT + TRL turned LoRA/QLoRA/IA³/DoRA into one-line configs. Tie each bullet back to the approach slides.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">What's new · the papers</p>
+    <h2>Papers — verified links (1/2)</h2>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2106.09685">LoRA: Low-Rank Adaptation of Large Language Models</a> <span class="meta">— Hu et al., 2021. The default PEFT method.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2305.14314">QLoRA: Efficient Finetuning of Quantized LLMs</a> <span class="meta">— Dettmers et al., 2023. NF4 + double quant + paged optimizers.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2402.09353">DoRA: Weight-Decomposed Low-Rank Adaptation</a> <span class="meta">— Liu et al., 2024.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2312.03732">A Rank Stabilization Scaling Factor for LoRA (rsLoRA)</a> <span class="meta">— Kalajdzievski, 2023. Use α/√r.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/1902.00751">Parameter-Efficient Transfer Learning for NLP (Adapters)</a> <span class="meta">— Houlsby et al., 2019.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2101.00190">Prefix-Tuning: Optimizing Continuous Prompts</a> <span class="meta">— Li &amp; Liang, 2021.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2104.08691">The Power of Scale for Parameter-Efficient Prompt Tuning</a> <span class="meta">— Lester et al., 2021.</span></div>
+    <aside class="notes">
+      These are the verified links from the source — keep the exact arXiv IDs. First batch: the LoRA family (LoRA, QLoRA, DoRA, rsLoRA), the original adapters paper, and the soft-prompt origins (prefix tuning, prompt tuning). If someone asks "where did the low-rank idea come from," it is Hu et al. 2021; for the 4-bit recipe, Dettmers et al. 2023.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">What's new · the papers</p>
+    <h2>Papers — verified links (2/2)</h2>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2110.07602">P-Tuning v2: Prompt Tuning Comparable to Fine-tuning Universally</a> <span class="meta">— Liu et al., 2021.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2205.05638">Few-Shot PEFT is Better and Cheaper than ICL (IA³ / T-Few)</a> <span class="meta">— Liu et al., 2022.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2106.10199">BitFit: Simple Parameter-efficient Fine-tuning</a> <span class="meta">— Ben Zaken et al., 2021.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2311.03285">S-LoRA: Serving Thousands of Concurrent LoRA Adapters</a> <span class="meta">— Sheng et al., 2023.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2203.02155">Training LMs to Follow Instructions (InstructGPT)</a> <span class="meta">— Ouyang et al., 2022.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2305.11206">LIMA: Less Is More for Alignment</a> <span class="meta">— Zhou et al., 2023.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2210.11416">Scaling Instruction-Finetuned Language Models (FLAN)</a> <span class="meta">— Chung et al., 2022.</span></div>
+    <aside class="notes">
+      Second batch: the deep-prompt and tiny-PEFT methods (P-tuning v2, IA³, BitFit), the serving system (S-LoRA), and the SFT/instruction-tuning foundations (InstructGPT for the SFT→RLHF pipeline, LIMA for "data quality beats quantity," FLAN for broad instruction tuning generalizing). All links are verified — do not edit the IDs.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================ SECTION 14 · PRACTICE ============================ -->
+<!-- ============================ SECTION 14 · PRACTICE ============================ -->
+<section>
+  <p class="kicker">Practice</p>
+  <h2>Practice &mdash; click a question to reveal the answer</h2>
+  <p class="small muted">Full bank: <a href="../../interview-prep/07-sft-finetuning-and-peft.md">07 &middot; SFT, Fine-tuning &amp; PEFT</a> &mdash; from the answer key, condensed.</p>
+
+  <!-- ===== Q-SLIDE 1 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">What is SFT, and how does it differ from pretraining in objective and data? <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Same next-token cross-entropy as pretraining, but on small curated (instruction, response) pairs with the prompt loss-masked. Pretraining is self-supervised on massive raw text for general structure; SFT shapes behavior, format, and instruction-following. <span class="watch">It's the same loss function, not a new one &mdash; only the data (and masking) change.</span></div></li>
+
+      <li class="qa"><span class="q">Full fine-tuning vs PEFT &mdash; what are the main motivations for PEFT? <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Full FT updates all weights; PEFT freezes the base and trains a small added/selected set. Motivations: far less GPU memory (no grads/optimizer state for billions of params), tiny MB checkpoints, easy adapter hot-swapping, and less catastrophic forgetting. <span class="watch">PEFT doesn't always match full FT &mdash; big distribution shifts or knowledge-heavy tasks can still favor full FT.</span></div></li>
+
+      <li class="qa"><span class="q">Fine-tuning vs RAG for injecting new knowledge &mdash; when each, when both? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">RAG retrieves facts at inference &mdash; best for large, changing, citable corpora, updatable without retraining. Fine-tuning bakes in style, format, and behavior but is poor for volatile facts. Hybrid is common: fine-tune for tone/format, RAG for the actual facts. <span class="watch">Fine-tuning is a lossy, stale-prone way to memorize many facts &mdash; don't rely on it for knowledge.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== Q-SLIDE 2 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Explain loss masking on prompt tokens. Why compute loss only on the response? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Set prompt/instruction labels to <code>-100</code> so cross-entropy ignores them; we want the model to learn prompt&rarr;response, not to generate the user's instruction. Scoring the prompt wastes capacity and dilutes the response signal. <span class="watch">Masked tokens are NOT removed from context &mdash; they still attend; only their loss contribution is zeroed.</span></div></li>
+
+      <li class="qa"><span class="q">What is a chat template, and why does the wrong one silently degrade quality? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">The model-specific format wrapping roles and turns &mdash; markers like <code>&lt;|user|&gt;</code>/<code>&lt;|assistant|&gt;</code> plus BOS/EOS that the model was aligned on. A wrong template puts tokens in unfamiliar positions and blurs prompt/response boundaries, hurting quality with no error. <span class="watch">Train and serve templates must match exactly; mismatches fail silently.</span></div></li>
+
+      <li class="qa"><span class="q">How do special tokens (BOS/EOS/role markers) affect SFT, and what breaks if EOS is wrong? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">They delimit turns and signal boundaries; the model learns to start, stop, and switch roles on them. If EOS isn't appended (or is masked from the loss), the model never learns to stop &mdash; it generates to max tokens. Fix: append EOS and include it in the loss. <span class="watch">Forgetting EOS in the loss-computed tokens is the classic "never stops generating" bug.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== Q-SLIDE 3 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Explain how LoRA works &mdash; what it injects and why it cuts trainable params. <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">For frozen <code>W</code> (d&times;k) it learns a low-rank update <code>&Delta;W = BA</code> (A is r&times;k, B is d&times;r, r&Lt;min(d,k)); the layer computes <code>h = Wx + (&alpha;/r)BAx</code>. Only A and B train, so params drop from d&times;k to r(d+k). <span class="watch">W stays frozen &mdash; LoRA adds a parallel low-rank term, it doesn't replace W.</span></div></li>
+
+      <li class="qa"><span class="q">Write the LoRA forward pass and explain why one of A, B is initialized to zero. <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer"><code>h = Wx + (&alpha;/r)&middot;B&middot;A&middot;x</code>, W frozen, A random (Gaussian/Kaiming), B=0. With B=0, &Delta;W=0 at start so the model begins exactly as pretrained; A's first-step gradient is 0 but B's is nonzero, so training still moves. <span class="watch">Both can't be zero &mdash; then &Delta;W stays 0 forever and A never gets a gradient; exactly one (conventionally B) is zero.</span></div></li>
+
+      <li class="qa"><span class="q">Why does LoRA add no inference latency once merged, and what happens in the merge? <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Merging computes <code>W' = W + (&alpha;/r)BA</code> and stores one matrix of the original shape, so the forward pass is a single matmul with no extra adapter compute &mdash; essentially zero added latency. You can un-merge by subtracting it back. <span class="watch">Unmerged LoRA is NOT free &mdash; it adds a small per-layer BAx matmul until merged.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== Q-SLIDE 4 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">You raise rank from 8 to 64; val loss barely moves but training is slower. What does this tell you? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">The task's adaptation has low intrinsic rank &mdash; r=8 already captures it, so extra capacity adds only cost. Revert to the lower rank; the bottleneck is elsewhere: improve data, tune LR/epochs, expand target modules, or accept the base ceiling. <span class="watch">Flat returns mean you do NOT need more rank &mdash; don't keep raising r.</span></div></li>
+
+      <li class="qa"><span class="q">What is QLoRA, and what core problem does it solve vs standard LoRA? <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">It quantizes the frozen base to 4-bit (NF4) and trains higher-precision LoRA adapters on top. Standard LoRA keeps the base in fp16/bf16, which dominates memory; QLoRA's 4-bit base cuts weight memory &sim;4&times;, fitting a 65&ndash;70B fine-tune on one 48&nbsp;GB GPU. Key tricks: NF4, double quantization, paged optimizers. <span class="watch">QLoRA quantizes the base, not the adapters &mdash; adapters stay higher-precision.</span></div></li>
+
+      <li class="qa"><span class="q">Explain NF4 quantization &mdash; why is it well-suited to neural-net weights? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">NF4 (4-bit NormalFloat) places its 16 levels at the quantiles of a standard normal, so each bin carries roughly equal probability mass &mdash; information-theoretically optimal for zero-centered Gaussian data. NN weights are approximately zero-mean Gaussian, so NF4 beats uniform int4/fp4 at the same bit width (applied block-wise). <span class="watch">NF4 is a quantile-based, non-uniform scheme &mdash; not just uniform 4-bit.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== Q-SLIDE 5 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">What do rsLoRA and DoRA fix vs vanilla LoRA, and how do they reparameterize? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">rsLoRA: vanilla's <code>&alpha;/r</code> scaling over-shrinks updates at high rank, capping the benefit of more rank &mdash; it scales by <code>&alpha;/&radic;r</code> so per-rank contribution stays stable. DoRA: decomposes each weight into magnitude + direction, applying LoRA to the direction &mdash; better matches full-FT dynamics, especially at low rank. <span class="watch">Don't conflate them: rsLoRA fixes high-rank scaling; DoRA decomposes magnitude/direction.</span></div></li>
+
+      <li class="qa"><span class="q">Catastrophic forgetting in fine-tuning &mdash; why is PEFT often more resistant? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Forgetting is the loss of general capabilities when fine-tuning overwrites pretrained weights on narrow data. PEFT freezes the original weights and learns a small parallel update, so the base knowledge is preserved and only lightly perturbed &mdash; less drift than full FT. <span class="watch">PEFT reduces but does NOT eliminate forgetting.</span></div></li>
+
+      <li class="qa"><span class="q">Training loss decreases smoothly but inference output is garbage. Most likely bugs? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Smooth loss means optimization is fine &mdash; suspect serving/formatting: train/serve chat-template mismatch (most common), BOS/EOS or special-token differences, unmasked prompt tokens making loss misleadingly low, wrong generation config, or the wrong checkpoint/adapter loaded. <span class="watch">Don't assume "the model didn't learn" &mdash; smooth train loss points to a formatting/serving mismatch.</span></div></li>
+    </ul>
+  </section>
+
+</section>
+
+<!-- ============================ SECTION 15 · TAKEAWAYS ============================ -->
+<section>
+  <section>
+    <p class="kicker">Takeaways</p>
+    <h2>What to remember</h2>
+    <div class="takeaways">
+      <ul>
+        <li class="fragment"><strong>SFT teaches behavior, not facts.</strong> (instruction → response) pairs + right template + loss masking (<code>-100</code> on prompt).</li>
+        <li class="fragment"><strong>LoRA is the default.</strong> <code>ΔW = (α/r)BA</code>, <code>r(d+k)</code> params; <code>A</code> random, <code>B=0</code> so it starts at the base.</li>
+        <li class="fragment"><strong>Merge = zero latency.</strong> Fold <code>W₀ + (α/r)BA</code>; or keep unmerged for hot-swap / multi-adapter serving.</li>
+        <li class="fragment"><strong>QLoRA</strong> = 4-bit NF4 base + double quant + paged optimizers + bf16 compute → 70B on one 48GB GPU.</li>
+        <li class="fragment"><strong>DoRA / rsLoRA / IA³</strong> refine LoRA; PEFT resists catastrophic forgetting.</li>
+        <li class="fragment"><strong>Choose by constraint:</strong> LoRA default · QLoRA when VRAM-bound · full FT for big shifts · RAG for new knowledge.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Recap the six pillars. If they remember nothing else: SFT changes behavior (mask the prompt), LoRA is the low-rank default that merges to zero latency, QLoRA is the 4-bit memory frontier, and you pick by your binding constraint — VRAM, data size, or whether you actually need new knowledge (then RAG).
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Further reading · next up</p>
+    <h2>Go deeper</h2>
+    <div class="paper"><a href="https://huggingface.co/docs/peft/index">Hugging Face PEFT documentation</a> <span class="meta">— LoRA/QLoRA/IA³/DoRA as one-line configs.</span></div>
+    <div class="paper"><a href="https://magazine.sebastianraschka.com/p/practical-tips-for-finetuning-llms">Practical Tips for Finetuning LLMs Using LoRA</a> <span class="meta">— Sebastian Raschka.</span></div>
+    <p class="fragment" style="margin-top:1em;">Next module → <strong>08 · RLHF &amp; Alignment</strong>: refining <em>which</em> good answer wins.</p>
+    <p class="fragment" style="opacity:.7;margin-top:1.5em;">Thanks — questions? Press <kbd>O</kbd> for the overview.</p>
+    <aside class="notes">
+      Close it out. The HF PEFT docs are the practical reference; Raschka's post is the best hands-on LoRA tips writeup. Then tee up the next module: RLHF and alignment, where preference optimization decides which good answer is preferred — the second half of post-training. Take questions.
+    </aside>
+  </section>
+</section>
+
+    </div>
+  </div>
+
+  <!-- reveal.js core + plugins + mermaid (CDN), then shared deck runtime -->
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/math/math.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+  <script src="../assets/deck.js?v=2"></script>
+</body>
+</html>
