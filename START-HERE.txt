@@ -88,4 +88,17 @@ Specialization primers (lighter; teach only if relevant to target roles):
 
 All 36 topics live in ../interview-prep/ — see README.md there for the full list
 and the suggested learning path. The same prompt works for any of them.
-================================================================
+===============================================================
+
+
+
+
+
+  1. Foundations → tokenization, attention, transformers, positional encoding
+  2. Training/adaptation → pretraining, fine-tuning/PEFT, RLHF, synthetic data
+  3. Reasoning & inference → reasoning models, decoding, inference, SLMs
+  4. Building apps → prompt eng, context eng, RAG, vector DBs, agents, MCP, app-dev/frameworks
+  5. Eval & production → evals, hallucination, safety, system design, LLMOps
+  6. Architectures & scaling → efficient archs, MoE, distributed, compression, multimodal
+  7. Specialization → diffusion, AI security, interpretability (only if relevant)
+  8. Coding, ethics, behavioral

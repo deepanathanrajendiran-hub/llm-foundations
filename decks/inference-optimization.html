@@ -1,0 +1,1548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Inference Optimization &amp; Serving — LLM Teaching Decks</title>
+  <meta name="description" content="A reveal.js lecture deck: quantization, KV-cache, FlashAttention, PagedAttention/vLLM, batching, parallelism and speculative decoding for production serving." />
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/white.css" id="reveal-theme" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <link rel="stylesheet" href="../assets/deck.css?v=2" />
+
+  <!-- FOUC guard: set deck theme before first paint -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("deck-theme") ||
+          ((window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+        if (t === "dark") document.documentElement.classList.add("deck-dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+
+<!-- ============================================================
+     SECTION 1 · TITLE
+     ============================================================ -->
+<section>
+  <section class="deck-title">
+    <div class="logo">&#8721;</div>
+    <p class="kicker">PHASE 3 · REASONING &amp; INFERENCE · MODULE 11</p>
+    <h1>Inference Optimization &amp; Serving</h1>
+    <p class="subtitle">Where cost and latency are actually won or lost: quantization, the KV-cache, PagedAttention &amp; vLLM, continuous batching, parallelism, and speculative decoding &mdash; and the latency/throughput/cost trade-offs of running models in production.</p>
+    <p class="keyhint"><kbd>&larr;</kbd><kbd>&rarr;</kbd> navigate · <kbd>S</kbd> speaker notes · <kbd>O</kbd> overview · <kbd>F</kbd> fullscreen · append <code>?print-pdf</code> to export</p>
+    <aside class="notes">
+      Welcome. Training gets the headlines, but serving is where the bill lands &mdash; every token a user reads costs GPU-seconds, and every millisecond of delay is felt. This module is about squeezing a trained model onto hardware and serving it fast and cheap without wrecking quality. The single sentence the whole lecture turns on: <em>decode is memory-bandwidth bound, not compute bound</em> &mdash; once you internalize that, batching, the KV-cache, quantization, and speculative decoding all click into place. We'll build the KV-cache from scratch, see why PagedAttention is just virtual memory for it, learn why batching trades latency for throughput, and end on the one metric that matters: goodput under an SLO, not raw tokens-per-second.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 2 · ROADMAP
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Roadmap</p>
+    <h2>What you'll learn <span style="font-weight:500;opacity:.6;font-size:.6em;">(~16 min of content, 30&ndash;45 min taught)</span></h2>
+    <div class="callout"><span class="t">&#128203; The arc</span>
+      <ul>
+        <li class="fragment">The <strong>KV cache</strong> &mdash; the central object: why it exists and how to size it</li>
+        <li class="fragment"><strong>Quantization</strong> &mdash; INT8/INT4/FP8, GPTQ &amp; AWQ, the outlier problem</li>
+        <li class="fragment"><strong>Attention kernels &amp; paging</strong> &mdash; FlashAttention, PagedAttention/vLLM, prefix caching</li>
+        <li class="fragment"><strong>Batching &amp; scheduling</strong> &mdash; continuous batching, chunked prefill, admission control</li>
+        <li class="fragment"><strong>Parallelism</strong> (TP/PP/EP) &rarr; <strong>speculative decoding</strong> &rarr; <strong>cost &amp; system design</strong></li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Seven beats, in the order they build on each other. One: the KV cache &mdash; understand it and most of serving follows. Two: quantization, the cheapest lever for memory and bandwidth. Three: attention kernels and paging &mdash; FlashAttention makes a single attention fast, PagedAttention makes many concurrent sequences fit. Four: batching and scheduling, where throughput is made and p99 latency is protected. Five through seven: parallelism across GPUs, speculative decoding to cut latency, and finally the cost arithmetic and the production architecture. If they leave remembering two things, make them "decode is memory-bandwidth bound" and "measure goodput under an SLO."
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Core ideas to land</p>
+    <h2>Five things to take away</h2>
+    <div class="takeaways"><ul>
+      <li class="fragment"><strong>Decode is memory-bandwidth bound</strong>, not compute bound &mdash; you're waiting on weights, not on FLOPs.</li>
+      <li class="fragment"><strong>The KV cache is the central object</strong> &mdash; size it; it, not the weights, sets concurrency.</li>
+      <li class="fragment"><strong>Batching trades latency for throughput</strong> &mdash; more requests per pass, slightly slower per request.</li>
+      <li class="fragment"><strong>PagedAttention = virtual memory for the KV cache</strong> &mdash; pages kill fragmentation.</li>
+      <li class="fragment"><strong>Measure goodput under an SLO</strong>, not raw tok/s &mdash; useful throughput is the only honest number.</li>
+    </ul></div>
+    <aside class="notes">
+      This is the executive summary &mdash; I come back to it as the recap. Notice how they chain. Decode being bandwidth-bound is <em>why</em> batching works (you read the weights once and amortize them over many requests) and <em>why</em> quantization helps (smaller weights = less to read). The KV cache is what fills the GPU and caps concurrency, so paging it (PagedAttention) is what lets you batch more. And goodput is the scoreboard: a config that posts huge tok/s while blowing the latency SLO is serving zero useful requests. Those five sentences are the spine of the whole deck.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 3 · WHY IT MATTERS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Why it matters</p>
+    <h2>Serving is where the money &amp; the latency live</h2>
+    <div class="flow">
+      <span class="box ghost">Train once<small>huge, one-time</small></span>
+      <span class="arrow">&rarr;</span>
+      <span class="box accent">Serve forever<small>every token, every user</small></span>
+      <span class="arrow">&rarr;</span>
+      <span class="box">Cost &amp; latency<small>won or lost here</small></span>
+    </div>
+    <ul style="margin-top:.6em;">
+      <li class="fragment">Training is a <strong>one-time</strong> capital cost; serving is a <strong>perpetual</strong> per-token cost.</li>
+      <li class="fragment">Every generated token burns GPU-seconds; every extra millisecond is <strong>felt by the user</strong>.</li>
+      <li class="fragment">The same model can be <strong>10&times; cheaper or faster</strong> depending only on how you serve it.</li>
+    </ul>
+    <aside class="notes">
+      The framing for the whole module: you pay to train a model once, but you pay to serve it on every single request, forever. At scale the serving bill dwarfs the training bill. And the leverage is enormous &mdash; the <em>same</em> weights, served naively versus served well, differ by an order of magnitude in both cost-per-token and tail latency. That gap is entirely engineering: quantization, the KV-cache layout, batching policy, and parallelism. So this is not a niche systems topic; it's where the economics of an LLM product are decided.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Why it matters · two phases</p>
+    <h2>Prefill vs decode &mdash; two different machines</h2>
+    <div class="flow">
+      <span class="box accent">Prefill<small>read the whole prompt</small></span>
+      <span class="arrow">&rarr;</span>
+      <span class="box">first token<small>sets TTFT</small></span>
+      <span class="arrow">&middot;&middot;&middot;</span>
+      <span class="box green">Decode<small>one token at a time</small></span>
+      <span class="arrow">&rarr;</span>
+      <span class="box">each next token<small>sets TPOT / ITL</small></span>
+    </div>
+    <div class="cols" style="margin-top:.5em;">
+      <div>
+        <h5>Prefill &mdash; compute-bound</h5>
+        <ul>
+          <li class="fragment">Process all prompt tokens <strong>in parallel</strong></li>
+          <li class="fragment">Big matmuls saturate the GPU &rarr; <strong>FLOP-limited</strong></li>
+          <li class="fragment">Sets <strong>TTFT</strong> = time to first token</li>
+        </ul>
+      </div>
+      <div>
+        <h5>Decode &mdash; memory-bound</h5>
+        <ul>
+          <li class="fragment">Generate <strong>one token per step</strong>, autoregressively</li>
+          <li class="fragment">Tiny matmul, must re-read all weights &rarr; <strong>bandwidth-limited</strong></li>
+          <li class="fragment">Sets <strong>TPOT</strong> (a.k.a. ITL) = time per output token</li>
+        </ul>
+      </div>
+    </div>
+    <p class="eqnote fragment"><strong>TTFT</strong> = latency to the <em>first</em> token (prefill). <strong>TPOT/ITL</strong> = inter-token latency, the gap between each subsequent token (decode).</p>
+    <aside class="notes">
+      This is the most important distinction in the deck. Inference has two phases with opposite hardware characters. Prefill ingests the whole prompt at once &mdash; one big batched matmul over hundreds or thousands of tokens &mdash; so it saturates the GPU's compute units; it's FLOP-bound, and it determines TTFT, time-to-first-token. Decode then emits tokens one at a time: each step is a tiny matrix-vector product, but to produce that one token you must stream every weight of the model out of HBM. So decode is bandwidth-bound &mdash; you're waiting on memory, the compute units sit mostly idle &mdash; and it sets TPOT, the time per output token, also called inter-token latency or ITL. For a short answer TTFT dominates the felt experience; for a long generation TPOT dominates. Almost every technique later targets one phase or the other, so always ask "is this helping prefill or decode?"
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 4 · INTUITION
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Intuition</p>
+    <h2>The note-taking analogy</h2>
+    <ul>
+      <li class="fragment">To write the next word, the model must "look back" at <strong>every previous token</strong>.</li>
+      <li class="fragment">Naively, that means <strong>re-reading the whole book</strong> from page one for each new word.</li>
+      <li class="fragment">Instead: keep <strong>notes</strong> &mdash; a summary (keys &amp; values) for every token you've already read.</li>
+      <li class="fragment">Now each new word only needs the <strong>new token</strong> plus your notes &mdash; not a full re-read.</li>
+      <li class="fragment">Those notes <em>are</em> the <strong>KV cache</strong>: re-reading is <code>O(n)</code> per token; reading notes is <code>O(1)</code>.</li>
+    </ul>
+    <aside class="notes">
+      Lean on this the whole "how it works" section. Attention means every new token attends to all previous tokens &mdash; so the dumb way to generate token number 500 is to re-run the model over all 499 earlier tokens, then 500 for token 501, and so on: quadratic, wasteful, re-reading the entire book to write each next word. The fix is to take notes as you read: for each token, once, compute and store its key and value vectors. Then for a new token you only compute <em>its</em> query, attend against the stored notes, and append your new note. The notes are the KV cache. Re-reading from scratch is O(n) work per token; consulting cached notes is O(1) per token. That single idea is why every serving system is built around the KV cache &mdash; and why its <em>size</em> is the thing that fills your GPU.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Intuition · the metrics picture</p>
+    <h2>What the user actually feels</h2>
+    <div class="flow">
+      <span class="box accent">[ prompt sent ]</span>
+      <span class="arrow">&rarr;</span>
+      <span class="box ghost">TTFT<small>wait for token 1</small></span>
+      <span class="arrow">&rarr;</span>
+      <span class="box green">tok</span><span class="arrow">&middot;</span>
+      <span class="box green">tok</span><span class="arrow">&middot;</span>
+      <span class="box green">tok</span>
+      <span class="arrow">&rarr;</span>
+      <span class="box">&hellip; gaps = TPOT</span>
+    </div>
+    <ul style="margin-top:.5em;">
+      <li class="fragment"><strong>TTFT</strong> &mdash; the "spinner" before anything appears. Dominated by <strong>prefill</strong> + queue wait.</li>
+      <li class="fragment"><strong>TPOT / ITL</strong> &mdash; the streaming "typing speed." Dominated by <strong>decode</strong>.</li>
+      <li class="fragment">End-to-end &asymp; <strong>TTFT + N&times;TPOT</strong> for N output tokens.</li>
+      <li class="fragment">Streaming hides total latency &mdash; a snappy TTFT can mask a <strong>slow per-token</strong> trickle.</li>
+    </ul>
+    <aside class="notes">
+      A picture of latency from the user's seat. Send a prompt and you stare at a spinner &mdash; that's TTFT, set by prefill plus any time the request waited in the scheduler queue. Then tokens stream in, and the gap between them is TPOT, also called inter-token latency, set by decode speed. A rough end-to-end estimate is TTFT plus N times TPOT for an N-token answer &mdash; useful but it can mislead, because it ignores queueing, batch interference, and variation. The subtle trap: streaming output makes a product feel fast even if the per-token rate is slow, so a great average TTFT can hide a sluggish trickle. This is exactly why we'll insist on measuring goodput under an SLO rather than a single headline number.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 5 · HOW IT WORKS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">How it works · the KV cache</p>
+    <h2>The KV-cache mechanism, step by step</h2>
+    <p>One pass: prefill the prompt, cache K&amp;V per layer/head, then decode token-by-token &mdash; the cache grows, but each step stays <code>O(1)</code>.</p>
+    <div class="keyanim"><script type="application/json">
+    {"title":"KV cache — read once, then O(1) per new token",
+     "nodes":[["Prefill","read prompt"],["Cache K,V","per layer/head"],["Decode t","use cache + new tok"],["Append","K,V grows"],["Repeat","O(1) per token"]],
+     "loop":"&#8635;",
+     "steps":[
+       {"on":[0],"done":[],"cap":"<strong>Prefill:</strong> run the whole prompt through once, in parallel &mdash; this sets TTFT."},
+       {"on":[1],"done":[0],"cap":"<strong>Cache K,V:</strong> store each token's key &amp; value vectors, for every layer and head."},
+       {"on":[2],"done":[0,1],"cap":"<strong>Decode token t:</strong> compute the query for the new token, attend over the cached K,V."},
+       {"on":[3],"done":[0,1,2],"cap":"<strong>Append:</strong> add the new token's K,V to the cache &mdash; it grows by one column."},
+       {"on":[4],"done":[0,1,2,3],"cap":"<strong>Repeat:</strong> each next token reuses the cache &mdash; <code>O(1)</code> work, not an <code>O(n)</code> re-read."}],
+     "loop":"&#8635;","interval":1900}
+    </script></div>
+    <aside class="notes">
+      Drive this off the widget and walk the loop. Prefill runs the entire prompt through the model in one parallel pass &mdash; that's the compute-bound phase that sets TTFT. As it goes, every token's key and value vectors are stored, for every layer and every head &mdash; that's the cache. Then decode begins: for each new token we compute only its query, attend it against the whole cached K and V, sample the next token, and append that token's own K and V back into the cache. The cache grows by one column per step, but the per-token <em>work</em> is constant &mdash; O(1) &mdash; instead of re-running the model over the whole prefix, which would be O(n). The loop arrow is the point: this repeats for every output token. The catch we'll quantify next: the cache grows linearly with sequence length and with batch size, and it lives in precious HBM.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · cache fills cell-by-cell</p>
+    <h2>Watch the cache grow as we decode</h2>
+    <div class="cols">
+      <div>
+        <svg class="sl-graph" viewBox="0 0 360 220" role="img" aria-label="KV cache grid filling as tokens decode">
+          <!-- column headers (token positions) -->
+          <text x="40"  y="20" class="sl-axlab" text-anchor="middle">t&#8321;</text>
+          <text x="40"  y="34" class="sl-axlab" text-anchor="middle">prompt</text>
+          <text x="95"  y="20" class="sl-axlab" text-anchor="middle">t&#8322;</text>
+          <text x="150" y="20" class="sl-axlab" text-anchor="middle">t&#8323;</text>
+          <text x="205" y="20" class="sl-axlab" text-anchor="middle">t&#8324;</text>
+          <text x="260" y="20" class="sl-axlab" text-anchor="middle">t&#8325;</text>
+          <!-- row labels (layers) -->
+          <text x="12" y="62"  class="sl-axlab">L1</text>
+          <text x="12" y="112" class="sl-axlab">L2</text>
+          <text x="12" y="162" class="sl-axlab">L3</text>
+
+          <!-- column 1 (prompt, prefill) — index 1 -->
+          <g class="fragment" data-fragment-index="1">
+            <rect x="22" y="44"  width="36" height="36" rx="5" fill="var(--accent-weak)" stroke="var(--accent-border)"/>
+            <rect x="22" y="94"  width="36" height="36" rx="5" fill="var(--accent-weak)" stroke="var(--accent-border)"/>
+            <rect x="22" y="144" width="36" height="36" rx="5" fill="var(--accent-weak)" stroke="var(--accent-border)"/>
+          </g>
+          <!-- column 2 — index 2 -->
+          <g class="fragment" data-fragment-index="2">
+            <rect x="77" y="44"  width="36" height="36" rx="5" fill="var(--new-weak)" stroke="var(--new-border)"/>
+            <rect x="77" y="94"  width="36" height="36" rx="5" fill="var(--new-weak)" stroke="var(--new-border)"/>
+            <rect x="77" y="144" width="36" height="36" rx="5" fill="var(--new-weak)" stroke="var(--new-border)"/>
+          </g>
+          <!-- column 3 — index 3 -->
+          <g class="fragment" data-fragment-index="3">
+            <rect x="132" y="44"  width="36" height="36" rx="5" fill="var(--new-weak)" stroke="var(--new-border)"/>
+            <rect x="132" y="94"  width="36" height="36" rx="5" fill="var(--new-weak)" stroke="var(--new-border)"/>
+            <rect x="132" y="144" width="36" height="36" rx="5" fill="var(--new-weak)" stroke="var(--new-border)"/>
+          </g>
+          <!-- column 4 — index 4 -->
+          <g class="fragment" data-fragment-index="4">
+            <rect x="187" y="44"  width="36" height="36" rx="5" fill="var(--new-weak)" stroke="var(--new-border)"/>
+            <rect x="187" y="94"  width="36" height="36" rx="5" fill="var(--new-weak)" stroke="var(--new-border)"/>
+            <rect x="187" y="144" width="36" height="36" rx="5" fill="var(--new-weak)" stroke="var(--new-border)"/>
+          </g>
+          <!-- column 5 — index 5 -->
+          <g class="fragment" data-fragment-index="5">
+            <rect x="242" y="44"  width="36" height="36" rx="5" fill="var(--new-weak)" stroke="var(--new-border)"/>
+            <rect x="242" y="94"  width="36" height="36" rx="5" fill="var(--new-weak)" stroke="var(--new-border)"/>
+            <rect x="242" y="144" width="36" height="36" rx="5" fill="var(--new-weak)" stroke="var(--new-border)"/>
+          </g>
+          <text x="150" y="208" class="sl-note" text-anchor="middle">rows = layers · columns = token positions (K,V stored)</text>
+        </svg>
+      </div>
+      <div>
+        <ol>
+          <li class="fragment" data-fragment-index="1"><strong>Prefill</strong> fills the first column for every layer at once (the prompt).</li>
+          <li class="fragment" data-fragment-index="2">Decode <strong>t&#8322;</strong>: attend over column 1, append a new column.</li>
+          <li class="fragment" data-fragment-index="3">Decode <strong>t&#8323;</strong>: another column &mdash; cache grows linearly.</li>
+          <li class="fragment" data-fragment-index="4">Decode <strong>t&#8324;</strong>: still <code>O(1)</code> work per token&hellip;</li>
+          <li class="fragment" data-fragment-index="5">&hellip;<strong>t&#8325;</strong> and on &mdash; the cache is the cost that grows.</li>
+        </ol>
+        <p class="eqnote fragment" data-fragment-index="5"><strong>With cache:</strong> <code>O(1)</code> compute per token, but memory grows <code>O(n)</code>. <strong>Without:</strong> <code>O(n)</code> recompute <em>every</em> token &rarr; <code>O(n&sup2;)</code> total.</p>
+      </div>
+    </div>
+    <aside class="notes">
+      This is the figure to linger on. The grid is the KV cache: rows are a few transformer layers, columns are token positions, and each cell holds the stored key and value vectors for that token at that layer. Prefill lights up the first column for all layers simultaneously &mdash; the whole prompt processed in parallel. Then each decode step appends exactly one new column: attend the new token's query over all existing columns, then write its own K,V into the fresh column. Make the contrast explicit. With the cache, the compute per token is constant &mdash; O(1) &mdash; because you never recompute old tokens; the price you pay is memory that grows O(n) with sequence length. Without a cache you'd recompute the entire prefix at every step, which is O(n) per token and O(n-squared) over the whole generation &mdash; completely impractical. So the cache trades a manageable, linear memory cost for an enormous compute saving, and that memory growth is precisely why KV-cache size, not the weights, usually caps how many sequences you can serve at once.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · continuous batching</p>
+    <h2>Don't make finished requests wait</h2>
+    <div class="cols">
+      <div>
+        <h5>Static batching</h5>
+        <ul>
+          <li class="fragment">Lock a batch, run until <strong>every</strong> sequence finishes.</li>
+          <li class="fragment">Short replies sit <strong>idle</strong> waiting for the longest one &mdash; <em>head-of-line blocking</em>.</li>
+          <li class="fragment">GPU runs at the speed of the <strong>slowest</strong> request.</li>
+        </ul>
+      </div>
+      <div>
+        <h5>Continuous (in-flight) batching</h5>
+        <ul>
+          <li class="fragment">Schedule at the <strong>token level</strong>, not the request level.</li>
+          <li class="fragment">A finished sequence <strong>leaves</strong>; a waiting one <strong>joins</strong> the very next step.</li>
+          <li class="fragment">GPU stays <strong>full</strong> &rarr; far higher throughput, no idle slots.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="eqnote fragment">Because decode re-reads the weights once per step, adding more sequences to that step is <strong>nearly free throughput</strong> &mdash; the whole reason batching wins.</p>
+    <aside class="notes">
+      Continuous batching is the single biggest throughput win in modern serving, and it falls straight out of "decode is bandwidth-bound." Static batching groups N requests, runs them lock-step, and won't release the batch until the longest sequence finishes &mdash; so a request that wanted ten tokens is held hostage by one that wanted a thousand. That's head-of-line blocking, and it leaves GPU slots idle. Continuous batching &mdash; also called in-flight or dynamic batching &mdash; schedules at the granularity of a single decode step: every step it evicts sequences that just finished and admits new ones from the queue, so the batch is continuously topped up and the GPU never idles. Why this is a free lunch: in decode you must stream all the model weights out of memory once per step regardless of batch size, so processing 32 sequences in that step costs almost the same memory traffic as processing one &mdash; you amortize the expensive weight read across many requests. That's the roofline intuition we'll formalize later: batching pushes decode from the memory-bound region toward compute-bound, raising utilization until the GPU's compute finally saturates.
+    </aside>
+  </section>
+</section>
+
+<section>
+
+  <!-- ===== LANDSCAPE INTRO ===== -->
+  <section>
+    <p class="kicker">The approaches · part A landscape</p>
+    <h2>The optimization toolkit — what each lever saves</h2>
+    <div class="flow" style="font-size:.78em;">
+      <span class="box ghost">FP16 baseline</span><span class="arrow">→</span>
+      <span class="box accent">KV cache</span><span class="arrow">→</span>
+      <span class="box accent">Quantize W</span><span class="arrow">→</span>
+      <span class="box accent">Quantize W+A</span><span class="arrow">→</span>
+      <span class="box green">FP8 / GGUF</span><span class="arrow">→</span>
+      <span class="box green">GQA / MQA / MLA</span>
+    </div>
+    <p class="eqnote fragment">Every technique buys one of three things &mdash; ask which before you reach for it:</p>
+    <div class="cols c3" style="margin-top:.4em;">
+      <div><h5>Memory</h5><ul><li class="fragment">Quantization (smaller weights)</li><li class="fragment">KV reduction (GQA/MQA/MLA)</li><li class="fragment">KV-cache quant</li></ul></div>
+      <div><h5>Latency</h5><ul><li class="fragment">Lower-precision matmuls</li><li class="fragment">Smaller cache &#8594; fewer reads</li></ul></div>
+      <div><h5>Throughput</h5><ul><li class="fragment">Free VRAM &#8594; bigger batch</li><li class="fragment">More concurrent sequences</li></ul></div>
+    </div>
+    <aside class="notes">
+      This is the map for part A. Frame the whole section around one question: where does each technique save &mdash; memory, latency, or throughput? They are linked but not identical. Quantization shrinks the weights, which is primarily a memory win that also speeds the memory-bandwidth-bound decode step. KV-cache reduction (GQA/MQA/MLA) and KV-cache quantization shrink the per-token state, which frees VRAM. And freed VRAM is the real prize for a server operator, because it lets you raise the batch size, which is what actually lifts throughput. Tell students to always name the bottleneck first &mdash; an interactive chat bot starved on latency needs a different lever than an offline batch job starved on throughput. Part B (the next group) covers attention kernels, batching, and speculative decoding.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       1 · KV CACHE (foundational)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 1 of 5</p>
+    <h3>The KV cache <span class="tag classic">foundational</span></h3>
+    <p><strong>What:</strong> store the per-token Key and Value tensors from every layer so each new token only attends &mdash; never recomputes the whole prefix. <strong>How:</strong> during decode, append the new token's K,V to a growing buffer; attend the current query against all cached K,V. <strong>Solves:</strong> turns decode from O(n&sup2;) recompute into O(n) append &mdash; but the buffer is now the central memory consumer.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Each step is cheap &mdash; one new token, not the whole sequence</li><li class="fragment">Makes long-context autoregressive decode tractable</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Grows linearly with sequence length &times; batch &mdash; eats VRAM fast</li><li class="fragment">Decode becomes memory-bandwidth bound (you read the whole cache each step)</li></ul></div>
+    </div>
+    <p class="small"><strong>vs baseline:</strong> naive decode re-runs attention over the full prefix every step; the cache trades compute for memory &mdash; and that memory is what every later technique fights to shrink.</p>
+    <aside class="notes">
+      Start here because the KV cache is the thing every other memory technique exists to attack. Without it, generating token number 1000 means re-running attention over the previous 999 tokens at every single step &mdash; quadratic, wasteful, and slow. The cache stores each layer's Keys and Values so the new query attends against a buffer that you just append to: O(n) work per step instead of O(n&sup2;). The cost is memory: that buffer grows with sequence length and with batch size, and on a 70B model at long context it can rival or exceed the weights. It also makes decode memory-bandwidth bound, because every step reads the entire cache back from HBM. Hold that fact &mdash; "decode is bandwidth bound" &mdash; it explains why a smaller cache speeds latency and why batching lifts utilization.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · KV cache</p>
+    <h3>KV cache &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Prefill<small>encode prompt</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Fill cache<small>store K,V/layer</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">New token<small>compute q,k,v</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Append k,v<small>grow buffer</small></span>
+      <span class="anim-arrow fragment fade-in">&#8617;</span>
+      <span class="anim-node fragment fade-in">Attend &amp; emit<small>loop</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Prefill: run the full prompt once, computing K,V for every token &amp; layer (compute-bound).</li>
+      <li class="fragment">Store those K,V tensors in the cache &mdash; one slot per token, per layer.</li>
+      <li class="fragment">For each new token, compute its query, key, value.</li>
+      <li class="fragment">Append the new k,v to the buffer; the cache grows by one token.</li>
+      <li class="fragment">Attend the query against <em>all</em> cached K,V, emit the token, loop.</li>
+    </ol>
+    <p class="eqnote fragment">Size &#8776; <code>2 &times; layers &times; kv_heads &times; head_dim &times; seq_len &times; bytes</code> &mdash; the 2 is K and V.</p>
+    <aside class="notes">
+      Walk the two phases. Prefill processes the whole prompt in parallel &mdash; it is compute-bound and fills the cache in one big pass; this is what TTFT measures. Then decode is the loop: each new token contributes one k and one v that you append, and its query attends against everything cached so far. The formula on the slide is worth memorizing for interviews &mdash; two (for K and V), times layers, times KV heads, times head dim, times sequence length, times bytes per element. Plug in an 80-layer, 8-KV-head, 128-head-dim FP16 model at 8K tokens and you get roughly 2 &times; 80 &times; 8 &times; 128 &times; 8192 &times; 2 bytes &#8776; 2.7 GB for a single request &mdash; per concurrent sequence. That number is why KV reduction and KV quantization matter, and it sets up everything in approach 5.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       2 · QUANTIZATION OVERVIEW (memory)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 2 of 5</p>
+    <h3>Quantization overview <span class="tag modern">memory</span></h3>
+    <p><strong>What:</strong> store weights (and maybe activations) in low-bit integers/floats instead of FP16. <strong>How:</strong> map a float range to a grid via a <em>scale</em> (and zero-point); pick the granularity &mdash; per-tensor, per-channel, or per-group. <strong>Solves:</strong> INT4 weights are &frac14; the size of FP16 &mdash; a 70B model drops from ~140&nbsp;GB to ~35&nbsp;GB, fitting cheaper GPUs and freeing room for KV cache.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Big memory cut; faster bandwidth-bound decode</li><li class="fragment">Weight-only INT4 is near-lossless on perplexity</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Activations have <strong>outlier features</strong> &mdash; huge values that wreck a shared scale</li><li class="fragment">Aggressive quant can quietly break long-horizon / agentic tasks</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> the KV cache shrank per-token state; quantization shrinks the <em>weights</em> &mdash; the other half of the VRAM bill.</p>
+    <aside class="notes">
+      Lay the vocabulary here because the next slides assume it. Two axes. First, <em>what</em> you quantize: weight-only (compress the stored weights, dequantize to FP16 to compute &mdash; INT4 GPTQ/AWQ live here) versus weight-and-activation (quantize both so the matmul itself runs in INT8 &mdash; that is what gives real compute speedups, and SmoothQuant lives here). INT8 dynamic quantization is the common W+A starting point. Second, <em>when</em> you quantize: PTQ (post-training, calibrate on a small dataset, cheap) versus QAT (quantization-aware training, simulate the rounding during training, expensive but recovers accuracy at very low bit-widths). And the granularity of the scale &mdash; per-tensor, per-channel, per-group &mdash; trades overhead for accuracy. The villain that motivates approach 3 is outlier features: a handful of activation channels carry values orders of magnitude larger than the rest, and a single shared scale either clips them or wastes all its precision on them.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Quantization</p>
+    <h3>Quantization &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">FP16 weights<small>full precision</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Calibrate<small>find ranges</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Pick scale<small>tensor/chan/group</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Round<small>to INT grid</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Store + dequant<small>at compute</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Start from FP16 weights (and a small calibration set for activations).</li>
+      <li class="fragment">Calibrate: measure the value range per tensor / channel / group.</li>
+      <li class="fragment">Choose a <em>scale</em> (and zero-point) &mdash; finer granularity = better fit, more overhead.</li>
+      <li class="fragment">Round each value to the nearest grid point: <code>q = round(w / scale)</code>.</li>
+      <li class="fragment">Store the ints; dequantize <code>w &#8776; q &times; scale</code> only when computing.</li>
+    </ol>
+    <p class="eqnote fragment"><strong>Granularity:</strong> per-tensor (1 scale, cheap, brittle) &#8594; per-channel &#8594; per-group <code>Q4_K</code>-style (one scale per 32&ndash;128 weights, best accuracy/overhead balance).</p>
+    <aside class="notes">
+      The mechanism is a linear map: divide by a scale, round to the integer grid, store the int. At compute time you multiply back by the scale. The calibration step is where PTQ gets its ranges &mdash; feed a few hundred representative samples and watch the activation magnitudes; a poorly chosen calibration set (wrong domain, too short, all one language) gives bad ranges and silent quality loss. Granularity is the key knob: per-tensor uses one scale for the whole weight matrix &mdash; cheapest but a single outlier ruins everyone's precision. Per-channel gives each output channel its own scale. Per-group (block-wise, say one scale per 32 or 128 weights) is the modern default &mdash; it isolates outliers into small blocks and is what the GGUF K-quants use. The trade-off is the extra scales themselves cost a little memory and lookup, but the accuracy win is large.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       3 · GPTQ vs AWQ vs SmoothQuant (methods)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 3 of 5</p>
+    <h3>GPTQ &middot; AWQ &middot; SmoothQuant <span class="tag sota">methods</span></h3>
+    <p><strong>What:</strong> three PTQ recipes that each beat naive rounding by being smarter about error and outliers. <strong>How:</strong> GPTQ does <em>error-compensated</em> 2nd-order rounding; AWQ is <em>activation-aware</em>, protecting salient weight channels; SmoothQuant <em>migrates</em> activation outliers into the weights to make INT8 W+A viable. <strong>Solves:</strong> the outlier problem &mdash; the reason naive low-bit quant collapses.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">GPTQ/AWQ: strong INT4 weight-only quality</li><li class="fragment">SmoothQuant: enables fast INT8 weight+activation matmuls</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">GPTQ needs calibration + a second-order solve (slower to produce)</li><li class="fragment">SmoothQuant needs a tuned migration strength &alpha;</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> the overview did naive round-to-nearest; these three add error compensation, salience awareness, or outlier migration &mdash; that is what makes low-bit usable.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2211.10438" target="_blank" rel="noopener noreferrer">SmoothQuant &#8599;</a> &middot; <a href="https://arxiv.org/abs/2306.00978" target="_blank" rel="noopener noreferrer">AWQ &#8599;</a> &middot; <a href="https://arxiv.org/abs/2210.17323" target="_blank" rel="noopener noreferrer">GPTQ &#8599;</a></p>
+    <aside class="notes">
+      These three are the most-asked names in a quantization interview, so be crisp on the one-line idea for each. GPTQ (Frantar et al.) quantizes weights column by column and uses second-order (Hessian) information to compensate &mdash; after rounding one weight, it nudges the remaining unquantized weights to absorb the error, so the layer's output stays close. AWQ (Lin et al.) observes that not all weights matter equally: a small fraction of channels are "salient" because they multiply large activations; it scales those channels up before quantizing so they keep precision, leaving perplexity nearly untouched without any backprop. SmoothQuant (Xiao et al.) tackles the W+A case: activation outliers are the blocker for INT8 activations, so it mathematically migrates the difficulty from activations into weights &mdash; divide activations by a per-channel factor, multiply the weights by it &mdash; making both INT8-friendly. The knob is alpha, the migration strength. GPTQ and AWQ are weight-only INT4 workhorses; SmoothQuant is the one that unlocks genuinely faster INT8 compute.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · the three methods</p>
+    <h3>GPTQ &middot; AWQ &middot; SmoothQuant &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Outlier problem<small>big act values</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">GPTQ<small>compensate error</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">AWQ<small>protect salient W</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">SmoothQuant<small>migrate to W</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Usable low-bit<small>INT4 / INT8 W+A</small></span>
+    </div>
+    <ol>
+      <li class="fragment">The problem: a few activation channels are huge &mdash; naive shared scales clip or waste precision.</li>
+      <li class="fragment"><strong>GPTQ</strong> &mdash; quantize weights column-by-column; use 2nd-order info to push rounding error onto not-yet-quantized weights.</li>
+      <li class="fragment"><strong>AWQ</strong> &mdash; find salient channels (big activations), scale them up to preserve their precision, then quantize.</li>
+      <li class="fragment"><strong>SmoothQuant</strong> &mdash; divide activations by per-channel <code>s</code>, multiply weights by <code>s</code> &mdash; outliers move into the easier-to-quantize weights.</li>
+      <li class="fragment">Result: INT4 weight-only (GPTQ/AWQ) or fast INT8 weight+activation (SmoothQuant).</li>
+    </ol>
+    <aside class="notes">
+      Drive this as a contrast, not three separate stories. The shared villain is the outlier &mdash; step one. GPTQ's trick is sequential error compensation: it is greedy column-by-column rounding where each rounding decision is corrected by adjusting the weights it has not touched yet, guided by the inverse Hessian. AWQ's trick is asymmetry: instead of fixing all weights it identifies the roughly 1% of channels that ride on large activations and protects only those via a scaling reparameterization &mdash; cheap and no gradients. SmoothQuant's trick is algebraic identity: X&middot;W is unchanged if you divide X by a per-channel s and multiply W by s, so you can drag the activation spikes into the weights where a per-channel scale handles them comfortably &mdash; this is the only one of the three aimed at making the activation matmul itself INT8. Point out the end states differ: GPTQ and AWQ leave you with INT4 weights and FP16 activations; SmoothQuant gives W8A8.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       4 · FP8 & FORMATS (numerics)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 4 of 5</p>
+    <h3>FP8 &amp; formats <span class="tag sota">numerics</span></h3>
+    <p><strong>What:</strong> floating-point (not integer) low precision &mdash; FP8 &mdash; plus the file/label formats that ship quantized models. <strong>How:</strong> FP8 has two flavors &mdash; <code>E4M3</code> (4 exp, 3 mantissa: more precision, smaller range) and <code>E5M2</code> (5 exp, 2 mantissa: more range, less precision); GGUF packages models with labels like <code>Q4_K_M</code>; KV cache itself can be FP8/INT8. <strong>Solves:</strong> outliers gracefully (floats have an exponent) &mdash; native on Hopper/Ada GPUs.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">FP8 tolerates outliers far better than INT8 (dynamic range)</li><li class="fragment">Hardware-native FP8 matmul on H100/Ada &mdash; real speedups</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">8 bits, not 4 &mdash; less memory savings than INT4</li><li class="fragment">FP8 KV cache can hurt long-context recall if too aggressive</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> GPTQ/AWQ/SmoothQuant fight outliers with integer tricks; FP8 sidesteps them with an exponent &mdash; and needs the right silicon.</p>
+    <aside class="notes">
+      FP8 is the answer to "why not just use INT8 everywhere?" Integers have uniform spacing and no exponent, so outliers force a bad scale; floating point spends bits on an exponent and so spans a huge dynamic range, absorbing outliers naturally. The two FP8 layouts are a classic interview point: E4M3 uses four exponent bits and three mantissa bits &mdash; more mantissa means more precision but a smaller range, good for forward activations and weights; E5M2 uses five exponent and two mantissa &mdash; more range, less precision, historically used for gradients. The catch is FP8 is eight bits, so memory savings are roughly half FP16, not the quarter INT4 gives &mdash; you choose FP8 for speed and robustness, INT4 for raw footprint. Then formats: GGUF is the llama.cpp ecosystem's single-file format; a label like Q4_K_M means 4-bit, K-quant (block-wise mixed scheme), Medium size variant &mdash; the M/S/L pick how many sensitive tensors stay higher precision. Finally the cache: you can quantize the KV cache to FP8 or INT8 to roughly halve it, but be careful &mdash; over-quantizing keys and values degrades long-context retrieval, the kind of thing perplexity misses but a needle-in-haystack eval catches.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · FP8 &amp; formats</p>
+    <h3>FP8, GGUF labels &amp; KV quant &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">FP16 value<small>16 bits</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Pick FP8<small>E4M3 / E5M2</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Hardware matmul<small>H100/Ada native</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Package GGUF<small>Q4_K_M label</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Quant KV cache<small>FP8/INT8</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Take an FP16 tensor &mdash; need range <em>and</em> precision in 8 bits.</li>
+      <li class="fragment">Choose the format: <code>E4M3</code> (more mantissa &#8594; precision) vs <code>E5M2</code> (more exponent &#8594; range).</li>
+      <li class="fragment">Run it through native FP8 tensor cores &mdash; real compute speedup, not just storage.</li>
+      <li class="fragment">For shipping: GGUF bundles weights; <code>Q4_K_M</code> = 4-bit, K-quant blocks, Medium variant.</li>
+      <li class="fragment">Optionally quantize the KV cache (FP8/INT8) to halve it &mdash; watch long-context recall.</li>
+    </ol>
+    <p class="eqnote fragment">Decode a label: <code>Q</code>=quantized &middot; <code>4</code>=bits &middot; <code>_K</code>=block/K-quant &middot; <code>_M</code>=size tier (S/M/L keep more sensitive tensors high).</p>
+    <aside class="notes">
+      Make the E4M3-vs-E5M2 choice tangible: same 8 bits, but you spend them on either mantissa (precision) or exponent (range). E4M3 is the default for inference weights and activations because the values are bounded and you want precision; E5M2 trades that for reach. The hardware point matters &mdash; FP8 only pays off on GPUs with FP8 tensor cores (Hopper H100, Ada); on older cards you get the memory but not the speed. Spend a moment decoding GGUF labels because students download these constantly: the letter Q, the bit-width, K for the newer block-wise K-quant scheme, and the S/M/L tier that decides how many attention/feed-forward tensors are kept at higher precision. End on KV-cache quantization as the bridge to approach 5 &mdash; it is the other way to shrink the cache, complementary to sharing heads, and its risk is silent degradation of long-context tasks.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       5 · GQA / MQA / MLA (KV reduction)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 5 of 5</p>
+    <h3>GQA &middot; MQA &middot; MLA <span class="tag sota">KV reduction</span></h3>
+    <p><strong>What:</strong> change attention so the KV cache itself is smaller. <strong>How:</strong> MQA shares <em>one</em> K/V head across all query heads; GQA shares K/V across <em>groups</em> of query heads (a middle ground); MLA compresses K/V into a low-rank <em>latent</em> and reconstructs on the fly. <strong>Solves:</strong> the cache's linear blowup &mdash; the central memory cost from approach 1.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">MQA/GQA cut KV memory by the head-sharing ratio (e.g. 8&times; for 64&#8594;8 heads)</li><li class="fragment">MLA: large compression with little quality loss (DeepSeek-V2/V3)</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">MQA can lose quality / training stability &mdash; GQA is the safe compromise</li><li class="fragment">MLA adds reconstruction compute &amp; complexity</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> FP8/INT8 KV quant shrinks each cache <em>entry</em>; head-sharing &amp; MLA shrink <em>how many</em> entries you store &mdash; they stack.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2305.13245" target="_blank" rel="noopener noreferrer">GQA &#8599;</a> &middot; <a href="https://arxiv.org/abs/1911.02150" target="_blank" rel="noopener noreferrer">MQA &#8599;</a> &middot; <a href="https://arxiv.org/abs/2405.04434" target="_blank" rel="noopener noreferrer">DeepSeek-V2 (MLA) &#8599;</a></p>
+    <aside class="notes">
+      This closes part A by attacking the cache's size directly. Recall the formula &mdash; the cache scales with the number of KV heads. Full multi-head attention gives every query head its own K and V head, which is great for quality but maximal for cache size. MQA (Shazeer) goes to the extreme: one shared K/V head for all queries, slashing the cache by the head count but sometimes hurting quality and stability. GQA (Ainslie et al.) is the now-standard compromise used in Llama-2/3 and most modern models: split query heads into a few groups, one K/V head per group &mdash; almost full-MHA quality at a fraction of the cache. MLA (DeepSeek-V2/V3) is the frontier: instead of sharing heads it projects K and V down to a small shared latent vector that you cache, then up-projects when attending &mdash; a big compression with minimal quality loss, at the cost of extra reconstruction compute and engineering complexity. The key framing: these reduce how many entries you store, while FP8 KV quant reduces the bytes per entry &mdash; orthogonal, so production stacks both.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · GQA / MQA / MLA</p>
+    <h3>GQA &middot; MQA &middot; MLA &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">MHA<small>K/V per head</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">MQA<small>1 shared K/V</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">GQA<small>K/V per group</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">MLA<small>compress to latent</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Smaller cache<small>same quality-ish</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Baseline MHA: every query head has its own K and V head &mdash; biggest cache.</li>
+      <li class="fragment">MQA: collapse to a <em>single</em> K/V head shared by all queries &mdash; smallest cache, some quality risk.</li>
+      <li class="fragment">GQA: group query heads, one K/V head per group &mdash; tunable sweet spot (e.g. 8 KV heads for 64 queries).</li>
+      <li class="fragment">MLA: project K,V into a low-rank latent; cache the latent, up-project at attention time.</li>
+      <li class="fragment">Net: cache shrinks by the sharing ratio (GQA/MQA) or by the compression rank (MLA).</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"MHA &#8594; MQA &#8594; GQA &#8594; MLA &mdash; shrinking the KV cache",
+     "nodes":[["MHA","K/V per head"],["MQA","1 shared K/V"],["GQA","K/V per group"],["MLA","latent K/V"],["Small cache","stacks w/ quant"]],
+     "meter":true,
+     "steps":[
+       {"on":[0],"done":[],"q":20,"cap":"<strong>MHA:</strong> one K/V head per query head &mdash; maximal cache, full quality."},
+       {"on":[1],"done":[0],"q":40,"cap":"<strong>MQA:</strong> all queries share <em>one</em> K/V head &mdash; tiny cache, but quality/stability can suffer."},
+       {"on":[2],"done":[0,1],"q":60,"cap":"<strong>GQA:</strong> groups of queries share a K/V head &mdash; the standard compromise (Llama-2/3)."},
+       {"on":[3],"done":[0,1,2],"q":78,"cap":"<strong>MLA:</strong> compress K,V into a low-rank latent, cache that, up-project on the fly (DeepSeek)."},
+       {"on":[4],"done":[0,1,2,3],"q":92,"cap":"Cache shrinks by the sharing ratio or rank &mdash; and <strong>stacks</strong> with FP8/INT8 KV quant."}],
+     "interval":1900}
+    </script></div>
+    <aside class="notes">
+      Drive the meter as the cache shrinks left to right. The animation makes the evolution visible &mdash; the thing interviewers actually probe ("why GQA and not MQA?"). MHA is the full, expensive baseline. MQA is the aggressive extreme &mdash; one K/V head &mdash; which is why early adopters saw quality and training-instability issues. GQA is the Goldilocks answer that won: a handful of K/V head groups recovers nearly all the quality while still cutting the cache by the grouping ratio, which is why Llama-2 70B and Llama-3 use it. MLA is a different mechanism entirely &mdash; not sharing heads but low-rank compression: store a compact latent for K and V and reconstruct per-head at attention time, which is how DeepSeek-V2/V3 get a very small cache with minimal quality loss, paying in reconstruction FLOPs and implementation complexity. Close the section by reconnecting to the framing: head-sharing and MLA cut the <em>number</em> of stored entries; FP8/INT8 KV quant cuts the <em>bytes per</em> entry; quantizing the weights (approaches 2&ndash;4) cuts the model itself &mdash; three orthogonal levers that together decide how many concurrent sequences fit on the GPU.
+    </aside>
+  </section>
+
+</section>
+
+<section>
+
+  <!-- ===== PART B INTRO ===== -->
+  <section>
+    <p class="kicker">The approaches · part B</p>
+    <h2>Kernels, batching &amp; parallelism</h2>
+    <div class="flow" style="font-size:.78em;">
+      <span class="box accent">FlashAttn</span><span class="arrow">→</span>
+      <span class="box accent">PagedAttn</span><span class="arrow">→</span>
+      <span class="box accent">Prefix cache</span><span class="arrow">→</span>
+      <span class="box accent">SGLang</span><span class="arrow">→</span>
+      <span class="box green">Continuous batch</span><span class="arrow">→</span>
+      <span class="box green">Chunked prefill</span><span class="arrow">→</span>
+      <span class="box green">Speculative</span><span class="arrow">→</span>
+      <span class="box green">TP / PP / EP</span><span class="arrow">→</span>
+      <span class="box green">Disaggregated</span><span class="arrow">→</span>
+      <span class="box green">Multi-LoRA</span><span class="arrow">→</span>
+      <span class="box green">Structured out</span>
+    </div>
+    <p class="eqnote fragment">Part A squeezed the <em>model</em> (quant, KV math). Part B fixes the <em>memory traffic, the scheduler, and the machines</em> — for each: <em>what / how / pros &amp; cons</em>, then a step-by-step animation.</p>
+    <aside class="notes">
+      Part A was about shrinking the bytes you move per token — quantization and KV-cache math. Part B is the systems half: rewriting the attention kernel so it stops thrashing HBM (FlashAttention), managing KV memory like an operating system (PagedAttention), reusing shared prefixes, scheduling many requests together (continuous batching, chunked prefill), trading a tiny draft model for fewer sequential steps (speculative decoding), splitting work across GPUs (tensor/pipeline/expert parallelism), separating prefill and decode onto specialized pools (disaggregated serving), hosting hundreds of LoRA adapters on one GPU (S-LoRA), and enforcing structured output at the serving layer without a throughput penalty (XGrammar). Each rung solves a concrete bottleneck the previous one exposed — that A-to-B contrast is exactly what interviewers probe.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       6 · FLASHATTENTION
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 6 of 16</p>
+    <h3>FlashAttention <span class="tag modern">IO-aware kernel</span></h3>
+    <p><strong>What:</strong> an exact attention kernel that is fast because it is <em>memory-IO-aware</em>, not because it does less math (Dao et al., 2022). <strong>How:</strong> <em>tile</em> Q/K/V into SRAM-sized blocks, compute attention block-by-block with an <em>online softmax</em>, and never write the full N&times;N score matrix to HBM. <strong>Solves:</strong> standard attention is bottlenecked by reading/writing that huge N&times;N matrix to slow HBM.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Exact (not an approximation) &amp; much faster</li><li class="fragment">Memory drops from O(N&#178;) to O(N) — longer contexts fit</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Hand-tuned CUDA, hardware-specific</li><li class="fragment">Most win is in <em>prefill</em>; decode is bandwidth-bound elsewhere</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> earlier work cut attention's FLOPs (sparse/linear); FlashAttention keeps exact math and instead cuts the slow HBM traffic.</p>
+    <p class="small"><strong>Also &mdash; FlashInfer:</strong> a serving-oriented kernel dispatch library (2024) that extends FA to paged KV blocks, variable-length batches, MLA decompression, and sliding-window attention &mdash; the flexible attention backend used inside SGLang and vLLM.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2205.14135" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      The key reframe for the interview: attention is not compute-bound, it is memory-bound. A naive kernel materializes the full N&times;N score matrix in HBM, writes it, reads it back for softmax, writes again — that round-tripping dominates the wall-clock. FlashAttention is described as IO-aware because it counts HBM reads/writes, not FLOPs, and minimizes them by keeping tiles in fast on-chip SRAM. It is mathematically exact — same output as vanilla attention — using an online (streaming) softmax that updates a running max and sum so it never needs the whole row at once. FA-2 improved parallelism and work partitioning; FA-3 (2024) targets Hopper with FP8 and async warp-group pipelining. Honest caveat: the big speedup is in prefill where N is large; single-token decode is bound by weight/KV bandwidth, which is what the other rungs attack.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · FlashAttention</p>
+    <h3>FlashAttention — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Tile Q,K,V<small>SRAM blocks</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Block scores<small>QK&#7488; in SRAM</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Online softmax<small>running max/sum</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Accumulate<small>&middot;V into output</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Write once<small>O to HBM</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Split Q, K, V into blocks small enough to fit in fast on-chip SRAM.</li>
+      <li class="fragment">For each K/V block, compute that block's scores QK&#7488; entirely in SRAM.</li>
+      <li class="fragment">Online softmax: keep a running max &amp; denominator, rescale as new blocks arrive.</li>
+      <li class="fragment">Accumulate the weighted &middot;V into the running output — no full N&times;N matrix ever stored.</li>
+      <li class="fragment">Write only the final output O back to HBM (one pass, O(N) memory).</li>
+    </ol>
+    <aside class="notes">
+      Walk the tiling loop concretely. The trick that makes it exact is the online softmax: as each new K/V block arrives you may discover a larger score than before, so you rescale the partial sums and the partial output by the ratio of the old to the new max — algebraically identical to computing softmax over the whole row at once. Because scores live and die in SRAM, you never pay the HBM cost of the N&times;N matrix, which is the whole game. The output is written exactly once. This is also why it enables longer contexts: peak memory is linear in sequence length, not quadratic.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       7 · PAGEDATTENTION / vLLM — KEY (keyanim)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 7 of 16</p>
+    <h3>PagedAttention / vLLM <span class="tag sota">paging</span></h3>
+    <p><strong>What:</strong> manage the KV cache in fixed-size <em>blocks</em> via a <em>block table</em>, the way an OS manages virtual memory (Kwon et al., 2023). <strong>How:</strong> store each sequence's KV in non-contiguous physical blocks; a per-sequence block table maps logical positions to physical blocks; allocate blocks on demand. <strong>Solves:</strong> naive contiguous KV allocation wastes huge memory to internal &amp; external fragmentation.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Near-zero fragmentation &#8594; far higher batch / throughput</li><li class="fragment">Copy-on-write block sharing for parallel samples &amp; beams</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Custom attention kernel must gather scattered blocks</li><li class="fragment">Block-table bookkeeping &amp; small per-block overhead</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> FlashAttention sped the kernel; PagedAttention fixes how KV <em>memory</em> is laid out so you can pack many more sequences.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      This is the idea behind vLLM and the reason it became the default serving engine. The problem: if you pre-reserve one contiguous slab of KV per request sized to max length, most of it sits empty (internal fragmentation) and the leftover gaps can't fit the next request (external fragmentation) — papers measured 60-80% waste. PagedAttention borrows the OS playbook: KV lives in fixed-size blocks (say 16 tokens), each sequence keeps a block table mapping its logical token positions to wherever the physical blocks happen to be, and blocks are handed out on demand. Fragmentation collapses to at most one partial block per sequence, so you fit many more concurrent requests and throughput jumps. The cost: the attention kernel must gather KV from scattered blocks, and you maintain the page tables — a worthwhile trade.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · PagedAttention</p>
+    <h3>PagedAttention — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Logical KV<small>per seq</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Block table<small>maps to physical</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Physical blocks<small>non-contiguous</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Share / CoW<small>parallel samples</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Each sequence sees a contiguous <em>logical</em> KV — positions 0,1,2,&hellip;</li>
+      <li class="fragment">A per-sequence <em>block table</em> maps each logical block to a physical block.</li>
+      <li class="fragment">Physical blocks live anywhere in GPU memory — non-contiguous, allocated on demand.</li>
+      <li class="fragment">Samples sharing a prompt point to the <em>same</em> physical blocks; copy-on-write on divergence.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"PagedAttention — KV as paged virtual memory",
+     "nodes":[["Logical KV","per seq"],["Block table","maps to physical"],["Physical blocks","non-contiguous"],["Share / CoW","parallel samples"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"Each sequence sees a clean <strong>logical</strong> KV: positions 0,1,2,&hellip; — the virtual address space."},
+       {"on":[1],"done":[0],"cap":"A per-sequence <strong>block table</strong> maps each logical block &#8594; a physical block (the page table)."},
+       {"on":[2],"done":[0,1],"cap":"<strong>Physical blocks</strong> sit anywhere in HBM, non-contiguous, allocated on demand &#8594; ~zero fragmentation."},
+       {"on":[3],"done":[0,1,2],"cap":"Parallel samples / beams <strong>share</strong> the prompt's blocks; <em>copy-on-write</em> only when they diverge."}],
+     "interval":2000}
+    </script></div>
+    <aside class="notes">
+      Drive the OS analogy off the widget. Logical KV is the virtual address space — each sequence thinks its tokens are laid out contiguously. The block table is the page table that translates logical block to physical block. Physical blocks are the page frames, scattered across HBM and allocated only as the sequence grows, which is why fragmentation nearly vanishes. The fourth step is the elegant payoff: for parallel sampling or beam search, all candidates share the prompt's physical blocks through their block tables, so the prompt KV is stored once; only when a sample writes a divergent token do you copy that one block — copy-on-write. That makes spawning many samples from a shared prompt almost free in memory.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       8 · PREFIX / PROMPT CACHING
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 8 of 16</p>
+    <h3>Prefix / prompt caching <span class="tag sota">reuse</span></h3>
+    <p><strong>What:</strong> cache the KV of a shared prefix (e.g. a long system prompt) and reuse it across requests instead of recomputing it. <strong>How:</strong> hash the prompt prefix; on a hit, skip prefill for those tokens and start decoding from the cached KV; RadixAttention indexes shared prefixes in a tree. <strong>Solves:</strong> recomputing the same system prompt on every request burns prefill compute &amp; TTFT.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Cuts TTFT &amp; prefill cost dramatically for shared prefixes</li><li class="fragment">Composes with paging — cached blocks are just shared blocks</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Cache eviction: hot prefixes can be dropped under pressure</li><li class="fragment">Only helps the <em>shared</em> portion; unique suffix still prefilled</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> paging shares KV <em>within</em> a request's samples; prefix caching shares KV <em>across</em> different requests.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2312.07104" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      A natural extension of block sharing across request boundaries. Workloads with a long fixed preamble — a 2000-token system prompt, a few-shot exemplar block, a shared document in RAG — pay to prefill those identical tokens on every single request. Prefix caching keeps their KV around and, on a matching prefix, jumps straight to decoding the new suffix, slashing time-to-first-token. SGLang's RadixAttention generalizes this with a radix tree so many requests sharing partial prefixes all reuse the common portion; vLLM and commercial APIs expose automatic prefix caching too. The catch is eviction: cache space is finite, so under load a hot prefix may be evicted and have to be recomputed — you size and prioritize the cache, ideally pinning known-hot system prompts.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Prefix caching</p>
+    <h3>Prefix caching — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Hash prefix<small>system prompt</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Lookup<small>hit?</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Reuse KV<small>skip prefill</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Prefill suffix<small>unique part</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Decode<small>low TTFT</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Hash the incoming prompt's prefix (token-block granular).</li>
+      <li class="fragment">Look it up in the cache / radix tree — is this prefix already computed?</li>
+      <li class="fragment">On a hit, reuse the cached KV blocks &amp; skip prefill for those tokens.</li>
+      <li class="fragment">Only the unique suffix gets a fresh prefill.</li>
+      <li class="fragment">Begin decoding immediately &#8594; sharply lower TTFT.</li>
+    </ol>
+    <aside class="notes">
+      Mechanically, prefixes are matched at block granularity so partial overlaps still hit. On a hit you pay zero prefill for the shared tokens — their KV is already in HBM as shared paged blocks — and only the request-specific suffix is computed. The win is concentrated in TTFT, which is dominated by prefill; for a chat app with a fat system prompt or a RAG pipeline reusing the same retrieved context, this can be the single biggest latency lever. Watch the eviction policy: LRU is common, but you often want to pin known-hot prefixes so a burst of unique requests can't flush your most valuable cache entry.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       9 · SGLang / RadixAttention
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 9 of 16</p>
+    <h3>SGLang &amp; RadixAttention <span class="tag sota">serving runtime</span></h3>
+    <p><strong>What:</strong> an inference serving runtime built around deep prefix reuse and structured generation. <strong>How:</strong> <em>RadixAttention</em> indexes KV blocks in a radix tree &mdash; any shared prefix of any length is found and its blocks reused; <em>XGrammar</em> precompiles JSON/grammar schemas to per-state token-ID bitmasks applied at near-zero per-step cost. <strong>Solves:</strong> hash-based caches miss partial or multi-path overlaps; na&iuml;ve constrained decoding is O(vocab&thinsp;&times;&thinsp;states) per step.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">Radix tree captures all shared prefix lengths &mdash; multi-turn, branching, RAG</li>
+        <li class="fragment">Structured output (JSON / regex / grammar) at &lt;3&thinsp;% throughput overhead via XGrammar</li>
+        <li class="fragment">Strong performance on agentic / multi-call workloads via program abstraction</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Younger ecosystem than vLLM; some quant / adapter integrations still maturing</li>
+        <li class="fragment">Radix-tree bookkeeping adds memory-accounting overhead vs. simple hash maps</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs vLLM prefix cache:</strong> vLLM hashes fixed-length block sequences; SGLang&rsquo;s radix tree matches <em>any</em> prefix length and shares blocks across many co-tenant requests simultaneously.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2312.07104" target="_blank" rel="noopener noreferrer">SGLang paper &#8599;</a></p>
+    <aside class="notes">
+      SGLang (from the Lianmin Zheng group at Berkeley) started as a high-level language for multi-call LLM programs, but its serving backend became the main story. RadixAttention is the core insight: instead of hashing each fixed-size block to look up cached KV, it maintains a radix tree where each arc encodes a block of tokens and each node stores cached KV state. Two requests sharing the first 1000 tokens and diverging at token 1001 share every block up to the split — zero KV duplication regardless of block-size alignment. The win is greatest for multi-turn chat (context grows each turn), RAG with a shared retrieved document across user queries, and few-shot chains with a fixed preamble. XGrammar addresses structured output: the JSON schema is compiled to a push-down automaton; a precomputed GPU-resident bitmask of valid next-token IDs is stored for every reachable state. Each decode step is: state → bitmask_table[state] → logits[~mask] = −inf → sample → advance automaton. O(1) per step, runs as a GPU kernel. vLLM 0.6+ integrated XGrammar as its default structured-output backend too.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · SGLang</p>
+    <h3>SGLang &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Requests arrive<small>shared prefixes</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Radix lookup<small>any prefix length</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Share KV blocks<small>matched prefix</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">XGrammar mask<small>precompiled bitmask</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Decode<small>constrained &amp; fast</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Multiple requests arrive &mdash; chat turns, RAG queries &mdash; sharing prefixes of varying lengths.</li>
+      <li class="fragment">RadixAttention traverses the radix tree to find the longest shared KV prefix for each request.</li>
+      <li class="fragment">Matched KV blocks are shared in-place (no copy) &mdash; only unique suffixes get a fresh prefill.</li>
+      <li class="fragment">For structured output: current automaton state is looked up in the precomputed bitmask table (O(1), GPU-resident).</li>
+      <li class="fragment">Logits for invalid tokens set to &minus;&#8734; before softmax &mdash; 100&thinsp;% schema compliance, &lt;3&thinsp;% overhead.</li>
+    </ol>
+    <aside class="notes">
+      Concrete example: a RAG pipeline embeds the same retrieved document (say 600 tokens) in every user query. With hash-based prefix caching (vLLM default) you need the prefix to align exactly to block boundaries — a 600-token prefix in a 16-token-block system hits at 592 tokens and misses the last 8. RadixAttention matches all 600 because the tree traversal stops exactly where tokens diverge, not at a block boundary. For structured output: the automaton for {"name": string, "score": number} has states like EXPECT_OPEN_BRACE, EXPECT_KEY, IN_STRING, etc. The precomputed bitmask for EXPECT_KEY has only the token IDs that produce '"name"' or '"score"' set valid — all 128K others are masked to −inf. The decode loop calls bitmask_lookup(state), applies it via a fused GPU kernel, samples, and advances the automaton — a pointer dereference and an element-wise operation, not a Python FSM traversal.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       10 · CONTINUOUS (IN-FLIGHT) BATCHING
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 10 of 16</p>
+    <h3>Continuous (in-flight) batching <span class="tag sota">throughput</span></h3>
+    <p><strong>What:</strong> schedule the batch at the <em>token</em> level — add &amp; remove sequences every decode step instead of fixing the batch up front (Yu et al., Orca, 2022). <strong>How:</strong> after each step, evict finished sequences and admit waiting ones into the freed slots, so the GPU is never idling on stragglers. <strong>Solves:</strong> static batching's head-of-line blocking — the whole batch waits for the longest sequence.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Big throughput &amp; GPU-utilization win under mixed lengths</li><li class="fragment">New requests don't wait for the current batch to finish</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">More complex scheduler &amp; per-step memory accounting</li><li class="fragment">A long prefill admitted mid-flight can still stall decodes (&#8594; next rung)</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> paging/prefix-caching freed memory; continuous batching uses that freed memory to keep the batch <em>full</em> every step.</p>
+    <p class="small"><a href="https://www.usenix.org/conference/osdi22/presentation/yu" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      Static batching groups N requests, runs them to completion together, and only then starts the next batch — so a 20-token reply is held hostage by a 2000-token reply sharing the batch (head-of-line blocking), and the GPU runs at a fraction of capacity as sequences finish at different times. Continuous batching, introduced by Orca and now standard in vLLM/TGI, reschedules every decode step: the instant a sequence emits its EOS it leaves the batch and a queued request takes its slot. The batch stays dense, GPU utilization stays high, and tail latency improves because newcomers don't wait for the whole batch. It depends on paging to make admitting/evicting sequences cheap. The remaining wrinkle — a freshly admitted long prefill can monopolize a step and stall everyone's decode — is exactly what chunked prefill fixes next.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Continuous batching</p>
+    <h3>Continuous batching — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Active batch<small>N sequences</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Decode 1 step<small>all advance</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Evict done<small>hit EOS</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Admit waiting<small>fill slots</small></span>
+      <span class="anim-arrow fragment fade-in">↺</span>
+      <span class="anim-node fragment fade-in">Repeat<small>stay full</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Start with N active sequences sharing the batch.</li>
+      <li class="fragment">Run one decode step — every active sequence emits one token.</li>
+      <li class="fragment">Any sequence that hit EOS leaves the batch immediately.</li>
+      <li class="fragment">Pull waiting requests from the queue into the freed slots.</li>
+      <li class="fragment">Loop — the batch refills each step, so the GPU never idles on stragglers.</li>
+    </ol>
+    <aside class="notes">
+      The contrast to teach: in static batching the diagram would show empty slots opening up as short sequences finish and just staying empty until the longest one ends. Continuous batching backfills those slots the very next step. Because vLLM keeps each sequence's KV in paged blocks, eviction frees blocks instantly and admission allocates new ones, so the swap is cheap. The result is high, steady utilization across a workload with wildly varying output lengths — which is the normal case for chat. Note this is token-level (iteration-level) scheduling, the precise interview term that distinguishes it from request-level static batching.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       10 · CHUNKED PREFILL
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 11 of 16</p>
+    <h3>Chunked prefill <span class="tag sota">scheduling</span></h3>
+    <p><strong>What:</strong> split a long prefill into fixed-size token chunks and interleave them with ongoing decodes in the same batch (Agrawal et al., Sarathi, 2023). <strong>How:</strong> cap the tokens processed per step; a 8K prompt becomes many chunks, each step mixing one prefill chunk with everyone's decode tokens. <strong>Solves:</strong> one giant prefill monopolizing a step and stalling every other user's decode.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Smooths TPOT / inter-token latency under long prompts</li><li class="fragment">Keeps decodes flowing &#8594; better p99, fuller batches</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Chunk size is a tuning knob: too small hurts prefill efficiency</li><li class="fragment">Slightly higher TTFT for the long prompt being chunked</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> continuous batching admits requests freely; chunked prefill stops an admitted long prefill from blocking everyone's decode.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2308.16369" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      The problem: prefill is compute-heavy and scales with prompt length, decode is one token. If you let a single 8K-token prefill run as one step, every other user's decode is frozen for the duration — a visible latency spike, the stall this rung kills. Chunked prefill (from the Sarathi line, now default in vLLM) caps how many tokens a step may process; a long prefill is broken into chunks of, say, 512 tokens, and each scheduler step packs one prefill chunk together with the decode tokens of all active sequences. Decodes keep flowing, inter-token latency stays smooth, and the batch stays full of useful work. The knob is the chunk / token-budget size: too large and you reintroduce the stall, too small and prefill loses its batching efficiency, so you tune it against your TTFT-versus-TPOT SLO.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Chunked prefill</p>
+    <h3>Chunked prefill — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Long prefill<small>8K tokens</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Split chunks<small>512 each</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Mix w/ decode<small>token budget</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Step<small>1 chunk + decodes</small></span>
+      <span class="anim-arrow fragment fade-in">↺</span>
+      <span class="anim-node fragment fade-in">Next chunk<small>no stall</small></span>
+    </div>
+    <ol>
+      <li class="fragment">A long prompt arrives — naively it would be one huge prefill step.</li>
+      <li class="fragment">Split it into fixed-size chunks (e.g. 512 tokens each).</li>
+      <li class="fragment">Set a per-step token budget mixing one prefill chunk with active decodes.</li>
+      <li class="fragment">Each step processes one chunk plus everyone's decode token.</li>
+      <li class="fragment">Loop through chunks — decodes never stall waiting for the big prefill.</li>
+      <li class="fragment"><strong>Bonus &mdash; CUDA graphs:</strong> capture the static decode-step CUDA kernel sequence once and replay it, eliminating per-step CPU&rarr;GPU dispatch overhead (20&ndash;50&thinsp;% latency saving at small batch sizes where kernel-launch cost dominates).</li>
+    </ol>
+    <aside class="notes">
+      Picture the timeline: without chunking, a tall prefill bar blocks the lane and all the little decode ticks pile up behind it; with chunking, the prefill is sliced and each slice rides alongside the decode ticks so the lane keeps moving. The token budget per step is what couples prefill and decode into one balanced batch — you are filling the step's compute with a prefill chunk while still emitting a token for every active sequence. The trade is explicit: you slightly delay the long prompt's first token to protect everyone else's inter-token latency, which is usually the right call for an interactive multi-tenant service.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       11 · SPECULATIVE DECODING — KEY (keyanim)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 12 of 16</p>
+    <h3>Speculative decoding <span class="tag sota">latency</span></h3>
+    <p><strong>What:</strong> a cheap <em>draft</em> proposes several tokens, the big <em>target</em> model verifies them in one pass — output is provably identical to plain sampling (Leviathan et al.; Chen et al., 2023). <strong>How:</strong> draft k tokens autoregressively, run the target once over all k in parallel, accept the longest prefix that matches the target's distribution, resample the first reject. <strong>Solves:</strong> decode is sequential &amp; memory-bound — you do one expensive forward per token even though the GPU is idle on compute.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Fewer sequential target passes &#8594; lower latency, <em>exact</em> output</li><li class="fragment">Self-draft variants (Medusa, EAGLE) drop the separate draft model</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Speedup hinges on the <em>acceptance rate</em>; a bad draft can slow you down</li><li class="fragment">Stops helping at large batch — the GPU is already compute-saturated</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> batching/scheduling raise <em>throughput</em>; speculative decoding attacks single-request <em>latency</em> by cutting sequential steps.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2211.17192" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      The insight that makes this exact: decode is memory-bandwidth bound, so a single target forward pass over k candidate tokens costs almost the same as a pass over one token — the weights are streamed in either way. So let a small fast draft guess k tokens, then verify all k with one target pass. A clever accept/resample rule (rejection sampling against the ratio of target to draft probabilities) guarantees the accepted tokens are distributed exactly as if the target had sampled them — no quality loss, this is the headline. Acceptance rate is everything: if the draft agrees with the target most of the time you accept many tokens per pass and go several times faster; if it rarely agrees you pay for the draft and gain little, even slow down. Medusa adds extra prediction heads on the target itself; EAGLE drafts in feature space — both eliminate the separate draft model. And it fades at large batch sizes: once the batch already saturates compute, those parallel verification FLOPs are no longer free.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Speculative decoding</p>
+    <h3>Speculative decoding — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Draft k<small>small model</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Verify<small>target, 1 pass</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Accept prefix<small>matching tokens</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Resample reject<small>fix divergence</small></span>
+      <span class="anim-arrow fragment fade-in">↺</span>
+      <span class="anim-node fragment fade-in">Loop<small>k more</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Draft model autoregressively proposes k candidate tokens (cheap).</li>
+      <li class="fragment">Target runs ONE forward pass scoring all k in parallel.</li>
+      <li class="fragment">Accept the longest prefix consistent with the target's distribution.</li>
+      <li class="fragment">At the first mismatch, resample that token from the corrected distribution.</li>
+      <li class="fragment">Loop — accepted run length per cycle is set by the acceptance rate.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Speculative decoding — draft &#8594; verify &#8594; accept",
+     "nodes":[["Draft k","small model"],["Verify","target, 1 pass"],["Accept prefix","matching tokens"],["Resample","first reject"],["Loop","k more"]],
+     "meter":true,
+     "steps":[
+       {"on":[0],"done":[],"q":25,"cap":"<strong>Draft</strong> a small model guesses k tokens ahead, autoregressively &amp; cheaply."},
+       {"on":[1],"done":[0],"q":40,"cap":"<strong>Verify</strong> the big target scores all k in a <em>single</em> parallel pass (~free vs 1 token)."},
+       {"on":[2],"done":[0,1],"q":70,"cap":"<strong>Accept</strong> the longest prefix matching the target's distribution &#8594; many tokens at once."},
+       {"on":[3],"done":[0,1,2],"q":55,"cap":"<strong>Resample</strong> the first rejected token from the corrected distribution &#8594; output stays <em>exact</em>."},
+       {"on":[4],"done":[0,1,2,3],"q":85,"cap":"<strong>Loop.</strong> Higher acceptance rate &#8594; more tokens per pass &#8594; bigger speedup."}],
+     "interval":2000}
+    </script></div>
+    <aside class="notes">
+      Drive the loop off the widget; the meter is the acceptance rate / effective speedup. Step one: the draft proposes, say, 4 tokens, paying 4 cheap forward passes. Step two: the target verifies all 4 in one pass — and because decode is bandwidth-bound, that one pass over 4 tokens costs about the same as a normal single-token pass. Step three: walk left to right accepting tokens while the draft's choice is consistent with the target; you might accept all 4 (huge win) or just 1. Step four is the part that guarantees correctness — at the first divergence you resample from an adjusted distribution, so the emitted sequence is distributed exactly like plain target sampling. Then loop. Emphasize the two failure modes: low acceptance (draft too weak or off-distribution) erodes or reverses the gain, and large batch sizes remove the "free verification" because the GPU is already compute-bound rather than bandwidth-bound.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       12 · TENSOR / PIPELINE / EXPERT PARALLELISM
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 13 of 16</p>
+    <h3>Tensor / pipeline / expert parallelism <span class="tag sota">scale-out</span></h3>
+    <p><strong>What:</strong> shard a model that won't fit (or is too slow) on one GPU across many. <strong>How:</strong> <em>TP</em> splits each layer's matrices across GPUs (all-reduce per layer); <em>PP</em> splits the layer <em>depth</em> into stages; <em>EP</em> places different MoE experts on different GPUs. <strong>Solves:</strong> models larger than one device's memory, and per-layer latency that one GPU can't hit.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Fit huge models; TP can cut per-token latency</li><li class="fragment">EP scales MoE capacity without dense cost</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">TP needs fast interconnect (NVLink &#8811; PCIe) or comms dominate</li><li class="fragment">PP adds bubbles; EP suffers from expert load imbalance</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> everything above optimized one GPU; here we scale <em>out</em> across GPUs when one device isn't enough.</p>
+    <p class="small"><a href="https://arxiv.org/abs/1909.08053" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      Three orthogonal ways to split. Tensor parallelism (Megatron-LM) shards the weight matrices inside each layer column- and row-wise across GPUs; each GPU computes its slice, then an all-reduce per layer stitches the partial results — this is the communication-heavy one, fine over NVLink, painful over PCIe. Pipeline parallelism assigns contiguous blocks of layers to different GPUs and streams microbatches through; comms are cheap (just activations at stage boundaries) but you get pipeline bubbles, especially at low batch. Expert parallelism is for MoE: experts are scattered across GPUs and tokens are routed to their experts, so a token only touches a couple of experts — but if routing is skewed, some GPUs sit idle while hot experts queue, hurting latency. The practical rule: TP within a fast NVLink node, PP across nodes, EP for MoE — and interconnect bandwidth is the deciding constraint for TP degree.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Parallelism</p>
+    <h3>TP vs PP vs EP — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">One layer<small>too big/slow</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">TP<small>split width + all-reduce</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">PP<small>split depth into stages</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">EP<small>route to experts</small></span>
+      <span class="anim-arrow fragment fade-in">→</span>
+      <span class="anim-node fragment fade-in">Interconnect<small>NVLink vs PCIe</small></span>
+    </div>
+    <ol>
+      <li class="fragment">A layer too big or too slow for one GPU.</li>
+      <li class="fragment">TP: shard the matmuls across GPUs, then all-reduce every layer to merge partials.</li>
+      <li class="fragment">PP: put different layer-ranges on different GPUs, stream microbatches stage to stage.</li>
+      <li class="fragment">EP: scatter MoE experts across GPUs; the gate routes each token to its top-k.</li>
+      <li class="fragment">Interconnect decides feasibility — NVLink makes TP cheap, PCIe makes it the bottleneck.</li>
+    </ol>
+    <aside class="notes">
+      Make the communication picture concrete. TP's all-reduce fires twice per transformer layer (after the attention projection and after the MLP), so for an 80-layer model that's ~160 collective ops per token — over NVLink at hundreds of GB/s it's tolerable, over PCIe it can dominate the step, which is the classic "TP=8 barely faster, 8x cost" trap. PP moves only activations between stage boundaries so it's bandwidth-light, but a single in-flight request leaves stages idle (the bubble), so PP is for throughput via microbatching, not single-request latency. EP only activates a couple of experts per token so compute is sparse, but skewed routing concentrates tokens on a few GPUs and the slowest expert sets the step time — load balancing and capacity factors are the fix. Tie it back: pick the split that matches your interconnect topology and your latency-versus-capacity goal.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       13 · DISAGGREGATED (PREFILL/DECODE) SERVING — SOTA
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 14 of 16</p>
+    <h3>Disaggregated prefill/decode serving <span class="tag sota">frontier</span></h3>
+    <p><strong>What:</strong> run prefill and decode on <em>separate</em> GPU pools, transferring the KV cache between them (Splitwise, DistServe, 2024). <strong>How:</strong> prefill workers do the compute-bound prompt pass &amp; ship the resulting KV to decode workers, which do the bandwidth-bound token loop. <strong>Solves:</strong> prefill (compute-bound) and decode (memory-bound) fight for the same GPU and interfere with each other's SLOs.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Each pool tuned to its phase &#8594; isolates TTFT from TPOT</li><li class="fragment">Independently scale &amp; right-size prefill vs decode hardware</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Must transfer KV between machines — bandwidth &amp; latency cost</li><li class="fragment">Extra scheduling, placement &amp; KV-routing complexity</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> chunked prefill <em>interleaves</em> the two phases on one GPU; disaggregation <em>physically separates</em> them onto specialized pools.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2401.09670" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      The endgame of the prefill-versus-decode tension. Prefill is compute-bound and bursty; decode is memory-bandwidth-bound and steady; sharing one GPU means they interfere — a big prefill spikes everyone's TPOT, and chunked prefill only softens this. Disaggregation (Splitwise from Microsoft, DistServe) gives each phase its own pool: prefill machines optimized for compute throughput, decode machines optimized for memory bandwidth and large batches. You can scale them independently and hit tight TTFT and TPOT SLOs simultaneously. The new cost the interviewer will ask about: the KV cache produced by prefill must travel to the decode worker — that's potentially gigabytes per request over the interconnect, so you need fast links (NVLink/InfiniBand/RDMA), careful KV-transfer scheduling overlapped with compute, and placement that keeps the hop short. It's SOTA for large-scale, SLO-bound deployments where the transfer cost is worth the isolation.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       15 · MULTI-LORA / S-LORA
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 15 of 16</p>
+    <h3>Multi-adapter serving &amp; S-LoRA <span class="tag sota">adapter batching</span></h3>
+    <p><strong>What:</strong> serve hundreds of LoRA adapters from a single GPU without reloading the base model. <strong>How:</strong> base weights stay GPU-resident; low-rank matrices A, B (rank 8&ndash;64) are swapped from a GPU/CPU adapter pool; the scheduler co-batches requests targeting the same adapter. <strong>Solves:</strong> hosting N fine-tuned variants on N separate GPUs is prohibitive when N is large or demand is spiky.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">Hundreds of adapters, one GPU &mdash; shared base amortises the full weight cost</li>
+        <li class="fragment">Adapter swap adds only a rank-r correction matmul (rank &#8810; hidden dim)</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Long-tail adapters can&rsquo;t be co-batched &#8594; throughput drops for rare adapters</li>
+        <li class="fragment">Cold adapter page-in (CPU &#8594; GPU) adds latency spikes for uncached adapters</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>vs one-model-per-adapter:</strong> S-LoRA pages adapter matrices like OS pages &mdash; GPU-resident for hot adapters, offloaded to CPU for cold ones, same base model for all.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2311.03285" target="_blank" rel="noopener noreferrer">S-LoRA paper &#8599;</a></p>
+    <aside class="notes">
+      The business case: a platform where thousands of customers each fine-tune a shared base LLM. Each customer has a LoRA adapter — a pair of low-rank matrices A (d×r) and B (r×d) with r typically 8 to 64. The base weights dominate memory (70 GB for a 70B model); the adapter is tiny (a few hundred MB at most). S-LoRA (Sheng et al., 2023) keeps the base in GPU HBM and serves adapters from a pool: hot adapters GPU-resident, cold adapters on CPU or NVMe, paged in on demand. Batching works by adapter affinity: the scheduler groups requests for adapter A together in the same step to share their A/B matmuls, then requests for adapter B, and so on. The challenge is load imbalance: a popular adapter can batch 32 requests per step while a rare one runs a batch of 1, so scheduling must balance throughput and latency across adapters. vLLM and SGLang both support multi-LoRA; the interview term is "multi-adapter serving" or "dynamic adapter loading." The interview question (Q42) asks specifically about the batching and memory challenges — answer: (a) adapter affinity scheduling to co-batch, (b) cold-start paging latency, (c) per-step rank-r matmul kernel overhead at small batches.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · S-LoRA</p>
+    <h3>S-LoRA &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">N requests<small>K distinct adapters</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Group by adapter<small>co-batch same LoRA</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Load A, B<small>GPU pool / CPU page-in</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Base + &Delta;W<small>h &#8592; h + x&thinsp;&middot;&thinsp;A&thinsp;&middot;&thinsp;B</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Batch decode<small>shared base, unique &Delta;</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Requests arrive targeting K different LoRA adapters (customer A&rsquo;s fine-tune, customer B&rsquo;s, &hellip;).</li>
+      <li class="fragment">Scheduler groups requests by adapter ID &mdash; same-adapter requests share the A/B matmul in one step.</li>
+      <li class="fragment">Hot adapters are already in GPU memory; cold adapters are paged in from CPU (small tensors, fast transfer).</li>
+      <li class="fragment">Each decode step: shared base matmul <em>Wx</em>, then per-adapter correction <strong>h &#8592; h + x&thinsp;&middot;&thinsp;A&thinsp;&middot;&thinsp;B</strong> (one extra fused rank-r kernel).</li>
+      <li class="fragment">One expensive base read amortised across the whole batch; rank-r adapter overhead is &lt;1&thinsp;% of the base matmul cost at typical ranks.</li>
+    </ol>
+    <aside class="notes">
+      The key algebra: LoRA adds BAx to each linear layer output, where B is d×r and A is r×d. For the base linear y=Wx, the adapted output is y=Wx+BAx. Serving this in a batch means running Wx once for the whole batch and adding BAx with the appropriate (B,A) pair for each request. If two requests target the same adapter they share (B,A) — that's co-batching. The rank-r overhead: for r=16, d=4096, the correction matmul is (4096,16)×(16,4096) — roughly 1/256 the cost of the base (4096,4096) matmul, negligible per token. S-LoRA's custom CUDA kernel handles the batched-GEMM with adapter-index metadata so multiple (B,A) pairs are dispatched efficiently in one pass. Throughput is high for popular adapters (large same-adapter batches) and falls for rare adapters (batch size 1–2). The eviction policy for the adapter pool mirrors KV-cache eviction: LRU or frequency-weighted, with the same trade-off of cache space vs. cold-start frequency.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       16 · STRUCTURED OUTPUT / CONSTRAINED DECODING
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 16 of 16</p>
+    <h3>Structured output at the serving layer <span class="tag sota">constrained generation</span></h3>
+    <p><strong>What:</strong> enforce JSON / regex / grammar constraints during sampling without quality loss. <strong>How:</strong> precompile the schema to a finite-state or push-down automaton; for each decode step, look up the current state&rsquo;s precomputed bitmask of valid next-token IDs and set all others to &minus;&#8734; before softmax. <strong>Solves:</strong> LLMs produce malformed JSON 5&ndash;15&thinsp;% of the time; na&iuml;ve runtime FSM traversal at O(vocab&thinsp;&times;&thinsp;states) per step becomes the serving bottleneck at scale.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul>
+        <li class="fragment">100&thinsp;% schema compliance &mdash; zero output-parse failures in production</li>
+        <li class="fragment">XGrammar precompiled bitmasks: &lt;3&thinsp;% throughput overhead vs. unconstrained decoding</li>
+      </ul></div>
+      <div class="cons"><h5>Cons</h5><ul>
+        <li class="fragment">Na&iuml;ve per-step FSM traversal (Python/CPU) bottlenecks at high QPS &mdash; must precompile</li>
+        <li class="fragment">Very complex grammars or huge schemas inflate automaton compile time per request</li>
+      </ul></div>
+    </div>
+    <p class="small"><strong>Tools:</strong> Outlines (mask-based, regular grammars), Guidance (interleaved control flow), XGrammar (compiled push-down automata &mdash; default in SGLang; integrated in vLLM 0.6+).</p>
+    <aside class="notes">
+      The throughput angle is what Q68 in the interview bank specifically probes. A naïve implementation calls a Python FSM at every decode step for every sequence in the batch: traverse grammar state, compute which 128K vocab tokens are valid next, build a logit mask, apply it. At batch 32 with a 128K vocab that is 4M Python-level operations per decode step — easily dwarfing the GPU compute time. The fix is precompilation: at request start (or server startup for cached schemas), XGrammar converts the grammar to a push-down automaton and stores a precomputed dense bitmask for every reachable state as a GPU tensor. The decode loop becomes: state_id → bitmask_table[state_id] → logits &= bitmask (GPU kernel) → sample → automaton_advance(token) → new state_id. Total overhead per step is one GPU gather and one element-wise op — under 3% in benchmarks. Outlines (2023) pioneered the mask-based approach for regular expressions; XGrammar (from the SGLang team, 2024) extended it to context-free grammars (JSON, SQL, tool-call schemas) using push-down automata. Both vLLM and SGLang now use XGrammar as their default structured-output backend.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Structured output</p>
+    <h3>Structured output &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">JSON schema<small>at request start</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Compile grammar<small>push-down automaton</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Precompute masks<small>valid IDs per state</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Mask logits<small>invalid &#8594; &minus;&#8734;</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Valid token sampled<small>advance automaton</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Request arrives with a JSON schema (e.g. <code>{"name": str, "score": int}</code>).</li>
+      <li class="fragment">Schema compiled to a push-down automaton at request start (cached at server startup for repeated schemas).</li>
+      <li class="fragment">A GPU-resident bitmask of valid next-token IDs precomputed for every reachable automaton state.</li>
+      <li class="fragment">Each decode step: look up current state &#8594; bitmask &#8594; <code>logits[invalid] = &minus;&#8734;</code> (fused GPU kernel, O(1) per step).</li>
+      <li class="fragment">Sample the masked distribution; advance automaton with chosen token. Repeat until schema complete.</li>
+    </ol>
+    <aside class="notes">
+      Walk through a concrete example: schema is {"name": string, "score": number}. Automaton states: OPEN_BRACE → EXPECT_KEY → COLON → OPEN_QUOTE_VALUE → IN_STRING_OR_NUMBER → COMMA_OR_CLOSE → DONE. At EXPECT_KEY only token IDs that spell '"name"' or '"score"' are valid — all others get −inf. At IN_STRING only printable characters are valid, and a closing '"' transitions to the next state. The precomputed bitmask for each state is a uint8 tensor of shape (vocab_size÷8,) — for a 128K vocab that is just 16KB per state, negligible memory. The GPU masking kernel does a vectorised AND of the logits tensor with the bitmask. The automaton advance is a table lookup (integer → integer), also O(1). The contrast to post-processing (parse output, retry on failure): post-processing doesn't guarantee convergence, wastes compute on invalid prefixes, and inflates tail latency — inline masking costs almost nothing and guarantees valid output every time.
+    </aside>
+  </section>
+
+</section>
+
+<!-- ============================================================
+     SECTION 7 · COMPARE
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Compare</p>
+    <h2>Cheat-sheet: the serving toolbox</h2>
+    <p class="small muted">What each lever cuts (memory / latency / throughput), the core idea, and what it costs you.</p>
+    <table class="cmp">
+      <thead><tr><th>Technique</th><th>What it cuts</th><th>Core idea</th><th>Cost / trade-off</th></tr></thead>
+      <tbody>
+        <tr class="fragment"><td>KV cache</td><td>Latency (per-token compute)</td><td>Store past K/V so each new token only attends, never recomputes</td><td>Grows linearly with context &amp; batch &#8594; the real memory hog</td></tr>
+        <tr class="fragment"><td>GQA / MQA / MLA</td><td>Memory (KV) + bandwidth</td><td>Share K/V across query heads (GQA), one KV head (MQA), or a low-rank latent (MLA)</td><td>MQA can lose quality; MLA adds projection complexity</td></tr>
+        <tr class="fragment"><td>Weight quant (INT4/INT8)</td><td>Memory (weights) + bandwidth</td><td>Store weights at lower precision (GPTQ, AWQ); dequant on the fly</td><td>Some accuracy loss; needs good calibration data</td></tr>
+        <tr class="fragment"><td>W+A quant / SmoothQuant</td><td>Latency + memory</td><td>Quantize activations too; SmoothQuant shifts outlier scale weights&#8596;activations</td><td>Activation outliers are hard; more accuracy risk than weight-only</td></tr>
+        <tr class="fragment"><td>FP8 (E4M3 / E5M2)</td><td>Latency + memory</td><td>8-bit float keeps dynamic range; native tensor-core support on new GPUs</td><td>Needs Hopper-class HW; scaling/overflow care</td></tr>
+        <tr class="fragment"><td>FlashAttention</td><td>Latency + memory (activations)</td><td>IO-aware fused kernel; tile in SRAM, never materialize the n&times;n matrix</td><td>Kernel complexity; exact same math, just fused</td></tr>
+        <tr class="fragment"><td>PagedAttention</td><td>Memory (fragmentation)</td><td>Page the KV cache like OS virtual memory &#8594; near-zero waste</td><td>Indirection overhead; needs a block manager (vLLM)</td></tr>
+        <tr class="fragment"><td>Prefix caching</td><td>Latency (TTFT) + compute</td><td>Reuse KV for a shared prompt prefix across requests</td><td>Cache memory &amp; eviction policy; only helps shared prefixes</td></tr>
+        <tr class="fragment"><td>Continuous batching</td><td>Throughput</td><td>Add/remove sequences from the batch every step &#8594; no idle slots</td><td>Scheduler complexity; can hurt p99 latency under load</td></tr>
+        <tr class="fragment"><td>Chunked prefill</td><td>Latency (p99 TPOT)</td><td>Split long prefills into chunks, interleave with decode steps</td><td>Tune chunk size; tiny prefill overhead</td></tr>
+        <tr class="fragment"><td>Speculative decoding</td><td>Latency (TPOT)</td><td>Draft model proposes k tokens; target verifies in one pass</td><td>Only wins at high acceptance &amp; small batch; draft cost</td></tr>
+        <tr class="fragment"><td>Tensor parallelism</td><td>Memory (fits big models) + latency</td><td>Split each layer's matrices across GPUs; all-reduce per layer</td><td>All-reduce every layer &#8594; needs fast NVLink; diminishing returns</td></tr>
+        <tr class="fragment"><td>Disaggregation</td><td>Latency (isolates TTFT/TPOT)</td><td>Run prefill (compute-bound) and decode (memory-bound) on separate workers</td><td>Must ship KV cache between workers; extra orchestration</td></tr>
+        <tr class="fragment"><td>SGLang / RadixAttention</td><td>Latency (TTFT) + compute</td><td>Radix-tree prefix cache reuses KV for any shared prefix length; XGrammar enforces structured output at &lt;3&thinsp;% overhead</td><td>Younger ecosystem; radix-tree bookkeeping overhead</td></tr>
+        <tr class="fragment"><td>KV cache offloading</td><td>Memory (GPU &rarr; CPU/NVMe)</td><td>Evict idle-sequence KV blocks to CPU RAM or NVMe; reload on resume</td><td>PCIe bandwidth bottleneck on reload; latency spike for paged-out sequences</td></tr>
+        <tr class="fragment"><td>Multi-LoRA (S-LoRA)</td><td>Cost (N adapters on 1 GPU)</td><td>Keep base resident; swap low-rank A/B matrices per request; co-batch same-adapter requests</td><td>Long-tail adapters can&rsquo;t co-batch; cold adapter page-in adds latency</td></tr>
+        <tr class="fragment"><td>Structured output</td><td>Reliability (zero parse failures)</td><td>Precompile grammar to per-state token-ID bitmasks; mask logits each step (XGrammar / Outlines)</td><td>Na&iuml;ve FSM traversal is O(vocab) per step &mdash; must precompile or it bottlenecks</td></tr>
+        <tr class="fragment"><td>CUDA graphs</td><td>Latency (kernel-launch overhead)</td><td>Capture static decode-step CUDA kernel graph once; replay it &mdash; eliminates CPU&rarr;GPU dispatch per step</td><td>Requires static shapes; dynamic batching may need fallback path</td></tr>
+      </tbody>
+    </table>
+    <aside class="notes">
+      This is the interview cheat-sheet for serving. I reveal rows top to bottom and group them mentally: the first cluster is about <em>memory</em> (KV cache and the variants that shrink it &mdash; GQA/MQA/MLA and quantization). The second is <em>kernels &amp; memory layout</em> (FlashAttention fuses the attention math so you never write the n&times;n matrix to HBM; PagedAttention and prefix caching manage the KV bytes). The third is <em>scheduling &amp; parallelism</em> (continuous batching and chunked prefill keep the GPU busy without spiking p99; speculative decoding, tensor parallelism, and disaggregation attack latency). The single thread to point at: decode is memory-bandwidth bound, so almost everything here is ultimately about moving fewer bytes or keeping the GPU full &mdash; not about raw FLOPs.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 8 · THE MATH
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">The math · (a) KV-cache bytes</p>
+    <h2>How big is the KV cache?</h2>
+    <p>For one sequence, the cached keys and values total:</p>
+    $$ \text{bytes} = 2 \cdot L \cdot n_{kv} \cdot d_{head} \cdot S \cdot b $$
+    <p class="eqnote fragment">The leading <b>2</b> = one copy for <strong>K</strong>, one for <strong>V</strong> &mdash; you cache both.</p>
+    <p class="eqnote fragment"><b>\(L\)</b> = number of transformer layers (each keeps its own KV); <b>\(n_{kv}\)</b> = number of KV heads (MHA: = query heads; GQA/MQA: fewer).</p>
+    <p class="eqnote fragment"><b>\(d_{head}\)</b> = dimension per head; <b>\(S\)</b> = sequence length (tokens cached so far); <b>\(b\)</b> = bytes per element (FP16 &#8594; \(b=2\), FP8/INT8 &#8594; \(b=1\)).</p>
+    <p class="eqnote fragment">Linear in \(S\) and in batch \(B\): total <strong>\(\times B\)</strong>. This is <em>per request</em> &mdash; multiply by concurrency.</p>
+    <aside class="notes">
+      This is the most-asked formula in serving interviews, so I make every symbol concrete. The factor of 2 trips people up &mdash; it is not the FP16 byte count, it is because every layer stores <em>both</em> a key tensor and a value tensor. L is layers because attention is per-layer and each layer keeps its own cache. n_kv is the number of KV heads, and this is exactly the knob GQA and MQA turn: full multi-head attention has n_kv equal to the query-head count, MQA collapses it to 1, GQA picks something in between like 8. d_head is per-head dimension; note n_kv times d_head is the KV model width, not the full hidden size. S is how many tokens are cached, which grows every decode step, so the cache is small at the start of a generation and large at the end. b is bytes per element &mdash; the entire pitch of FP8 or INT8 KV cache is halving b. And the whole thing scales linearly with batch size, which is why concurrency, not weights, is what usually OOMs a server.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math · (b) arithmetic intensity</p>
+    <h2>Why decode is memory-bound</h2>
+    <p>The roofline lens: compare work done per byte moved.</p>
+    $$ I = \frac{\text{FLOPs}}{\text{bytes moved}} \qquad \text{throughput} = \min\!\big(P_{\text{peak}},\; I \cdot BW\big) $$
+    <p class="eqnote fragment"><b>\(I\)</b> = arithmetic intensity; <b>\(P_{\text{peak}}\)</b> = peak compute (FLOP/s); <b>\(BW\)</b> = memory bandwidth (bytes/s).</p>
+    <p class="eqnote fragment"><strong>Decode, batch 1:</strong> read all weights to make <em>one</em> token &#8594; \(I\) tiny &#8594; you're stuck on the \(I\!\cdot\!BW\) (memory) side of the roofline.</p>
+    <p class="eqnote fragment"><strong>Batching:</strong> reuse the same weights for \(B\) tokens &#8594; \(I \approx B\!\cdot\!(\text{ops/byte})\) rises, so \(I\!\cdot\!BW\) climbs until it hits \(P_{\text{peak}}\).</p>
+    <p class="eqnote fragment">Once \(I \cdot BW \ge P_{\text{peak}}\) you're <strong>compute-bound</strong> &#8594; bigger batches stop helping latency. That knee is the sweet spot.</p>
+    <aside class="notes">
+      The roofline model is the cleanest way to explain why every decode trick exists. Arithmetic intensity is FLOPs per byte moved from HBM. At batch one, generating a single token requires reading every weight in the model from memory but doing only a handful of FLOPs with each &mdash; so intensity is tiny and you sit way over on the memory-bound left side of the roofline, where achievable throughput is bandwidth times intensity. The GPU's compute units are mostly idle; you are bottlenecked on moving weight bytes. Batching is the fix: when B sequences decode together, you read each weight once and reuse it for all B tokens, so intensity scales with B and the bandwidth-limited throughput climbs. This continues until intensity is high enough that you hit the flat peak-compute ceiling &mdash; the roofline knee &mdash; after which adding batch raises latency without raising throughput. That knee is exactly the batch size a good scheduler targets, and it's why prefill (which processes many tokens at once) is compute-bound while decode is memory-bound.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math · (c) latency &amp; speculative speedup</p>
+    <h2>End-to-end latency, and the spec-decoding win</h2>
+    <p>For a request that emits \(N\) tokens:</p>
+    $$ T_{\text{total}} = \text{TTFT} + (N-1)\cdot \text{TPOT} $$
+    <p class="eqnote fragment"><b>TTFT</b> = time to first token (the prefill cost); <b>TPOT</b> = time per output token (each decode step). The \(N\!-\!1\) is because the first token is already in TTFT.</p>
+    <p class="eqnote fragment">Short replies &#8594; TTFT dominates; long replies &#8594; the \((N\!-\!1)\!\cdot\!\text{TPOT}\) term dominates.</p>
+    <p class="eqnote fragment"><strong>Speculative decoding:</strong> a draft proposes \(\gamma\) tokens, the target verifies them in one pass. With acceptance rate \(\alpha\), expected tokens generated per cycle is</p>
+    $$ \mathbb{E}[\text{tokens/cycle}] = \frac{1-\alpha^{\gamma+1}}{1-\alpha} $$
+    <p class="eqnote fragment">Speedup &#8776; that many target-steps' worth of tokens per verify pass. High \(\alpha\) &#8594; big win; low \(\alpha\) &#8594; the draft cost can make it a <em>slowdown</em>.</p>
+    <aside class="notes">
+      Two ideas here. First, the latency decomposition: total time is time-to-first-token plus per-output-token time times the remaining tokens. The minus one matters &mdash; the first token's cost is the prefill, which is TTFT, so you only pay TPOT for the other N minus one. The teaching point is that which term dominates flips with reply length: a one-line answer is all TTFT, a long essay is all TPOT, and that determines whether you optimize prefill or decode. The honest caveat the source asks for: this treats TPOT as constant, but it actually drifts up as the KV cache grows and varies with batch composition, so the formula is a planning estimate, not a guarantee. Second, speculative decoding: a cheap draft model guesses gamma tokens ahead and the expensive target verifies all of them in a single forward pass. With per-token acceptance probability alpha, the expected number of tokens accepted per verification cycle is that geometric-series formula &mdash; roughly 1 over 1 minus alpha for large gamma. Because the output is rejection-sampled to match the target's distribution, quality is unchanged. The whole thing only pays off when alpha is high enough that the extra accepted tokens outweigh the draft model's cost; at low acceptance, or at large batch where the GPU is already saturated, it becomes a net slowdown.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 9 · IN CODE
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">In code · the decode loop</p>
+    <h2>Autoregressive decode with a growing KV cache</h2>
+    <pre><code class="language-python" data-trim data-line-numbers="1-6|8-14|16-23">def decode(model, prompt_ids, max_new=128):
+    # PREFILL: one pass over the whole prompt, returns past_kv
+    logits, past_kv = model(prompt_ids, past_kv=None)
+    next_id = logits[:, -1].argmax(-1, keepdim=True)
+    out = [next_id]
+
+    # DECODE: feed ONE token at a time, reuse + grow the cache
+    for _ in range(max_new - 1):
+        logits, past_kv = model(next_id, past_kv=past_kv)
+        next_id = logits[:, -1].argmax(-1, keepdim=True)
+        out.append(next_id)
+        if next_id.item() == EOS:
+            break
+    return torch.cat(out, dim=-1)
+
+class Attn:
+    def forward(self, x, past_kv):
+        k, v = self.k_proj(x), self.v_proj(x)   # only for the NEW token
+        if past_kv is not None:
+            pk, pv = past_kv
+            k = torch.cat([pk, k], dim=1)        # concat past K
+            v = torch.cat([pv, v], dim=1)        # concat past V
+        out = attention(self.q_proj(x), k, v)    # attend over full cache
+        return out, (k, v)                       # return grown cache</code></pre>
+    <aside class="notes">
+      Walk the two phases. Prefill, lines one to six: the model sees the entire prompt in a single forward pass &mdash; this is compute-bound and its wall-clock is your TTFT &mdash; and it returns past_kv, the cached keys and values for every prompt token. We take the last position's logits and greedily pick the first generated token. Decode, lines eight to fourteen: now we feed exactly one token at a time. The crucial efficiency is that we pass past_kv back in, so the model never re-encodes earlier tokens; each step is one TPOT. The attention class at the bottom shows the actual mechanism: we project K and V only for the new token, then concat them onto the cached past along the sequence dimension, attend the new query over the full grown cache, and return the enlarged cache for next step. That concat is literally the KV cache growing by one row per step &mdash; which is exactly the S in the bytes formula incrementing. In production this concat is replaced by paged writes into pre-allocated blocks, but the logic is identical.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">In code · absmax quantize</p>
+    <h2>Tiny absmax INT8 quantize / dequantize</h2>
+    <pre><code class="language-python" data-trim data-line-numbers="1-6|8-10|12-16">import torch
+
+def absmax_quantize(w, bits=8):
+    qmax = 2 ** (bits - 1) - 1          # 127 for int8
+    scale = w.abs().max() / qmax        # one scale per tensor
+    q = torch.round(w / scale).clamp(-qmax, qmax).to(torch.int8)
+    return q, scale
+
+def dequantize(q, scale):
+    return q.to(torch.float16) * scale  # back to (lossy) float
+
+# round-trip: store q (1 byte) + one scale, recover ~w
+w = torch.randn(4096, 4096, dtype=torch.float16)
+q, scale = absmax_quantize(w)           # 2x smaller than fp16
+w_hat = dequantize(q, scale)
+err = (w - w_hat).abs().mean()          # small if no big outliers</code></pre>
+    <aside class="notes">
+      This is the simplest real quantizer and the mental model behind GPTQ and AWQ. Absmax: find the largest absolute value in the tensor, divide by qmax (127 for signed int8) to get a single scale, then map every weight to the nearest integer in minus-127 to 127. Storage drops from two bytes to one per weight, a two-times memory and bandwidth win &mdash; and bandwidth is what decode is bound on, so this is also a speed win. Dequantize just multiplies the integers back by the scale to recover an approximate float. The mean-error line is the teaching hook: error stays tiny <em>unless</em> the tensor has a few huge outliers, because one giant value blows up the scale and crushes the resolution for everything else. That outlier problem is precisely why activation quantization is hard and why SmoothQuant migrates outlier magnitude from activations into weights, and why real methods use per-channel or per-group scales instead of one scale per tensor.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 10 · WORKED EXAMPLE
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Worked example · (1) KV-cache size</p>
+    <h2>KV cache for a 70B model at 8K context</h2>
+    <p>Plug a 70B-class config into \( \text{bytes} = 2 \cdot L \cdot n_{kv} \cdot d_{head} \cdot S \cdot b \):</p>
+    <ol>
+      <li class="fragment"><strong>Config.</strong> \(L=80\) layers, \(n_{kv}=8\) KV heads (GQA), \(d_{head}=128\), \(S=8192\) tokens, FP16 &#8594; \(b=2\) bytes.</li>
+      <li class="fragment"><strong>Per-token, all layers.</strong> \(2 \cdot 80 \cdot 8 \cdot 128 = 163{,}840\) bytes/token (the K+V for one position across all layers).</li>
+      <li class="fragment"><strong>&times; sequence length.</strong> \(163{,}840 \cdot 8192 = 1{,}342{,}177{,}280\) bytes.</li>
+      <li class="fragment"><strong>&times; bytes/elt.</strong> \(\times 2 = 2{,}684{,}354{,}560\) bytes \(\approx\) <strong>2.5 GiB (&#8776; 2.68 GB) per request.</strong></li>
+      <li class="fragment"><strong>Punchline.</strong> One 8K request &#8776; 2.5 GiB of KV. Just <strong>10 concurrent</strong> requests &#8776; 25 GB &mdash; KV, not weights, sets your concurrency ceiling.</li>
+    </ol>
+    <p class="eqnote fragment">Had this been full MHA (\(n_{kv}=64\)), it'd be \(8\times\) bigger &#8776; 20 GB/req &mdash; that's why GQA exists.</p>
+    <aside class="notes">
+      Do this arithmetic live; interviewers love watching the units. Config first: 80 layers, 8 KV heads thanks to GQA, head dim 128, 8192 tokens, FP16 so 2 bytes. I deliberately compute it in two pieces to keep the factor of 2 honest. First, bytes per token across all layers: the leading 2 for K and V, times 80 layers, times 8 KV heads, times 128 head dim, equals 163,840 bytes for one token's worth of cache. Then multiply by the 8192 sequence positions to get about 1.34 billion, and finally by the 2 bytes per element to land at roughly 2.68 billion bytes, which is about 2.1 gigabytes for a single 8K request. The takeaway I hammer: weights are a fixed one-time cost, but KV scales with both context and concurrency, so ten simultaneous 8K users already need 21 gigabytes of KV cache on top of the model. And the closing line motivates the whole GQA section &mdash; if this were full multi-head attention with 64 KV heads the cache would be eight times larger, about 17 gigabytes per request, which would make long-context serving nearly impossible. That memory pressure is the single biggest reason modern models ship with GQA.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Worked example · (2) concurrency budget</p>
+    <h2>How many 4K sequences fit on an 80 GB GPU?</h2>
+    <p>A 13B model in FP16 on one 80 GB GPU &mdash; how much concurrency does the leftover memory buy?</p>
+    <ol>
+      <li class="fragment"><strong>Weights.</strong> 13B params &times; 2 bytes (FP16) = 26 GB.</li>
+      <li class="fragment"><strong>Overhead.</strong> Reserve ~10 GB for activations, CUDA context, fragmentation &amp; temp buffers.</li>
+      <li class="fragment"><strong>KV budget.</strong> \(80 - 26 - 10 = \) <strong>44 GB</strong> left for the KV cache.</li>
+      <li class="fragment"><strong>KV per 4K seq.</strong> Say \(L=40,\ n_{kv}=8,\ d_{head}=128,\ b=2,\ S=4096\): \(2\cdot40\cdot8\cdot128\cdot4096\cdot2 \approx 0.69\) GB/seq.</li>
+      <li class="fragment"><strong>Concurrency.</strong> \(44 \div 0.69 \approx\) <strong>~63 concurrent 4K sequences.</strong></li>
+    </ol>
+    <p class="eqnote fragment">Quantize weights to INT4 (&#8776;6.5 GB) &#8594; ~63.5 GB for KV &#8594; <strong>~90+ sequences</strong>. Quantization buys concurrency, not just a smaller model.</p>
+    <aside class="notes">
+      This is the capacity-planning question, and the method matters more than the exact number. Start with weights: 13 billion parameters at 2 bytes each is 26 gigabytes &mdash; the rule of thumb is roughly 2 gigabytes per billion params in FP16. Then you must reserve overhead that beginners forget: activations, the CUDA context, allocator fragmentation, and temporary buffers, call it 10 gigabytes. That leaves 44 gigabytes of the 80 for KV cache. Now size one 4K-token sequence with a plausible 13B config &mdash; 40 layers, 8 KV heads, head dim 128, FP16, 4096 tokens &mdash; which works out to about 0.69 gigabytes per sequence. Divide 44 by 0.69 and you get roughly 63 concurrent 4K sequences. The closing insight is the one that surprises people: quantizing the weights to INT4 shrinks them to about 6.5 gigabytes, which frees nearly 20 more gigabytes for KV and pushes concurrency past 90 sequences. So quantization isn't only about fitting a bigger model &mdash; on a model that already fits, it directly buys you throughput by converting freed weight memory into more KV cache, more batch, and a higher roofline.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 11 · DECISION GUIDE
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">When to use what</p>
+    <h2>Route the optimization by workload</h2>
+    <div class="mermaid">
+flowchart TD
+  Q{"What's the workload?"}
+  Q -->|"Interactive chat<br/>low TTFT &amp; TPOT"| C["Smaller / quantized model<br/>+ continuous batching<br/>+ speculative decoding<br/>+ prefix caching"]
+  Q -->|"High-throughput<br/>batch / offline"| B["Big batch (saturate roofline)<br/>+ tensor parallel<br/>+ max KV via paging"]
+  Q -->|"Memory-constrained<br/>fit on small GPU"| M["Quantize weights (AWQ/FP8)<br/>+ GQA / MLA<br/>+ KV-cache quant<br/>+ PagedAttention"]
+    </div>
+    <p class="eqnote fragment">Same model, three different stacks. The <em>latency budget vs. cost budget vs. memory budget</em> picks the levers.</p>
+    <aside class="notes">
+      This is the decision tree to memorize for the system-design question. Three archetypes. Interactive chat lives and dies by per-user latency: keep the model small or quantized so each forward pass is fast, run continuous (in-flight) batching so a long request can't block a short one, add speculative decoding to harvest the spare compute at low batch, and prefix-cache the shared system prompt to slash TTFT. High-throughput batch/offline flips every priority to cost-per-token: push batch size up to the compute roofline, use tensor parallelism to fit a bigger model and parallelize the now-compute-bound work, and maximize concurrency by paging the KV cache. Memory-constrained is a third axis — you're just trying to fit: quantize the weights, shrink the per-sequence KV with GQA or MLA, quantize the KV cache itself, and use paging to kill fragmentation. The mistake juniors make is bringing the offline config (huge batches) to a chat product and blowing the latency SLO.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">When to use what · SLO sizing</p>
+    <h2>Sizing to TTFT &lt; 500 ms &amp; TPOT &lt; 50 ms</h2>
+    <div class="approach-steps">
+      <span class="anim-node">Quality bar<small>pick model size</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Quantize<small>AWQ / FP8</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Parallelism<small>fit, then TP</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Batch size<small>to TPOT budget</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Chunked prefill<small>to TTFT budget</small></span>
+    </div>
+    <ol>
+      <li class="fragment"><strong>Size from quality first.</strong> The smallest model that clears your eval bar &mdash; smaller is faster &amp; cheaper.</li>
+      <li class="fragment"><strong>Quantize to fit &amp; free KV.</strong> AWQ/FP8 shrinks weights, leaving HBM for KV cache and bigger batches.</li>
+      <li class="fragment"><strong>Parallelism only to fit.</strong> Prefer single-GPU (no all-reduce); add TP on NVLink only when weights+KV don't fit.</li>
+      <li class="fragment"><strong>Batch to the TPOT budget.</strong> Largest batch where decode step still keeps TPOT &lt; 50 ms &mdash; not max throughput.</li>
+      <li class="fragment"><strong>Chunked prefill for TTFT.</strong> Cap prefill tokens/step so a long prompt can't push TTFT past 500 ms; measure <em>goodput</em> under load.</li>
+    </ol>
+    <aside class="notes">
+      Walk this as the answer to "given an SLO, how do you pick size/quant/batch/parallelism." Order matters. First the quality bar fixes the smallest acceptable model &mdash; never start big "to be safe," because every extra parameter costs latency. Then quantize (AWQ or FP8) to fit it on fewer GPUs; the second-order win is that smaller weights leave more HBM for KV cache, which is what actually limits concurrency. Parallelism is a fit tool, not a speed tool: a single GPU avoids the per-layer all-reduce of tensor parallelism, so only add TP (and only within an NVLink node) when the model plus its KV won't fit. Now the two SLO knobs. TPOT &lt; 50 ms is a decode-latency budget &mdash; pick the largest batch that still clears it, because batch trades throughput for per-token latency. TTFT &lt; 500 ms is a prefill budget &mdash; enable chunked prefill so a long prompt is split across steps and can't monopolize the GPU and spike first-token latency. Finally, the number you actually report is goodput: throughput of requests that met both SLOs under realistic load, not peak tokens/sec.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 12 · PITFALLS / MISCONCEPTIONS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Pitfalls · misconceptions</p>
+    <h2>People think X, but actually Y (1/2)</h2>
+    <div class="callout warn"><span class="t">&#9888; Pitfall</span>
+      <ul>
+        <li class="fragment"><strong>Think:</strong> the weights fit in HBM, so memory is fine. <strong>Actually:</strong> the <em>KV cache</em> grows with concurrency &times; context and OOMs under load &mdash; cap concurrent tokens, page KV, shrink it with GQA/KV-quant.</li>
+        <li class="fragment"><strong>Think:</strong> tensor parallelism always cuts latency. <strong>Actually:</strong> TP adds an all-reduce per layer; at small-batch decode, comms dominate &mdash; TP=8 can give &#8776; the same latency at 8&times; the cost. TP is for <em>fitting</em> a model, not speeding small-batch decode.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      First two, both about confusing "fits" with "fast/safe." Number one is the single most common production incident: weights are 26 GB on an 80 GB card, looks comfortable at QPS=1, then it OOMs the moment real traffic arrives. The culprit is the KV cache &mdash; every concurrent sequence allocates KV proportional to its length, so the sum, not the weights, exhausts memory. The fix is admission control (cap max concurrent sequences / total tokens), PagedAttention to kill fragmentation, and GQA or KV-cache quantization to shrink per-sequence KV. Number two: people reach for tensor parallelism to "make it faster." But TP shards each matmul and needs an all-reduce after the row-parallel projections &mdash; about two per transformer block, every token, on the critical path. At small-batch decode the work is bandwidth/latency-bound and barely parallelizes, so you add communication overhead and get roughly the same latency while paying for 8 GPUs. TP's real job is capacity (fit a model that doesn't fit on one GPU) and compute-bound prefill, not low-batch decode latency.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Pitfalls · misconceptions</p>
+    <h2>People think X, but actually Y (2/2)</h2>
+    <div class="callout warn"><span class="t">&#9888; Pitfall</span>
+      <ul>
+        <li class="fragment"><strong>Think:</strong> tokens/sec is the benchmark. <strong>Actually:</strong> raw tok/s hides batch size, input/output lengths, and SLO violations &mdash; report <em>goodput under SLO</em>, plus TTFT/TPOT p50/p95/p99 with the request distribution.</li>
+        <li class="fragment"><strong>Think:</strong> INT4 perplexity barely moved, so it's safe. <strong>Actually:</strong> perplexity averages over tokens and misses rare decisive ones &mdash; agentic / long-context evals (exact JSON keys, function names, long-horizon consistency) can still collapse.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Two more, both about misleading metrics. Tokens/sec alone is meaningless for comparison: a giant batch inflates tok/s while p99 latency is dreadful, and the number says nothing about input-vs-output token mix, concurrency, or prompt/generation lengths. The honest report is goodput &mdash; throughput of requests that met the latency SLO &mdash; plus TTFT and TPOT percentiles (p50/p95/p99) and the exact request distribution, hardware, and precision, so it's apples-to-apples. The INT4 trap is subtler and a favorite interview probe: perplexity is an average next-token likelihood, insensitive to the rare tokens that decide a tool call &mdash; a JSON key, a function name, the one digit that breaks long-horizon consistency. Small per-token probability shifts compound over a long agentic trajectory, so a model that "looks fine" on perplexity can fail catastrophically on task-specific evals. Diagnose with real task evals, check error compounding over long trajectories, inspect which modules were quantized (lm_head and attention are sensitive), and keep critical tensors higher precision.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 13 · WHAT'S NEW + PAPERS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">What's new</p>
+    <h2>The serving-systems frontier</h2>
+    <div class="callout whatsnew"><span class="t">&#128640; What's new</span>
+      <ul>
+        <li class="fragment"><strong>Memory is the OS problem.</strong> PagedAttention (vLLM) treats KV cache like virtual memory &mdash; blocks, block tables, copy-on-write sharing &mdash; near-eliminating fragmentation.</li>
+        <li class="fragment"><strong>IO-aware kernels won.</strong> FlashAttention / FlashAttention-2 made exact attention memory-traffic-bound, not FLOP-bound.</li>
+        <li class="fragment"><strong>Self-drafting speculation.</strong> Medusa (extra heads) and EAGLE-2 (feature-level draft trees) drop the separate draft model.</li>
+        <li class="fragment"><strong>Architectural KV cuts.</strong> DeepSeek-V2's MLA compresses K/V into a latent &mdash; MQA-level memory, more expressiveness.</li>
+        <li class="fragment"><strong>Phase-aware scheduling.</strong> Chunked prefill (Sarathi-Serve) and prefill/decode disaggregation (DistServe) optimize for goodput, not raw tok/s.</li>
+        <li class="fragment"><strong>Serving runtimes competed.</strong> SGLang&rsquo;s RadixAttention (2023) generalises prefix caching to a radix tree &mdash; any shared prefix length hits; XGrammar (2024) makes structured output a throughput-safe first-class feature used by both SGLang and vLLM.</li>
+        <li class="fragment"><strong>Adapter serving scaled.</strong> S-LoRA (2023) showed hundreds of LoRA adapters can share one GPU by paging low-rank A/B matrices and co-batching adapter-affine requests &mdash; eliminating the one-GPU-per-adapter tax.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Where the field is now &mdash; five threads. One: PagedAttention reframed KV memory as an OS paging problem; fixed-size blocks, a block table mapping logical to physical, and copy-on-write sharing for parallel sampling/beam search turned majority-waste allocation into near-zero fragmentation and is the foundation of vLLM. Two: FlashAttention and its successor made attention exact but IO-aware &mdash; tiling and online softmax keep intermediates in SRAM and never write the N&times;N matrix to HBM, so the win is reduced memory traffic, not fewer FLOPs. Three: speculative decoding went self-drafting &mdash; Medusa bolts extra prediction heads onto the target model and verifies a tree; EAGLE-2 drafts at the hidden-feature level with dynamic draft trees for higher acceptance &mdash; both eliminate hosting a separate draft model. Four: MLA in DeepSeek-V2 attacks KV cost in the architecture itself, compressing keys/values into a low-rank latent that's cached and up-projected at attention time &mdash; MQA-level memory but more expressive. Five: scheduling got phase-aware &mdash; chunked prefill (Sarathi-Serve) interleaves prefill chunks with decode to stop latency spikes, and DistServe disaggregates prefill and decode onto separate pools so each runs on ideal hardware, both chasing goodput rather than headline throughput.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">What's new · papers</p>
+    <h2>Papers &mdash; verified links</h2>
+    <div class="cols">
+      <div>
+        <div class="paper fragment"><a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener noreferrer">Efficient Memory Management for LLM Serving with PagedAttention (vLLM)</a> <span class="meta">&mdash; Kwon et al., 2023.</span></div>
+        <div class="paper fragment"><a href="https://arxiv.org/abs/2205.14135" target="_blank" rel="noopener noreferrer">FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness</a> <span class="meta">&mdash; Dao et al., 2022.</span></div>
+        <div class="paper fragment"><a href="https://arxiv.org/abs/2307.08691" target="_blank" rel="noopener noreferrer">FlashAttention-2: Faster Attention with Better Parallelism</a> <span class="meta">&mdash; Dao, 2023.</span></div>
+        <div class="paper fragment"><a href="https://arxiv.org/abs/2401.10774" target="_blank" rel="noopener noreferrer">Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads</a> <span class="meta">&mdash; Cai et al., 2024.</span></div>
+        <div class="paper fragment"><a href="https://arxiv.org/abs/2406.16858" target="_blank" rel="noopener noreferrer">EAGLE-2: Faster Inference with Dynamic Draft Trees</a> <span class="meta">&mdash; Li et al., 2024.</span></div>
+        <div class="paper fragment"><a href="https://arxiv.org/abs/2405.04434" target="_blank" rel="noopener noreferrer">DeepSeek-V2 (Multi-head Latent Attention)</a> <span class="meta">&mdash; DeepSeek-AI, 2024.</span></div>
+      </div>
+      <div>
+        <div class="paper fragment"><a href="https://arxiv.org/abs/2403.02310" target="_blank" rel="noopener noreferrer">Taming the Throughput-Latency Tradeoff with Sarathi-Serve (chunked prefill)</a> <span class="meta">&mdash; Agrawal et al., 2024.</span></div>
+        <div class="paper fragment"><a href="https://arxiv.org/abs/2401.09670" target="_blank" rel="noopener noreferrer">DistServe: Disaggregating Prefill and Decoding for Goodput</a> <span class="meta">&mdash; Zhong et al., 2024.</span></div>
+        <div class="paper fragment"><a href="https://arxiv.org/abs/2211.10438" target="_blank" rel="noopener noreferrer">SmoothQuant: Accurate &amp; Efficient PTQ for LLMs</a> <span class="meta">&mdash; Xiao et al., 2022.</span></div>
+        <div class="paper fragment"><a href="https://arxiv.org/abs/2306.00978" target="_blank" rel="noopener noreferrer">AWQ: Activation-aware Weight Quantization</a> <span class="meta">&mdash; Lin et al., 2023.</span></div>
+        <div class="paper fragment"><a href="https://arxiv.org/abs/2210.17323" target="_blank" rel="noopener noreferrer">GPTQ: Accurate Post-Training Quantization for GPTs</a> <span class="meta">&mdash; Frantar et al., 2022.</span></div>
+        <div class="paper fragment"><a href="https://arxiv.org/abs/2312.07104" target="_blank" rel="noopener noreferrer">SGLang: Efficient Execution of Structured Language Model Programs</a> <span class="meta">&mdash; Zheng et al., 2023.</span></div>
+        <div class="paper fragment"><a href="https://arxiv.org/abs/2311.03285" target="_blank" rel="noopener noreferrer">S-LoRA: Serving Thousands of Concurrent LoRA Adapters</a> <span class="meta">&mdash; Sheng et al., 2023.</span></div>
+      </div>
+    </div>
+    <aside class="notes">
+      Verified primary sources, grouped by theme so students can pick a reading path. Left column is the serving-systems and speculation lineage: PagedAttention/vLLM for memory management, the two FlashAttention papers for IO-aware kernels, Medusa and EAGLE-2 for self-drafting speculative decoding, and DeepSeek-V2 for MLA's architectural KV compression. Right column splits into scheduling and quantization: Sarathi-Serve for chunked prefill and DistServe for prefill/decode disaggregation; then the three quantization staples &mdash; SmoothQuant (migrate activation outliers into weights for W8A8), AWQ (scale the salient ~1% of channels), and GPTQ (second-order error-compensated INT4). If a student reads only three, I'd pick PagedAttention (memory), FlashAttention (kernels), and AWQ or GPTQ (quantization) &mdash; those three cover the bulk of what a modern serving stack actually runs.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 14 · PRACTICE
+     ============================================================ -->
+<section>
+  <p class="kicker">Practice</p>
+  <h2>Practice &mdash; click a question to reveal the answer</h2>
+  <p class="small muted">Full bank: <a href="../../interview-prep/11-inference-optimization-and-serving.md">11 &middot; Inference Optimization &amp; Serving</a> &mdash; from the answer key, condensed.</p>
+
+  <!-- ===== SET 1 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">What is the KV cache, and what goes wrong at decode time without it? <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Each new token attends to all previous tokens' keys and values; the KV cache stores per-layer K/V so they're computed once and reused. Without it, every decode step recomputes K/V for the whole prefix, making total generation cost quadratic in length. <span class="watch">It caches attention K/V per layer &mdash; not the output logits.</span></div></li>
+
+      <li class="qa"><span class="q">Define TTFT and TPOT. Which dominates a long generation vs. a short one? <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">TTFT (time to first token) is request&#8594;first token, dominated by prefill. TPOT (time per output token / ITL) is steady-state decode latency. Long generations are TPOT-bound (TPOT &times; N dominates); short ones are TTFT-bound. <span class="watch">Report both &mdash; one alone hides the other workload's pain.</span></div></li>
+
+      <li class="qa"><span class="q">Why is decode memory-bandwidth bound while prefill is compute-bound? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Prefill processes all prompt tokens in parallel &mdash; big high-intensity matmuls that saturate compute. Decode does one tiny matmul per step but must stream the full weights from HBM, so bandwidth dominates. This is exactly why large batches help decode (reuse one weight read across many tokens).</div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 2 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Give the KV-cache size formula and estimate it for 80 layers, 8 KV heads, head_dim 128, FP16, 8K context. <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer"><code>bytes = 2 &times; layers &times; kv_heads &times; head_dim &times; seq_len &times; dtype_bytes</code>. Per token/layer: 2&times;8&times;128&times;2 = 4 KB; &times;80 layers = 320 KB/token; &times;8192 &#8776; <strong>2.5 GB</strong> for one request. <span class="watch">Use num_kv_heads (GQA), not query heads, and don't drop the &times;2 for K and V.</span></div></li>
+
+      <li class="qa"><span class="q">How do GQA/MQA change KV-cache memory vs. MHA, and what's the trade-off? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">KV size scales with num_kv_heads. MQA shares one K/V across all query heads (cuts cache by the head count); GQA shares across groups (e.g. 8&times;). Big memory/bandwidth savings enable longer context/bigger batches, for a slight quality loss. <span class="watch">Query heads &amp; attention FLOPs are unchanged &mdash; only K/V heads shrink.</span></div></li>
+
+      <li class="qa"><span class="q">How does MLA attack KV-cache cost, and what does it trade? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Multi-head Latent Attention (DeepSeek) compresses K/V into a low-rank latent that's cached, then up-projects at attention time &mdash; MQA-level memory with more expressiveness than GQA/MQA. Trade: extra decompression compute per step and architectural complexity. <span class="watch">It's baked into the architecture/pretraining &mdash; not a post-hoc serving toggle.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 3 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Explain PagedAttention and the OS analogy. What does it fix? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Naive serving pre-allocates a contiguous max-length KV buffer per request &mdash; huge internal/external fragmentation. PagedAttention splits KV into fixed-size blocks mapped by a block table, allocated on demand. Logical positions = virtual addresses, blocks = pages, block table = page table; copy-on-write enables cheap prefix sharing.</div></li>
+
+      <li class="qa"><span class="q">What problem does FlashAttention solve, and why "IO-aware"? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Naive attention materializes the full N&times;N matrix in HBM (memory-bound, O(N&sup2;) memory). FlashAttention tiles with online softmax, keeping intermediates in SRAM and never writing the full matrix. "IO-aware" because the win is reduced HBM traffic, not fewer FLOPs. <span class="watch">It's exact attention &mdash; not an approximation.</span></div></li>
+
+      <li class="qa"><span class="q">What is chunked prefill, what does it solve, and what's the tuning knob? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">It splits a long prompt's prefill into token chunks across scheduler steps so prefill interleaves with ongoing decode, preventing a monolithic prefill from stalling everyone's decode (TPOT spikes). Knob: chunk size / per-step token budget &mdash; bigger favors prefill throughput, smaller protects decode latency. <span class="watch">Same total work, just rescheduled &mdash; it doesn't reduce compute.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 4 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Define continuous batching and contrast it with static batching. <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Static batching runs a fixed group to completion before admitting new requests &mdash; slots idle as sequences finish (head-of-line blocking). Continuous (in-flight) batching schedules at the iteration/token level: a finished sequence's slot frees immediately and a queued request joins mid-flight, keeping the batch full and maximizing utilization.</div></li>
+
+      <li class="qa"><span class="q">Why does scaling TP=1&#8594;TP=8 barely cut latency while cost goes up 8&times;? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">At small-batch decode the work is bandwidth/latency-bound, not compute-bound, so splitting the matmul 8 ways gives little speedup while adding an all-reduce per layer on the critical path &mdash; comms cancel the gain. TP is for fitting a model and for compute-bound prefill, not low-batch decode latency.</div></li>
+
+      <li class="qa"><span class="q">Why is speculative decoding's output identically distributed to the target, yet faster? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">A small draft proposes K tokens; the target verifies them in one parallel pass. A rejection-sampling rule accepts the longest correct prefix and resamples the first rejection from a corrected distribution &mdash; output equals the target's exactly. Faster because one bandwidth-bound target pass confirms multiple tokens nearly free. <span class="watch">Low acceptance or a slow draft can make it slower.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 5 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Compare GPTQ and AWQ &mdash; core idea of each. <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Both are weight-only PTQ to ~4-bit. GPTQ uses approximate-Hessian (second-order) info to quantize column-by-column, adjusting remaining weights to compensate rounding error. AWQ finds salient channels via activation magnitudes and scales the ~1% that matter so uniform quantization preserves them. <span class="watch">AWQ scales salient weights &mdash; it doesn't keep them in higher precision.</span></div></li>
+
+      <li class="qa"><span class="q">Serves fine at low QPS but OOMs under load though weights fit &mdash; cause and fix? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">KV-cache growth: many concurrent (and long) sequences each allocate KV, and the sum exceeds free HBM even though weights fit. Fix: admission control (cap concurrent sequences/tokens), PagedAttention, GQA/KV-quant to shrink per-sequence KV, preemption/offload, right-size batch. <span class="watch">It's not the weights or a leak &mdash; it's KV scaling with concurrency &times; length.</span></div></li>
+
+      <li class="qa"><span class="q">Why is "tokens per second" misleading, and what should you report instead? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Raw tok/s hides batch size, input/output length mix, concurrency, and whether the latency SLO was met &mdash; a huge batch inflates it while latency is terrible. Report goodput under SLO, TTFT/TPOT p50/p95/p99, the request distribution, hardware/precision, and cost-per-token for apples-to-apples.</div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 6 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">What is FlashInfer and how does it differ from FlashAttention in scope? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">FlashAttention is a single unified attention kernel (IO-aware, exact, for contiguous QKV). FlashInfer is a <em>serving-oriented kernel dispatch library</em> that provides the right attention kernel for each serving scenario: paged KV blocks, variable-length batches, MLA decompression, sliding-window &mdash; the flexible attention backend inside SGLang and vLLM. <span class="watch">FA = the kernel; FlashInfer = the dispatch layer that calls the right variant per request type.</span></div></li>
+
+      <li class="qa"><span class="q">What do CUDA graphs and <code>torch.compile</code> contribute to decode-step latency, and why does it matter more at small batch? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">At small batch, GPU compute finishes quickly but CPU overhead (kernel launch, scheduler dispatch, Python loop) dominates decode latency. CUDA graphs capture the static kernel sequence in one graph object and replay it in a single launch, eliminating per-step CPU&rarr;GPU overhead (20&ndash;50&thinsp;% saving at batch 1&ndash;8). <code>torch.compile</code> fuses Python/ATen ops. Both help most where compute is cheap and dispatch is expensive. <span class="watch">At large batch the GPU is compute-saturated and launch overhead is negligible &mdash; the gain vanishes.</span></div></li>
+
+      <li class="qa"><span class="q">How do you serve hundreds of LoRA adapters on one GPU, and what batching / memory challenges arise? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Keep base model resident; maintain a GPU/CPU adapter pool for low-rank A, B matrices. Co-batch requests targeting the same adapter to amortise the rank-r matmul. Challenges: (a) long-tail adapters can&rsquo;t be co-batched &rarr; low throughput for rare adapters; (b) cold adapters must page in from CPU &rarr; latency spikes; (c) per-step rank-r matmul needs a custom batched GEMM kernel. <span class="watch">The rank-r cost is tiny (1/rank&sup2; of base layer) &mdash; the bottleneck is adapter scheduling and cold-start paging, not the math.</span></div></li>
+
+      <li class="qa"><span class="q">What is the throughput cost of structured output, and how do XGrammar / Outlines avoid the bottleneck? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Na&iuml;ve: traverse the FSM at every decode step for every batch item &rarr; O(vocab&thinsp;&times;&thinsp;states) Python overhead per step, bottlenecking at high QPS. Fix: precompile the grammar to a push-down automaton at request start; store a GPU-resident bitmask of valid next-token IDs per state; decode step = bitmask lookup (O(1)) + GPU mask apply &rarr; &lt;3&thinsp;% throughput overhead. <span class="watch">The bottleneck is the per-step FSM traversal, not the masking &mdash; precompilation is the entire fix.</span></div></li>
+    </ul>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 15 · TAKEAWAYS + FURTHER READING
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Takeaways</p>
+    <h2>What to remember</h2>
+    <div class="takeaways"><ul>
+      <li class="fragment"><strong>Two phases, two bottlenecks.</strong> Prefill is compute-bound (TTFT); decode is memory-bandwidth-bound (TPOT). Every tuning decision flows from this.</li>
+      <li class="fragment"><strong>KV cache is the real memory limit.</strong> Weights fitting &#8800; safe &mdash; concurrency &times; context OOMs you. Page it, shrink it (GQA/MLA/KV-quant), cap it.</li>
+      <li class="fragment"><strong>Batching is the throughput lever for decode</strong> &mdash; continuous batching keeps the GPU full; size batch to the TPOT budget, not to peak tok/s.</li>
+      <li class="fragment"><strong>Quantize weights to fit &amp; free KV</strong> (AWQ/GPTQ/FP8) &mdash; but validate with task evals, not just perplexity.</li>
+      <li class="fragment"><strong>Speculation &amp; TP are conditional.</strong> Speculative decoding pays off at low batch; TP is for fitting, not small-batch speed.</li>
+      <li class="fragment"><strong>Report goodput under SLO</strong> &mdash; TTFT/TPOT percentiles with the request distribution, never raw tokens/sec.</li>
+    </ul></div>
+    <aside class="notes">
+      The six-point recap &mdash; the spine of the whole module. One: internalize the two-phase model; prefill compute-bound (drives TTFT, wants FP8/compute and chunking), decode bandwidth-bound (drives TPOT, wants big batches, GQA, quantized weights). Two: the KV cache, not the weights, is what OOMs you under load &mdash; page it with PagedAttention, shrink per-sequence cost with GQA/MLA/KV-quant, and cap concurrency with admission control. Three: batching is the decode throughput lever, but size it to the latency SLO, not to peak tokens/sec. Four: quantization fits the model and frees HBM for KV, but perplexity is a weak gate &mdash; validate on real tasks. Five: speculative decoding and tensor parallelism are conditional tools &mdash; speculation wins at low batch where there's spare compute; TP is for capacity and compute-bound prefill, not low-batch decode latency. Six: the honest benchmark is goodput under SLO with percentile latencies and the request distribution. If they remember two sentences: "prefill compute-bound, decode bandwidth-bound," and "the KV cache is what OOMs you, not the weights."
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Further reading · closing</p>
+    <h2>Go deeper</h2>
+    <div class="paper"><a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener noreferrer">Efficient Memory Management for LLM Serving with PagedAttention (vLLM)</a> <span class="meta">&mdash; Kwon et al., 2023.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2205.14135" target="_blank" rel="noopener noreferrer">FlashAttention: IO-Aware Exact Attention</a> <span class="meta">&mdash; Dao et al., 2022.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2401.09670" target="_blank" rel="noopener noreferrer">DistServe: Prefill/Decode Disaggregation for Goodput</a> <span class="meta">&mdash; Zhong et al., 2024.</span></div>
+    <p style="margin-top:1em;text-align:center;font-size:1.1em;"><strong>Prefill is compute-bound; decode is bandwidth-bound. The KV cache is what OOMs you. Report goodput, not tok/s.</strong></p>
+    <p style="text-align:center;opacity:.6;font-size:.85em;">End of Module 11 &mdash; thank you. Press <kbd>O</kbd> for overview.</p>
+    <aside class="notes">
+      Closing. Three reads to go deeper: PagedAttention for how production serving manages KV memory, FlashAttention for the IO-aware kernel idea that underpins every modern attention implementation, and DistServe for the frontier of phase-aware, goodput-optimized serving. The one-line crystallization: prefill is compute-bound, decode is bandwidth-bound, the KV cache is what OOMs you under load, and goodput &mdash; not tokens-per-second &mdash; is the number that matters. That's the sentence I want them repeating on the way out. Thank them and offer to open the overview or jump back to the decision tree for the system-design rehearsal.
+    </aside>
+  </section>
+</section>
+
+    </div>
+  </div>
+  <!-- reveal.js core + plugins + mermaid (CDN), then shared deck runtime -->
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/math/math.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+  <script src="../assets/deck.js?v=2"></script>
+</body>
+</html>

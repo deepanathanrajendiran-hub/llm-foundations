@@ -1,0 +1,1427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reasoning Models &amp; Test-Time Compute — LLM Teaching Decks</title>
+  <meta name="description" content="A reveal.js lecture deck: chain-of-thought as computation, sampling/voting/search, verifiers, RLVR &amp; GRPO, long-CoT thinking models, and reasoning distillation." />
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/white.css" id="reveal-theme" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <link rel="stylesheet" href="../assets/deck.css?v=2" />
+
+  <!-- FOUC guard: set deck theme before first paint -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("deck-theme") ||
+          ((window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+        if (t === "dark") document.documentElement.classList.add("deck-dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+
+<!-- ============================================================
+     SECTION 1 · TITLE
+     ============================================================ -->
+<section>
+  <section class="deck-title">
+    <div class="logo">&#8721;</div>
+    <p class="kicker">PHASE 3 · REASONING &amp; INFERENCE · MODULE 28</p>
+    <h1>Reasoning Models &amp; Test-Time Compute</h1>
+    <p class="subtitle">Spending compute at inference, not just training: chain-of-thought as computation, sampling/voting/search, verifiers, RLVR &amp; GRPO, and the long-CoT "thinking" models (o1, DeepSeek-R1).</p>
+    <p class="keyhint"><kbd>&#8592;</kbd><kbd>&#8594;</kbd> navigate &middot; <kbd>S</kbd> speaker notes &middot; <kbd>O</kbd> overview &middot; <kbd>F</kbd> fullscreen &middot; append <code>?print-pdf</code> to export</p>
+    <aside class="notes">
+      Welcome. For a decade the only knob we turned was training: more data, more parameters, more pre-training FLOPs. This module is about a second knob that arrived in 2024 &mdash; spending more compute at <em>inference</em>, letting the model think longer before it answers. The whole lecture turns on one sentence: <em>chain-of-thought is computation</em> &mdash; the intermediate tokens are scratch space the model can read back, so writing more of them buys real reasoning depth. We'll go from CoT-as-computation, through sampling/voting/search and verifiers, into RLVR and GRPO (the RL recipe behind DeepSeek-R1), and finish on the long-"thinking" models and how to control their effort. Two phrases to hold onto the whole time: <em>test-time compute is a new scaling axis</em>, and <em>a strong verifier beats a stronger generator</em>.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 2 · ROADMAP
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Roadmap</p>
+    <h2>What you'll learn <span style="font-weight:500;opacity:.6;font-size:.6em;">(~16 min of content, 30&ndash;45 min taught)</span></h2>
+    <div class="callout"><span class="t">&#128203; The arc</span>
+      <ul>
+        <li class="fragment"><strong>CoT as computation</strong> &mdash; why intermediate tokens let a model solve harder problems</li>
+        <li class="fragment"><strong>Sampling, voting &amp; search</strong> &mdash; self-consistency, best-of-N, beam/tree, MCTS</li>
+        <li class="fragment"><strong>Verifiers</strong> &mdash; outcome (ORM) vs process (PRM); a strong checker is the moat</li>
+        <li class="fragment"><strong>RLVR + GRPO</strong> &mdash; reinforcement learning from <em>verifiable</em> rewards, critic-free</li>
+        <li class="fragment"><strong>Long-CoT "thinking" models</strong> (o1, DeepSeek-R1) &rarr; distillation &amp; effort control</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Five beats, in the order they build. One: chain-of-thought is not just a prompt trick &mdash; it is computation, and that reframing explains everything after it. Two: once thinking is computation, you can buy more of it at inference by sampling many traces and aggregating them, or by searching over reasoning steps. Three: aggregation and search only pay off if you can tell good from bad &mdash; that's the verifier, and it's the single most leveraged component. Four: RLVR turns a checkable reward into a training signal, and GRPO is the lightweight RL algorithm that made it cheap. Five: the long-thinking models that put it all together, plus how to distill them into small models and dial their effort up and down. If they remember nothing else: <em>test-time compute is a new scaling axis</em>, and <em>verification beats generation</em>.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Core ideas to land</p>
+    <h2>Five things to take away</h2>
+    <div class="takeaways"><ul>
+      <li class="fragment"><strong>CoT = trading serial compute for depth</strong> &mdash; tokens are scratch space the model attends back to.</li>
+      <li class="fragment"><strong>Test-time compute is a NEW scaling axis</strong> &mdash; orthogonal to parameters &amp; pre-training.</li>
+      <li class="fragment"><strong>A strong verifier beats a stronger generator</strong> &mdash; checking is easier than producing.</li>
+      <li class="fragment"><strong>RLVR needs a checkable reward</strong> &mdash; math/code shine; open-ended is the hard part.</li>
+      <li class="fragment"><strong>More thinking is not always better</strong> &mdash; curves saturate; overthinking can hurt.</li>
+    </ul></div>
+    <aside class="notes">
+      This is the executive summary &mdash; I'll return to it as the recap. Watch how the five chain together. Because CoT is computation, you can scale it at inference &mdash; that's a brand-new axis next to "bigger model, more data." But scaling generation only helps if you can pick the good output, so a reliable verifier is worth more than a smarter generator. That same verifier, turned into a reward, is what powers RLVR &mdash; which is why math and code led the way: you can <em>run</em> the answer. And the honest caveat that keeps people grounded: the accuracy-versus-compute curve flattens, and on easy or factual tasks long reasoning can actively lower accuracy. Those five sentences are the spine of the whole deck.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 3 · WHY IT MATTERS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Why it matters</p>
+    <h2>A second scaling axis just opened</h2>
+    <div class="flow">
+      <span class="box ghost">Train-time scaling<small>more params &amp; data</small></span>
+      <span class="arrow">+</span>
+      <span class="box accent">Test-time scaling<small>think longer at inference</small></span>
+      <span class="arrow">&rarr;</span>
+      <span class="box">Better answers<small>without a bigger model</small></span>
+    </div>
+    <ul style="margin-top:.6em;">
+      <li class="fragment">For a decade: <strong>scale parameters &amp; pre-training data</strong> &mdash; one forward pass per answer.</li>
+      <li class="fragment">New lever: spend <strong>more compute at inference</strong> &mdash; sample more, search, think longer.</li>
+      <li class="fragment">A <strong>small model + big inference budget</strong> can match a much larger model run once.</li>
+    </ul>
+    <aside class="notes">
+      The framing for the whole module. Classic scaling laws turn one knob &mdash; grow the model and the data &mdash; and you get one forward pass per answer. Test-time compute is an independent axis: hold the weights fixed and let the model do more work per question, by sampling many candidate solutions, searching over reasoning steps, or simply generating a longer chain-of-thought. The striking empirical result &mdash; from Snell et al. and OpenAI's o1 reports &mdash; is that a modest model given a generous inference budget can rival a far larger model decoded greedily. That reframes a budget question every team faces: do I spend my next dollar on a bigger model, or on letting a smaller one think harder at serve time? The answer depends on the problem, and that trade-off is what this lecture is about.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Why it matters · where they sit</p>
+    <h2>Reasoning models vs standard instruct models</h2>
+    <div class="cols">
+      <div>
+        <h5>Standard instruct (GPT-4o, Claude base)</h5>
+        <ul>
+          <li class="fragment">Answers in <strong>one shot</strong> &mdash; little or no scratch work</li>
+          <li class="fragment">Fast, cheap, low latency</li>
+          <li class="fragment">Great for chat, retrieval, formatting, summaries</li>
+        </ul>
+      </div>
+      <div>
+        <h5>Reasoning model (o1/o3, R1)</h5>
+        <ul>
+          <li class="fragment">Generates a <strong>long internal CoT</strong> before answering</li>
+          <li class="fragment">Slower, pricier (you pay for thinking tokens)</li>
+          <li class="fragment">Wins on math, code, multi-step logic, hard science</li>
+        </ul>
+      </div>
+    </div>
+    <p class="fragment" style="margin-top:.5em;"><strong>Same backbone, different habit:</strong> a reasoning model is post-trained (often via RL) to <em>reason first, answer last</em>.</p>
+    <aside class="notes">
+      A reasoning model is not a different architecture &mdash; it's the same transformer, post-trained to spend tokens thinking before it commits to an answer. The trade is concrete: you pay more latency and more tokens, and in return you get large gains on tasks where intermediate steps matter &mdash; competition math like AIME, hard coding, graduate-level science (GPQA). For a lookup, a rewrite, or a simple chat turn, that thinking is wasted cost and sometimes even hurts, which is why the frontier is increasingly <em>hybrid</em>: one model (or a router) that can run in a cheap non-thinking mode or switch on extended reasoning when the query warrants it. The mental model: instruct models blurt; reasoning models show their work &mdash; useful exactly when showing your work helps.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 4 · INTUITION
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Intuition</p>
+    <h2>Show your work vs blurt the answer</h2>
+    <ul>
+      <li class="fragment">Ask a student <strong>23 &times; 47</strong> and demand an instant number &mdash; they guess.</li>
+      <li class="fragment">Give them <strong>scratch paper</strong> and they decompose it: 23&times;40, 23&times;7, add &mdash; right answer.</li>
+      <li class="fragment">A transformer is the same: one forward pass is <strong>fixed depth</strong>; it can't loop.</li>
+      <li class="fragment">Intermediate tokens are <strong>scratch space the model attends back to</strong> &mdash; each step reads the last.</li>
+      <li class="fragment">Writing the steps <em>is</em> the computation &mdash; <strong>serial compute traded for missing depth</strong>.</li>
+    </ul>
+    <aside class="notes">
+      This analogy carries the whole "how it works" section. Force a student to answer 23 times 47 with no paper and they round and guess; hand them scratch paper and they break it into easy pieces and get it right. The model is identical. A single forward pass has a fixed number of layers &mdash; bounded depth, no loops &mdash; so some problems literally cannot be solved in one pass. But when the model writes intermediate tokens, those tokens go back into the context, and the next step can attend to them. So a long chain-of-thought turns a fixed-depth network into something that can do many sequential steps: it trades serial decoding time for the computational depth it lacks. The theory people frame this in complexity terms &mdash; with a long enough scratchpad, the class of problems a transformer can solve grows &mdash; but the intuition is just "let it use scratch paper."
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Intuition · what you see &amp; what you pay</p>
+    <h2>Visible (R1) vs hidden (o1) traces</h2>
+    <div class="cols">
+      <div>
+        <h5>DeepSeek-R1 &mdash; visible trace</h5>
+        <ul>
+          <li class="fragment">Shows the full reasoning to the user</li>
+          <li class="fragment">Debuggable, auditable, open</li>
+          <li class="fragment">Can leak strategy &amp; confuse non-experts</li>
+        </ul>
+      </div>
+      <div>
+        <h5>OpenAI o1 &mdash; hidden trace</h5>
+        <ul>
+          <li class="fragment">Reasons internally; shows only a summary</li>
+          <li class="fragment">Protects IP; keeps the trace free for safety monitoring</li>
+          <li class="fragment">You're <strong>billed for hidden "thinking tokens"</strong> you never see</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout fragment"><span class="t">&#129504; "Thinking tokens"</span>
+      Operationally just output tokens &mdash; generated, KV-cached, and <strong>billed</strong> &mdash; but spent on reasoning, not on the visible answer. Claude's <em>extended thinking</em> exposes a token <strong>budget</strong> knob to cap them.
+    </div>
+    <aside class="notes">
+      Two product philosophies for the same mechanism. DeepSeek-R1 shows the entire reasoning trace: it's transparent, debuggable, and great for research, but it can reveal the model's strategy to competitors and overwhelm everyday users with a wall of internal monologue. OpenAI's o1 hides the raw trace and shows only a short summary &mdash; the stated reasons are protecting intellectual property and, importantly, keeping the chain-of-thought <em>un-optimized</em> so it stays a faithful window for safety monitoring (if you train against the visible trace, it stops being honest). Either way, the key billing point students miss: those reasoning tokens are real output tokens &mdash; the model generates them, they fill the KV cache, and you pay for them &mdash; even when they're hidden. Claude's extended-thinking mode makes this explicit by exposing a thinking-token <em>budget</em>: a bigger budget means more reasoning and higher cost, which is the simplest version of the effort knob we'll cover later.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 5 · HOW IT WORKS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">How it works · the pipeline</p>
+    <h2>The test-time-compute pipeline, step by step</h2>
+    <p>One pass: take the prompt, think in CoT, sample or search many traces, verify or vote, then return the best or consensus answer.</p>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Test-time compute — think, sample/search, verify, answer",
+     "nodes":[["Prompt","question"],["Think (CoT)","intermediate tokens"],["Sample / search","N traces or tree"],["Verify / vote","score or majority"],["Answer","best / consensus"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"<strong>Prompt:</strong> the question arrives &mdash; a math problem, a coding task, a hard query."},
+       {"on":[1],"done":[0],"cap":"<strong>Think:</strong> the model writes a chain-of-thought &mdash; intermediate tokens it can attend back to."},
+       {"on":[2],"done":[0,1],"cap":"<strong>Sample / search:</strong> spend test-time compute &mdash; draw <code>N</code> independent traces, or search a tree of steps."},
+       {"on":[3],"done":[0,1,2],"cap":"<strong>Verify / vote:</strong> score each with a verifier, or take the majority answer (self-consistency)."},
+       {"on":[4],"done":[0,1,2,3],"cap":"<strong>Answer:</strong> return the best-scoring or most-agreed trace &mdash; not the first guess."}],
+     "interval":1900}
+    </script></div>
+    <aside class="notes">
+      Drive this off the widget &mdash; it is the skeleton of the entire approaches section. A prompt arrives. Step two, the model thinks: it generates a chain-of-thought, the scratch space from the last slide. Step three is where test-time compute is actually spent: instead of one trace you draw <em>N</em> of them (parallel sampling) or you expand and prune a tree of partial reasoning steps (search). Step four is the decisive one: you reduce those many candidates to one, either by majority vote &mdash; self-consistency &mdash; or by scoring them with a verifier and keeping the best. Step five returns that selected answer rather than the model's first impulse. Every technique we cover plugs into box three (how you spend compute) or box four (how you choose the winner) &mdash; and the quality of box four is why "a strong verifier beats a stronger generator." Note one thing missing: a single greedy answer is just this pipeline with N equal to one and no verification.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · the scaling curve</p>
+    <h2>Accuracy climbs with compute &mdash; then saturates</h2>
+    <div class="cols">
+      <div>
+        <svg class="sl-graph" viewBox="0 0 360 240" role="img" aria-label="Accuracy versus log inference compute: a rising, saturating curve, with a second parallel-voting curve">
+          <!-- axes -->
+          <line x1="48" y1="200" x2="338" y2="200" class="sl-axis"/>
+          <line x1="48" y1="200" x2="48" y2="24" class="sl-axis"/>
+          <polygon points="338,200 330,196 330,204" class="sl-arrow"/>
+          <polygon points="48,24 44,32 52,32" class="sl-arrow"/>
+          <text x="193" y="232" class="sl-axlab" text-anchor="middle">log compute / tokens &#8594;</text>
+          <text x="16" y="112" class="sl-axlab" text-anchor="middle" transform="rotate(-90 16 112)">accuracy &#8594;</text>
+          <!-- saturation reference line -->
+          <g class="fragment" data-fragment-index="3">
+            <line x1="48" y1="58" x2="338" y2="58" class="sl-ref"/>
+            <text x="334" y="52" class="sl-note" text-anchor="end">ceiling (saturation)</text>
+          </g>
+          <!-- curve 1: one long CoT (sequential) — rising, saturating -->
+          <g class="fragment" data-fragment-index="1">
+            <path class="sl-curve" d="M48,188 C110,150 150,96 200,76 C250,58 300,62 338,60"/>
+            <text x="250" y="92" class="sl-mlab">one long CoT (sequential)</text>
+          </g>
+          <!-- curve 2: many short + vote (parallel) — rises faster early, plateaus lower -->
+          <g class="fragment" data-fragment-index="2">
+            <path class="sl-curve2" d="M48,188 C96,128 140,98 196,90 C252,84 300,86 338,86"/>
+            <text x="248" y="118" class="sl-mlab" fill="var(--new-accent)">many short + vote (parallel)</text>
+          </g>
+          <!-- knee marker -->
+          <g class="fragment" data-fragment-index="4">
+            <circle cx="200" cy="76" r="5" class="sl-mark"/>
+            <line x1="200" y1="76" x2="200" y2="200" class="sl-vmark"/>
+            <text x="200" y="216" class="sl-axlab" text-anchor="middle">diminishing returns</text>
+          </g>
+        </svg>
+      </div>
+      <div>
+        <ol>
+          <li class="fragment" data-fragment-index="1"><strong>One long CoT:</strong> more thinking tokens &rarr; accuracy climbs steeply at first.</li>
+          <li class="fragment" data-fragment-index="2"><strong>Many short + vote:</strong> N parallel traces aggregated &mdash; cheap early wins.</li>
+          <li class="fragment" data-fragment-index="3">Both bend toward a <strong>ceiling</strong> &mdash; the model's underlying competence.</li>
+          <li class="fragment" data-fragment-index="4">Past the <strong>knee</strong>, each doubling of compute buys little &mdash; sometimes it dips.</li>
+          <li class="fragment" data-fragment-index="5">So budget is a <strong>per-problem</strong> choice, not "always max."</li>
+        </ol>
+        <p class="eqnote fragment" data-fragment-index="5">Note the <em>x</em>-axis is <strong>log</strong> compute &mdash; linear gains here cost exponential FLOPs.</p>
+      </div>
+    </div>
+    <aside class="notes">
+      This is the figure to linger on. Plot accuracy against the logarithm of inference compute and you get a rising, concave, saturating curve &mdash; the test-time scaling law. The indigo curve is one long sequential chain-of-thought: each extra thinking token can revise and extend the reasoning, so it keeps climbing but slowly. The teal curve is the parallel strategy &mdash; many shorter traces aggregated by voting or a verifier &mdash; which often wins cheaply at small budgets but plateaus once the right answer is already in the sampled set (more samples can't add an answer the model never produces). Both bend toward a ceiling set by the model's real competence; no amount of sampling fixes a problem it fundamentally can't do. The knee is the practical point: past it, every doubling of compute &mdash; remember the x-axis is log, so that's exponential FLOPs &mdash; buys almost nothing, and you can even see a dip from majority-voting pulling toward a confident-but-wrong mode. Hence the compute-optimal idea: spend big on hard problems, little on easy ones, rather than a flat max budget for everything.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · two ways to spend</p>
+    <h2>Parallel vs sequential scaling</h2>
+    <div class="cols">
+      <div>
+        <h5>Parallel &mdash; sample &amp; aggregate</h5>
+        <div class="flow" style="justify-content:flex-start;">
+          <span class="box accent">trace 1</span>
+          <span class="box accent">trace 2</span>
+          <span class="box accent">trace N</span>
+          <span class="arrow">&rarr;</span>
+          <span class="box green">vote / verify</span>
+        </div>
+        <ul style="margin-top:.4em;">
+          <li class="fragment">N <strong>independent</strong> traces, then majority vote or best-of-N.</li>
+          <li class="fragment">Embarrassingly parallel &mdash; great wall-clock latency.</li>
+          <li class="fragment">Fails when the right answer is <strong>never sampled</strong>; voting can lock in a popular-but-wrong answer.</li>
+        </ul>
+      </div>
+      <div>
+        <h5>Sequential &mdash; one self-revising trace</h5>
+        <div class="flow" style="justify-content:flex-start;">
+          <span class="box accent">step</span><span class="arrow">&rarr;</span>
+          <span class="box accent">revise</span><span class="arrow">&rarr;</span>
+          <span class="box accent">revise</span><span class="arrow">&rarr;</span>
+          <span class="box green">answer</span>
+        </div>
+        <ul style="margin-top:.4em;">
+          <li class="fragment">One <strong>long</strong> CoT that backtracks &amp; self-corrects.</li>
+          <li class="fragment">Can reach answers no single short sample would.</li>
+          <li class="fragment">Serial &rarr; <strong>slow</strong>; can spiral into rambling or get stuck in one wrong frame.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="eqnote fragment">Often combined: many sequential traces, then verify/vote &mdash; spend along <em>both</em> axes.</p>
+    <aside class="notes">
+      The two ways to convert a compute budget into accuracy, and they have opposite shapes. Parallel scaling draws N independent samples and aggregates them &mdash; majority vote for self-consistency, or pick the verifier's favorite for best-of-N. Because the samples don't depend on each other, you can run them all at once, so wall-clock latency stays low; the failure modes are that if the correct answer is never in the N samples no aggregation can recover it, and majority voting can confidently crown a wrong answer that the model happens to produce often. Sequential scaling instead spends the budget on one long trace that revises itself &mdash; it can notice a mistake, backtrack, and reach an answer no short sample would, which is exactly the "aha-moment" behavior R1 showed; but it's serial so it's slow, and a long trace can ramble, second-guess a correct answer, or get locked into one wrong framing it never escapes. In practice the strongest setups combine both: generate several long self-revising traces and then verify or vote across them, spending along both axes at once. The right mix is problem-dependent &mdash; which is the bridge into the sampling, voting, and search approaches.
+    </aside>
+  </section>
+</section>
+
+<section>
+
+  <!-- ===== LANDSCAPE INTRO ===== -->
+  <section>
+    <p class="kicker">The approaches &middot; landscape</p>
+    <h2>The reasoning ladder, baseline &#8594; SOTA</h2>
+    <div class="flow" style="font-size:.74em;">
+      <span class="box ghost">Direct</span><span class="arrow">&#8594;</span>
+      <span class="box">CoT</span><span class="arrow">&#8594;</span>
+      <span class="box accent">Self-consistency</span><span class="arrow">&#8594;</span>
+      <span class="box accent">Best-of-N + verifier</span><span class="arrow">&#8594;</span>
+      <span class="box accent">PRM / search</span><span class="arrow">&#8594;</span>
+      <span class="box accent">Tree / MCTS</span><span class="arrow">&#8594;</span>
+      <span class="box green">STaR</span><span class="arrow">&#8594;</span>
+      <span class="box green">RLVR</span><span class="arrow">&#8594;</span>
+      <span class="box green">Long-CoT</span><span class="arrow">&#8594;</span>
+      <span class="box green">Distill</span>
+    </div>
+    <p class="eqnote fragment"><b>The thread:</b> each rung buys accuracy by spending more inference compute, or by adding a better signal (a verifier / reward) to spend it well. Part A covers the first six rungs.</p>
+    <aside class="notes">
+      This is the spine of the whole topic, and it's exactly the territory interviewers probe with "why did we move from X to Y." Read it left to right: a single forward pass is the floor; chain-of-thought spends serial tokens as computation; self-consistency spends parallel samples and votes; best-of-N adds an outcome verifier so you can pick the best instead of the most common; process reward models score every step so you can guide search; tree/MCTS turns that signal into an explicit search over reasoning branches. The green rungs — STaR, RLVR, long-CoT, distillation — are part B, where we bake reasoning into the weights instead of paying for it at inference. Land the one sentence: every rung either spends more inference compute or adds a better signal to spend it well.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       1 · DIRECT ANSWER (baseline)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 1 of 6</p>
+    <h3>Direct answer &mdash; single forward pass <span class="tag classic">baseline</span></h3>
+    <p><strong>What:</strong> the model emits the answer immediately, with no intermediate tokens. <strong>How:</strong> prompt &#8594; one forward pass per output token &#8594; final answer; no "thinking" shown. <strong>Solves:</strong> nothing extra &mdash; it's the cheapest, lowest-latency baseline every other rung is measured against.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Fastest &amp; cheapest &mdash; minimal tokens, lowest latency</li><li class="fragment">Great for recall, formatting, simple lookups</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Bounded serial depth &mdash; one pass = fixed compute per token</li><li class="fragment">Fails multi-step math / logic it can't do "in its head"</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> this is the "before" &mdash; the floor every reasoning method tries to climb above.</p>
+    <aside class="notes">
+      Start here so the contrast lands. A standard instruction-tuned model answers in one shot: the only computation available is the fixed depth of the network applied per token. For factual recall or formatting that's plenty. But a multi-step problem &mdash; a long arithmetic chain, a proof, a planning task &mdash; can exceed what a fixed-depth transformer can compute without writing anything down. That ceiling is the whole reason the ladder exists. Keep this slide as the reference point: every later rung is "spend more compute or add a signal" relative to this single pass.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Direct answer</p>
+    <h3>Direct answer &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Prompt<small>question</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Forward pass<small>fixed depth</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Answer token<small>emit</small></span>
+      <span class="anim-arrow fragment fade-in">&#8617;</span>
+      <span class="anim-node fragment fade-in">Stop<small>no scratch-pad</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Feed the question; no instruction to reason.</li>
+      <li class="fragment">Each output token is one forward pass &mdash; bounded serial depth.</li>
+      <li class="fragment">The model commits to the answer with no intermediate work.</li>
+      <li class="fragment">Loop only to finish the (short) answer, then stop.</li>
+      <li class="fragment">Compute spent &#8776; length of the answer, nothing more.</li>
+    </ol>
+    <aside class="notes">
+      The key teaching point is "intermediate tokens are computation, and here there are none." With no scratch-pad, the model must map question straight to answer within the fixed depth of the stack. There's no place to store partial results, so anything requiring serial multi-step reasoning has to be compressed into that single pass. This is why a 7B model answering directly can lose to the same 7B model given room to think out loud &mdash; same weights, but the second one is allowed to spend more serial compute.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       2 · CHAIN-OF-THOUGHT (classic)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 2 of 6</p>
+    <h3>Chain-of-Thought prompting <span class="tag classic">classic</span></h3>
+    <p><strong>What:</strong> ask the model to "think step by step" so it writes its reasoning before the answer (Wei et al., 2022). <strong>How:</strong> zero-shot ("Let's think step by step") or few-shot (worked examples in the prompt) &#8594; the model emits intermediate steps &#8594; final answer. <strong>Solves:</strong> the bounded-depth problem &mdash; intermediate tokens <em>are</em> extra computation.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Huge gains on math / logic / multi-step tasks</li><li class="fragment">Prompt-only &mdash; no training needed</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">More tokens &#8594; more latency &amp; cost</li><li class="fragment">Single greedy chain can commit early to a wrong path</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> the direct pass had nowhere to compute; CoT turns the output stream into a scratch-pad &mdash; serial compute for depth.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2201.11903" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      This is the founding insight of test-time compute: the generated tokens feed back into the context, so a chain of intermediate steps lets the transformer trade serial compute for the depth a single pass lacks. Two flavors: few-shot CoT (Wei et al. &mdash; put a couple of worked examples in the prompt) and zero-shot CoT (Kojima et al. &mdash; just append "Let's think step by step"). The cost is real &mdash; more tokens means more latency and dollars &mdash; and a single greedy chain can lock onto an early mistake and confidently carry it to the end. That weakness is precisely what the next rung, self-consistency, attacks.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Chain-of-Thought</p>
+    <h3>Chain-of-Thought &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Prompt<small>+ "think step by step"</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Step 1<small>intermediate</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Step 2<small>builds on 1</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Step n<small>...</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Answer<small>after work</small></span>
+    </div>
+    <ol>
+      <li class="fragment"><strong>Zero-shot:</strong> append "Let's think step by step" &mdash; no examples needed.</li>
+      <li class="fragment"><strong>Few-shot:</strong> show 1&ndash;8 worked examples with their reasoning, then ask.</li>
+      <li class="fragment">Model emits step 1; that text re-enters the context.</li>
+      <li class="fragment">Each step conditions on all prior steps &mdash; serial computation.</li>
+      <li class="fragment">Final answer comes <em>after</em> the work, not before.</li>
+    </ol>
+    <aside class="notes">
+      Walk the autoregressive loop and emphasize that each emitted step becomes input to the next forward pass &mdash; that's the mechanism by which writing things down adds effective depth. Few-shot CoT teaches the format by example; zero-shot CoT relies on the magic trigger phrase and works surprisingly well on capable models. Stress the ordering: in a direct answer the model commits first; in CoT the answer is produced last, after the intermediate computation, which is why correctness improves. The remaining fragility &mdash; one chain, one chance &mdash; sets up sampling many chains next.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       3 · SELF-CONSISTENCY (classic)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 3 of 6</p>
+    <h3>Self-consistency <span class="tag classic">classic</span></h3>
+    <p><strong>What:</strong> sample many CoT traces and take the majority final answer (Wang et al., 2022). <strong>How:</strong> set temperature &gt; 0 &#8594; sample K independent chains &#8594; extract each final answer &#8594; vote &#8594; return the mode. <strong>Solves:</strong> a single greedy chain is fragile; voting marginalizes over many reasoning paths.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Big accuracy jump on math &mdash; no extra model needed</li><li class="fragment">Embarrassingly parallel; just decoding</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">K&times; the inference cost</li><li class="fragment">Needs an extractable, discrete answer to vote on</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> CoT bet everything on one chain; self-consistency samples many and lets agreement filter out lucky-wrong paths.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2203.11171" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      The intuition is that there are many valid reasoning paths to a correct answer but lots of distinct ways to be wrong, so correct answers cluster while errors scatter &mdash; majority vote exploits that. Practically: turn on temperature, draw K chains, parse the final answer from each, and return the most common one. It reliably beats greedy single-chain CoT on math benchmarks for free, model-wise &mdash; you only pay K times the decoding. Two caveats to flag: you need a discrete, parseable answer to count votes over (great for math, awkward for open-ended text), and the most <em>common</em> answer isn't always the <em>best</em> answer &mdash; which is exactly the gap best-of-N with a verifier fills next.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Self-consistency</p>
+    <h3>Self-consistency &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">One prompt<small>+ CoT</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Sample K<small>temp &gt; 0</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">K answers<small>extract finals</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Vote<small>count modes</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Majority<small>return</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Take one CoT prompt; sample K traces at temperature &gt; 0.</li>
+      <li class="fragment">Each trace reasons differently &mdash; diverse paths.</li>
+      <li class="fragment">Extract just the final answer from each trace.</li>
+      <li class="fragment">Tally votes over the discrete answers.</li>
+      <li class="fragment">Return the <strong>most common</strong> answer; discard the reasoning.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Self-consistency — sample K CoT, then vote",
+     "nodes":[["Prompt","+ CoT"],["Sample K","temp &gt; 0"],["Extract","K finals"],["Vote","count modes"],["Return","majority"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"One CoT prompt &mdash; the same question, ready to sample."},
+       {"on":[1],"done":[0],"cap":"Draw <strong>K independent chains</strong> at temperature &gt; 0 &mdash; each reasons its own way."},
+       {"on":[2],"done":[0,1],"cap":"Strip everything but the <em>final answer</em> from each of the K traces."},
+       {"on":[3],"done":[0,1,2],"cap":"Tally votes: e.g. <code>{42:7, 41:2, 50:1}</code> &mdash; correct paths agree, errors scatter."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Return the <strong>majority</strong> answer (42). Marginalized over reasoning paths."}],
+     "interval":1900}
+    </script></div>
+    <aside class="notes">
+      Drive the steps off the widget. The load-bearing move is sampling at nonzero temperature so the chains actually diverge &mdash; at temperature zero you'd get K copies of the same trace and voting is pointless. The vote tally on screen makes the intuition concrete: seven chains land on 42, a couple wander to wrong answers, so 42 wins. Note we throw the reasoning away and keep only the count &mdash; that's both the strength (cheap, no extra model) and the limitation: we trust frequency, not quality. When the right answer is in the minority, voting can't find it.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       4 · BEST-OF-N + VERIFIER (ORM)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 4 of 6</p>
+    <h3>Best-of-N + outcome verifier (ORM) <span class="tag modern">modern</span></h3>
+    <p><strong>What:</strong> generate N candidates, score each with an outcome reward model, keep the best (Cobbe et al., 2021). <strong>How:</strong> sample N solutions &#8594; an ORM (or checker) assigns each a score &#8594; pick the top-scoring one. <strong>Solves:</strong> voting picks the <em>most common</em>; BoN can pick a <em>rare-but-correct</em> answer if the scorer recognizes it.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Finds correct answers that are in the minority</li><li class="fragment">Works on open-ended outputs voting can't count</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Needs a trained verifier / scorer that plain voting doesn't</li><li class="fragment">Reward hacking: model games an imperfect scorer at large N</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> self-consistency only counts answers; BoN adds a <em>judgment signal</em> so quality, not frequency, decides.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2110.14168" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      This is the first rung that needs a new component: a verifier. An outcome reward model scores a whole solution by its final answer's plausibility; a deterministic checker (unit tests, a symbolic math checker) is even better when available because it can't be fooled. The advantage over majority vote is decisive when the right answer is rare &mdash; voting buries it, but a good scorer surfaces it &mdash; and BoN works on free-form outputs where there's nothing discrete to count. The danger to name: as N grows you increasingly find the candidate that best <em>exploits</em> the verifier's blind spots rather than the truly best one, so verifier quality caps the whole scheme. That motivates scoring the <em>process</em>, not just the outcome.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Best-of-N</p>
+    <h3>Best-of-N + verifier &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Prompt<small>question</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Sample N<small>candidates</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Verifier scores<small>ORM / checker</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Rank<small>by score</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Pick best<small>argmax</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Sample N full solutions (each its own CoT).</li>
+      <li class="fragment">Score every candidate with the ORM (or run the checker).</li>
+      <li class="fragment">Rank by score &mdash; not by how often an answer appears.</li>
+      <li class="fragment">Return the single argmax candidate.</li>
+      <li class="fragment">Optional: <em>weighted</em> self-consistency &mdash; sum scores per answer, then vote.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Best-of-N — generate, score, pick argmax",
+     "nodes":[["Prompt","question"],["Sample N","candidates"],["Verifier","score each"],["Rank","by score"],["Pick","argmax"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"One question &mdash; about to generate <strong>N candidate solutions</strong>."},
+       {"on":[1],"done":[0],"cap":"Sample N full CoT solutions; some right, some wrong, some rare-but-correct."},
+       {"on":[2],"done":[0,1],"cap":"An <strong>outcome reward model</strong> (or unit-test / math checker) scores each candidate."},
+       {"on":[3],"done":[0,1,2],"cap":"Rank by <em>score</em>, not by vote count &mdash; quality beats frequency."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Return the <strong>argmax</strong> &mdash; can surface a correct answer the majority missed."}],
+     "meter":true,"interval":1900}
+    </script></div>
+    <aside class="notes">
+      Run the widget to contrast with the previous slide: same N samples, but now a scorer ranks them instead of a vote counting them. Emphasize the new dependency &mdash; you must have built or trained a verifier, which is the cost self-consistency avoided. Mention the hybrid on the last step: weighted self-consistency sums the verifier's scores for each distinct answer and then takes the top-scoring answer, blending the robustness of voting with the discrimination of a scorer. And reiterate the failure mode &mdash; a weak ORM can be gamed as N climbs, which is why deterministic checkers are prized and why the field moved to scoring each step.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       5 · PROCESS REWARD MODELS (PRM)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 5 of 6</p>
+    <h3>Process reward models (PRM) <span class="tag modern">modern</span></h3>
+    <p><strong>What:</strong> score <em>each reasoning step</em>, not just the final answer (Lightman et al., "Let's Verify Step by Step", 2023). <strong>How:</strong> label steps as good/bad &#8594; train a PRM to score per-step &#8594; use it to rerank chains <em>or</em> guide search at inference. <strong>Solves:</strong> an ORM only sees the end &mdash; a PRM catches the wrong turn that produced a right-looking answer.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Dense, localized feedback &mdash; finds <em>where</em> reasoning broke</li><li class="fragment">Beats ORM on hard math; can steer search step-by-step</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Expensive to label &mdash; humans annotating every step</li><li class="fragment">Step boundaries &amp; partial-credit are fuzzy to define</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> the ORM scores one number at the end; the PRM scores the whole trajectory, giving a signal you can search against mid-chain.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2305.20050" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      The headline result: process supervision beat outcome supervision on the MATH benchmark, and the team released the PRM800K step-level labels. Why it works &mdash; an outcome model can be fooled by a lucky-correct answer reached through broken logic, whereas a PRM penalizes the bad step directly, giving dense localized credit. The big cost is labeling: someone must judge every step as helpful/neutral/wrong, which is slow and subjective, and defining where one "step" ends is genuinely fuzzy. The caveat to flag for the hard version of this question: the gains were strongest in-domain on math; how well process supervision generalizes to other domains is an open question. Crucially, a PRM gives you a value signal mid-chain &mdash; the precondition for searching over reasoning steps, which is the last rung in part A.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; PRM</p>
+    <h3>Process reward model &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Chain<small>step 1..n</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Label steps<small>good / bad</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Train PRM<small>per-step score</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Score new chain<small>each step</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Rerank / guide<small>search</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Collect chains; annotate each step as correct / wrong.</li>
+      <li class="fragment">Train a model to predict that per-step correctness.</li>
+      <li class="fragment">At inference, score every step of a new chain.</li>
+      <li class="fragment">Aggregate (e.g. min or product of step scores) to rerank candidates.</li>
+      <li class="fragment">Or feed scores into a search to prune bad branches early.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"PRM — dense per-step scoring vs one outcome score",
+     "nodes":[["Step 1","&#10003; 0.9"],["Step 2","&#10003; 0.8"],["Step 3","&#10007; 0.2"],["Step 4","carries error"],["Verdict","flag step 3"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"Step 1 looks solid &mdash; PRM gives it a <strong>high score</strong>."},
+       {"on":[1],"done":[0],"cap":"Step 2 still fine. So far an ORM and PRM would agree."},
+       {"on":[2],"done":[0,1],"cap":"Step 3 makes an error &mdash; the PRM scores it <strong>low</strong> right here."},
+       {"on":[3],"done":[0,1,2],"cap":"Later steps inherit the mistake; an ORM might still see a plausible final answer."},
+       {"on":[4],"done":[0,1,2,3],"cap":"PRM <strong>localizes the failure to step 3</strong> &mdash; dense signal an outcome model can't give."}],
+     "meter":true,"interval":1900}
+    </script></div>
+    <aside class="notes">
+      Use the widget to dramatize the ORM-vs-PRM difference: both agree while the chain is healthy, then the PRM flags the exact step where reasoning breaks while an outcome model, seeing only a plausible final answer, can be fooled. Mention the aggregation choice &mdash; taking the minimum step score (the chain is only as good as its worst step) or the product is common for reranking. And foreshadow the next rung: because the PRM gives a value at every intermediate node, it's exactly the scoring function you plug into a tree search to decide which branch to expand.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       6 · TREE-OF-THOUGHTS / MCTS
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 6 of 6</p>
+    <h3>Tree-of-Thoughts / lookahead / MCTS <span class="tag modern">modern</span></h3>
+    <p><strong>What:</strong> search over <em>branches</em> of reasoning steps, guided by a value signal (Yao et al., ToT, 2023). <strong>How:</strong> expand multiple next-steps &#8594; score each with a verifier/PRM or lookahead &#8594; keep promising branches, prune dead ends, optionally MCTS-style rollout &amp; backprop. <strong>Solves:</strong> linear CoT can't backtrack; search explores alternatives and recovers from wrong turns.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Explores &amp; backtracks &mdash; best on puzzles / planning</li><li class="fragment">Spends compute where the value signal says it pays off</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Costly &mdash; many model calls per step; cost grows with branching &times; depth</li><li class="fragment">Needs a reliable value signal; weak scorer &#8594; misguided search</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> a PRM <em>scores</em> a fixed chain; tree/MCTS <em>uses</em> that score to decide which branches to grow &mdash; search, not just rerank.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2305.10601" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      This is the most powerful and most expensive rung in part A. The shift from token-level beam search: here a "node" is a whole reasoning step, and you need a step-level scoring signal &mdash; a PRM, a lookahead heuristic, or a self-evaluation prompt &mdash; to decide which partial solutions are worth expanding. Tree-of-Thoughts does BFS/DFS over thought branches with that value; full MCTS adds the four-phase loop. Be explicit about cost in the interview: roughly branching factor times depth times rollouts model calls, so it can be orders of magnitude more expensive than parallel sampling. The honest takeaway: for problems with a clear value signal and room to backtrack (puzzles, planning, hard proofs) it shines; for everything else, many short CoTs with a vote is usually the better spend of the same FLOPs.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; MCTS over reasoning</p>
+    <h3>Tree search / MCTS &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Root<small>problem</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Select<small>promising node</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Expand<small>branch next-steps</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Rollout<small>simulate to end</small></span>
+      <span class="anim-arrow fragment fade-in">&#8617;</span>
+      <span class="anim-node fragment fade-in">Backprop<small>update values</small></span>
+    </div>
+    <ol>
+      <li class="fragment"><strong>Select:</strong> walk the tree to a promising node (value + exploration bonus, UCT).</li>
+      <li class="fragment"><strong>Expand:</strong> generate several candidate next reasoning steps as children.</li>
+      <li class="fragment"><strong>Simulate / rollout:</strong> reason forward to a terminal answer, score it.</li>
+      <li class="fragment"><strong>Backpropagate:</strong> push that value up to every ancestor node.</li>
+      <li class="fragment">Repeat; finally pick the best path. Prune dead ends along the way.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"MCTS over reasoning — select, expand, rollout, backprop",
+     "nodes":[["Select","UCT pick"],["Expand","next-steps"],["Rollout","to answer"],["Backprop","update values"],["Best path","return"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"<strong>Select:</strong> from the root, follow value + exploration bonus to a promising node."},
+       {"on":[1],"done":[0],"cap":"<strong>Expand:</strong> generate several candidate next reasoning steps as child branches."},
+       {"on":[2],"done":[0,1],"cap":"<strong>Rollout:</strong> simulate forward to a final answer and score it (verifier / PRM)."},
+       {"on":[3],"done":[0,1,2],"cap":"<strong>Backpropagate:</strong> send that value up to every ancestor &mdash; good paths get reinforced."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Loop within budget, prune dead ends, then return the <strong>best path</strong>. Powerful but costly."}],
+     "loop":"&#8635;","meter":true,"interval":1800}
+    </script></div>
+    <aside class="notes">
+      Narrate the four MCTS phases with the widget; this exact select / expand / simulate / backpropagate decomposition is a classic hard-question prompt. Selection balances exploiting high-value nodes against exploring under-visited ones, typically via a UCT-style bonus. Expansion is where the LLM proposes candidate next steps; simulation rolls one out to a scored terminal state; backpropagation updates the running value estimates of every node on the path so the next iteration is smarter. The loop arrow signals you repeat within a compute budget. Close by tying the whole part-A ladder together: we climbed from one pass, to one chain, to many chains voted, to many scored, to per-step scored, to searching the step-space &mdash; each rung either spent more inference compute or added a better signal to spend it well. Part B asks: can we train the model so it does this itself?
+    </aside>
+  </section>
+
+</section>
+
+<!-- ============================================================
+     SECTION 6B · THE APPROACHES — PART B (approaches 7-12)
+     ============================================================ -->
+<section>
+
+  <!-- ===== PART B LANDSCAPE INTRO ===== -->
+  <section>
+    <p class="kicker">The approaches · part B landscape</p>
+    <h2>From data tricks to trained reasoning &mdash; the RL era</h2>
+    <div class="flow" style="font-size:.8em;">
+      <span class="box accent">STaR / RFT</span><span class="arrow">&rarr;</span>
+      <span class="box green">RLVR + GRPO</span><span class="arrow">&rarr;</span>
+      <span class="box green">Long-CoT models</span><span class="arrow">&rarr;</span>
+      <span class="box green">Distillation</span><span class="arrow">&rarr;</span>
+      <span class="box green">Budget forcing</span><span class="arrow">&rarr;</span>
+      <span class="box green">Tool-integrated</span>
+    </div>
+    <p class="eqnote fragment">Part A scaled compute <em>at inference</em> (voting, search). Part B <strong>trains the reasoning in</strong> &mdash; verifiers become reward signals, then we control and tool-augment the result.</p>
+    <aside class="notes">
+      This is the map for part B and the part interviewers grill hardest. Part A was inference-time: sample more, vote, search. Part B is where the modern reasoning models are actually made. The thread: STaR bootstraps reasoning data by keeping verified-correct traces; RLVR turns that verifier into a dense RL reward and GRPO makes the RL cheap by dropping the critic; long-CoT "thinking" models are the products built on large-scale RLVR; distillation copies that reasoning into small models cheaply; budget forcing lets you dial effort up or down at inference; and tool integration offloads the parts LLMs are bad at &mdash; arithmetic, lookup &mdash; to real code and search. Each rung answers a gap in the one before.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       7 · STaR / REJECTION-SAMPLING FINE-TUNING
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 7 of 12</p>
+    <h3>STaR / rejection-sampling fine-tuning <span class="tag modern">bootstrap</span></h3>
+    <p><strong>What:</strong> bootstrap reasoning data &mdash; sample chains-of-thought, keep only the <em>verified-correct</em> ones, fine-tune, repeat (Zelikman et al., 2022; aka RFT). <strong>How:</strong> for problems with known answers, sample several CoT traces &rarr; keep traces whose final answer matches &rarr; <em>rationalize</em> the rest by feeding the answer as a hint &rarr; SFT on survivors &rarr; loop. <strong>Solves:</strong> you have no reasoning traces to train on &mdash; the model writes its own and the verifier labels them.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">On-policy: trains on the model's <em>own</em> correct reasoning</li><li class="fragment">Verifier guarantees the final answer is right</li><li class="fragment">Simple SFT loop &mdash; no RL machinery</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Needs known answers / a reliable verifier</li><li class="fragment">Reinforces lucky-but-wrong traces (right answer, bad reasoning)</li><li class="fragment">Plateaus once the model can't solve harder problems</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> earlier rungs trust the generator's text; STaR closes the loop with a verifier and only keeps traces that <em>check out</em>.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2203.14465" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      STaR &mdash; Self-Taught Reasoner &mdash; is the seed of every modern reasoning-data pipeline. The leap over plain distillation is that it filters to correctness with a verifier instead of trusting whatever the model wrote. For each problem with a known answer, sample several CoT traces, keep the ones whose final answer matches the gold answer, and fine-tune on those. STaR's clever twist is rationalization: for problems the model can't solve, hand it the answer as a hint and keep whatever rationale reaches it &mdash; so you still harvest a reasoning trace for the hard cases. Then loop: the improved model solves slightly more next round. "On-policy" because you train on the model's own correct reasoning, not a teacher's. The danger to flag: a trace with flawed reasoning that happens to land on the right number gets reinforced &mdash; this is why later work adds process-level checks. And the loop plateaus once the model simply cannot reach the harder answers even with hints.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · STaR / RFT</p>
+    <h3>STaR &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Problems<small>known answers</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Sample CoT<small>k traces each</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Keep correct<small>verifier filter</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Rationalize<small>answer as hint</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">SFT<small>fine-tune</small></span>
+      <span class="anim-arrow fragment fade-in">&#8635;</span>
+      <span class="anim-node fragment fade-in">Repeat<small>better model</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Start from problems with <em>known</em> final answers (math, code).</li>
+      <li class="fragment">Sample several chain-of-thought traces per problem at temperature.</li>
+      <li class="fragment">Verifier keeps only traces whose final answer matches the gold answer.</li>
+      <li class="fragment">For unsolved problems, <em>rationalize</em>: give the answer as a hint, keep the rationale that reaches it.</li>
+      <li class="fragment">SFT the model on all kept traces; loop &mdash; the better model solves more next round.</li>
+    </ol>
+    <p class="eqnote fragment">Rejection sampling = keep the winners, throw away the rest. The verifier is the only label source.</p>
+    <aside class="notes">
+      Walk the loop off the steps. The key insight is that you never need human-written reasoning traces &mdash; only known final answers, which math and code give you for free. Sampling at temperature gives diversity so at least some traces land correctly; the verifier is a hard filter, not a soft score. Rationalization rescues the hard problems: by conditioning on the answer the model often produces a valid-looking derivation, expanding coverage to problems it couldn't solve blind. Each round the SFT'd model is slightly stronger, so the verified yield climbs &mdash; the flywheel. Two ways it stalls: a weak verifier admits lucky-but-wrong traces that compound, and once the model truly can't reach the harder answers the loop saturates &mdash; which is exactly the gap RL with a dense, exploratory reward fills next.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       8 · RLVR + GRPO — KEY (keyanim)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 8 of 12</p>
+    <h3>RLVR + GRPO <span class="tag sota">RL from verifiable rewards</span></h3>
+    <p><strong>What:</strong> RL where the reward is an <em>objective check</em> &mdash; run the code, check the math answer &mdash; not a learned preference model; GRPO is the cheap policy-gradient algorithm built for it (DeepSeekMath, Shao et al., 2024). <strong>How:</strong> sample a <em>group</em> of completions per prompt; score each with the verifier; GRPO drops the critic and uses the <strong>group mean as the baseline</strong>; advantage = <code>(r &minus; mean) / std</code>; clipped update with a KL penalty to a reference policy. <strong>Solves:</strong> STaR's SFT plateau &mdash; RL explores beyond traces the model already gets right, and a verifiable reward can't be gamed like a preference model.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Reward is ground-truth (check the answer) &mdash; no reward-model drift</li><li class="fragment">GRPO needs <em>no value network</em> &mdash; halves memory vs PPO</li><li class="fragment">Group baseline = low-variance, automatic per-prompt normalization</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Only where answers are checkable (math, code, logic)</li><li class="fragment">Reward hacking: grader exploits, length gaming, format tricks</li><li class="fragment">Many long rollouts per step &mdash; infra-heavy</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> STaR only keeps traces the model already gets right (SFT); GRPO pushes probability <em>up</em> on good traces and <em>down</em> on bad ones with a true RL gradient &mdash; it learns from failures too.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2402.03300" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      This is the algorithm of the moment, so be precise. RLVR replaces RLHF's learned preference reward with a verifiable one: run the unit tests, check the boxed answer against the gold &mdash; a 0/1 (or graded) signal that is ground truth and can't slowly drift the way a reward model does. GRPO is the policy-gradient method DeepSeek introduced to make this cheap. The headline trick: PPO needs a separate value/critic network the same size as the policy to compute advantages; GRPO deletes it. Instead, for each prompt it samples a <em>group</em> of completions, scores them all, and uses the group's mean reward as the baseline &mdash; advantage equals reward minus the group mean, divided by the group's standard deviation. That normalization is per-prompt and automatic: hard prompts and easy prompts both get sensible advantages. Then a PPO-style clipped objective updates the policy, with a KL penalty pulling it toward a frozen reference so it doesn't collapse or drift off-distribution. The cons matter for interviews: it only works where you can check answers, it's vulnerable to reward hacking (the grader gets exploited, traces drift longer for no reason, format gaming), and each step needs many long rollouts, so the infra is dominated by generation, not gradients.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · GRPO</p>
+    <h3>GRPO &mdash; group-relative policy optimization</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Prompt<small>sample a GROUP</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">G completions<small>rollouts</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Verifiable reward<small>check answer</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Group baseline<small>mean of group</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Advantage<small>(r&minus;mean)/std</small></span>
+      <span class="anim-arrow fragment fade-in">&#8635;</span>
+      <span class="anim-node fragment fade-in">Update + KL<small>clipped</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Take a prompt; sample a <strong>group</strong> of G completions from the current policy.</li>
+      <li class="fragment">Score each completion with the <strong>verifiable reward</strong> &mdash; run the code / check the answer.</li>
+      <li class="fragment">Compute the <strong>group mean</strong> reward &mdash; this is the baseline (no critic network).</li>
+      <li class="fragment">Advantage of each trace = <code>(r &minus; group mean) / group std</code> &mdash; above-average traces get pushed up.</li>
+      <li class="fragment">Clipped policy update, with a <strong>KL penalty</strong> toward a frozen reference; loop.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"GRPO — group baseline replaces the critic",
+     "nodes":[["Prompt","sample a GROUP"],["G completions","rollouts"],["Verifiable reward","check answer"],["Group baseline","mean of group"],["Advantage","(r - mean)/std"],["Update + KL","clipped"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"<strong>One prompt</strong> &rarr; sample a whole <em>group</em> of completions, not just one."},
+       {"on":[1],"done":[0],"cap":"<strong>G rollouts</strong> from the current policy &mdash; diverse attempts at the same problem."},
+       {"on":[2],"done":[0,1],"cap":"<strong>Verifiable reward:</strong> run the code or check the final answer &mdash; objective, not a learned preference."},
+       {"on":[3],"done":[0,1,2],"cap":"<strong>Group baseline</strong> = mean reward of the group &mdash; this <em>replaces</em> PPO's critic network."},
+       {"on":[4],"done":[0,1,2,3],"cap":"<strong>Advantage</strong> = (r &minus; group mean) / group std &mdash; above-average traces reinforced, below-average suppressed."},
+       {"on":[5],"done":[0,1,2,3,4],"cap":"<strong>Clipped update + KL</strong> to a frozen reference keeps it stable &mdash; then loop on the next batch."}],
+     "loop":"&#8635;","interval":1900,"meter":true}
+    </script></div>
+    <aside class="notes">
+      Drive this off the widget &mdash; it's the single most-asked mechanism in a reasoning interview. Step one is the whole idea: instead of one rollout, sample a group of G completions for the <em>same</em> prompt. Step two scores them with the verifier. Step three is the punchline &mdash; PPO would train a separate value network to predict the baseline; GRPO just averages the group's rewards. Step four normalizes: each trace's advantage is its reward minus the group mean, divided by the group's standard deviation, so within a prompt the relatively better traces get positive advantage and the worse ones negative &mdash; even when every answer was wrong, the "least wrong" still gets a useful gradient. Step five is the standard PPO clipped surrogate plus a KL term to a frozen reference policy, which is what stops the model from drifting into degenerate or off-distribution text. Emphasize the memory win: dropping the critic roughly halves the model state you keep in GPU, which is why GRPO scaled reasoning RL so cheaply.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       9 · LONG-CoT "THINKING" MODELS — KEY (keyanim: R1 pipeline)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 9 of 12</p>
+    <h3>Long-CoT "thinking" models <span class="tag sota">o1 / R1 / extended thinking</span></h3>
+    <p><strong>What:</strong> models that emit a long internal reasoning trace before answering, trained via large-scale RLVR &mdash; OpenAI o1 (hidden trace), DeepSeek-R1 (visible trace), Claude extended thinking (budgeted). <strong>How:</strong> RLVR/GRPO on verifiable problems teaches the model to spend many tokens thinking; R1-Zero used RL <em>only</em> (no SFT) and spontaneously learned self-correction &mdash; the famous "aha moment"; R1 adds a cold-start SFT + multi-stage pipeline for readability. <strong>Solves:</strong> the SFT/voting ceiling &mdash; the model learns <em>when and how</em> to think longer, not just to mimic traces.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">State-of-the-art on math, code, science (AIME, GPQA, Codeforces)</li><li class="fragment">Self-correction / backtracking emerges from RL</li><li class="fragment">Effort scales with problem difficulty</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Expensive: hundreds&ndash;thousands of hidden tokens per answer</li><li class="fragment">R1-Zero: language mixing, unreadable traces (why cold-start exists)</li><li class="fragment">Overthinks easy / factual tasks &mdash; can hurt accuracy &amp; latency</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> GRPO is the <em>training method</em>; long-CoT models are the <em>products</em> &mdash; full pipelines (cold-start + RL + cleanup) built on top of it.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2501.12948" target="_blank" rel="noopener noreferrer">DeepSeek-R1 &#8599;</a></p>
+    <aside class="notes">
+      Connect this to the previous slide: GRPO is the engine; these are the cars. o1 was first &mdash; OpenAI hid the raw reasoning trace and showed only a summary, for safety, product, and competitive reasons. DeepSeek-R1 showed the visible trace and, crucially, published the recipe. The most striking result was R1-Zero: pure RL with verifiable rewards on the base model, no supervised fine-tuning at all &mdash; and self-correction, verification, and longer thinking emerged on their own, the "aha moment" where the model literally writes "wait, let me reconsider." But R1-Zero's traces had pathologies &mdash; language mixing, poor readability &mdash; which is exactly why the full R1 added a cold-start SFT stage to seed readable CoT before RL. Claude's extended thinking is the same family with an explicit, user-controllable thinking budget. Land the cons: these models are expensive because the hidden trace can be thousands of tokens, and they overthink simple or factual tasks, where long CoT can actually lower accuracy &mdash; which motivates budget control two rungs down.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · DeepSeek-R1 pipeline</p>
+    <h3>The R1 multi-stage pipeline &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Cold-start SFT<small>readable CoT</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Reasoning RL<small>RLVR/GRPO</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Rejection-sample SFT<small>best traces</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Final RL<small>align + general</small></span>
+    </div>
+    <ol>
+      <li class="fragment"><strong>Cold-start SFT:</strong> fine-tune the base model on a small set of clean, <em>readable</em> CoT traces &mdash; fixes R1-Zero's language mixing.</li>
+      <li class="fragment"><strong>Reasoning RL:</strong> large-scale RLVR/GRPO on verifiable math/code &mdash; this is where the heavy reasoning skill is learned.</li>
+      <li class="fragment"><strong>Rejection-sample SFT:</strong> sample from the RL model, keep the <em>best</em> verified traces (+ general data), SFT again.</li>
+      <li class="fragment"><strong>Final RL:</strong> a last RL pass for alignment, helpfulness, and harmlessness across all task types.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"DeepSeek-R1 — four stages, each fixes one gap",
+     "nodes":[["Cold-start SFT","readable CoT"],["Reasoning RL","RLVR/GRPO"],["Rejection-sample SFT","best traces"],["Final RL","align + general"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"<strong>Cold-start SFT:</strong> seed a small set of <em>clean, readable</em> CoT &mdash; cures R1-Zero's language mixing &amp; messy traces."},
+       {"on":[1],"done":[0],"cap":"<strong>Reasoning RL (RLVR/GRPO):</strong> large-scale RL on verifiable problems &mdash; the deep reasoning skill is learned here."},
+       {"on":[2],"done":[0,1],"cap":"<strong>Rejection-sample SFT:</strong> sample the RL model, keep best verified traces + general data, re-SFT &mdash; broadens &amp; cleans."},
+       {"on":[3],"done":[0,1,2],"cap":"<strong>Final RL:</strong> a last pass for alignment &amp; helpfulness across <em>all</em> tasks, not just verifiable ones."}],
+     "interval":2000,"meter":true}
+    </script></div>
+    <aside class="notes">
+      Teach this as "each stage exists to fix the previous stage's gap." R1-Zero proved RL alone produces strong reasoning but ugly, mixed-language traces; so stage one is a small cold-start SFT on readable CoT just to give RL a civilized starting point. Stage two is the main event &mdash; large-scale RLVR with GRPO on verifiable math and code, where the actual reasoning ability and the long self-correcting traces are forged. Stage three steps back to SFT: sample many completions from the RL checkpoint, keep only the best verified ones, mix in general-purpose data, and fine-tune again &mdash; this is STaR-style rejection sampling reused inside the pipeline to broaden capabilities and clean style. Stage four is a final RL pass covering helpfulness and harmlessness across all task types, not just checkable ones, so the model is a usable assistant and not just a math solver. The meta-point: a frontier reasoning model is not one algorithm, it's this choreography of SFT and RL stages.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       10 · REASONING DISTILLATION
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 10 of 12</p>
+    <h3>Reasoning distillation <span class="tag sota">R1-Distill</span></h3>
+    <p><strong>What:</strong> SFT a small model directly on a big reasoning model's traces (e.g. R1-Distill-Qwen / Llama). <strong>How:</strong> run the large teacher on many problems &rarr; collect its long-CoT traces (often verified) &rarr; plain SFT the small student on them &mdash; no RL on the student. <strong>Solves:</strong> RL on a small model is expensive and often weak; copying a strong teacher's traces is cheaper and <em>frequently beats</em> running GRPO on the small model directly.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Cheap: just SFT &mdash; no rollouts, no reward infra</li><li class="fragment">Small distilled models often beat same-size RL-from-scratch</li><li class="fragment">Transfers reasoning <em>patterns</em>: backtracking, verification, step structure</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Capped near the teacher &mdash; can't discover new strategies</li><li class="fragment">Deep search / very-long-horizon reasoning transfers poorly</li><li class="fragment">Inherits teacher's blind spots &amp; verbosity</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> instead of <em>training</em> reasoning into a small model with RL, distillation <em>copies</em> a big model's reasoning &mdash; the long-CoT version of classic distillation.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2501.12948" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      The surprising empirical result from the R1 paper: they took the big R1 model's reasoning traces, did plain SFT on small open models like Qwen and Llama, and those distilled students outperformed the same small models trained with RL directly. The lesson for the field &mdash; if you have a strong reasoning teacher, distillation is the cheap, dominant move; reserve expensive RL for pushing the frontier teacher itself. On what transfers: the surface patterns of good reasoning copy well &mdash; step-by-step structure, self-verification, backtracking ("wait, that's wrong"), the habit of thinking before answering. What transfers poorly is the deepest capability: genuinely novel problem-solving and very-long-horizon search the student couldn't have reached on its own &mdash; the student is fundamentally bounded near the teacher and inherits its blind spots and its verbosity. So distillation is how reasoning democratizes, but it's a ceiling, not a frontier-mover.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Reasoning distillation</p>
+    <h3>Reasoning distillation &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Big teacher<small>R1 / o-class</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Generate traces<small>long CoT</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Verify / curate<small>keep correct</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">SFT student<small>small model</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Small reasoner<small>no RL needed</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Take a strong reasoning teacher (e.g. DeepSeek-R1).</li>
+      <li class="fragment">Run it on many problems; collect its full long-CoT traces.</li>
+      <li class="fragment">Verify / curate &mdash; keep correct, clean traces (rejection sampling).</li>
+      <li class="fragment">Plain SFT the small student on those <code>(problem, trace, answer)</code> tuples.</li>
+      <li class="fragment">Student now reasons in long CoT &mdash; <em>no RL run on the student at all</em>.</li>
+    </ol>
+    <p class="eqnote fragment">Patterns transfer (structure, self-check, backtracking); frontier capability does <em>not</em> &mdash; the student is capped near the teacher.</p>
+    <aside class="notes">
+      The mechanism is deliberately boring &mdash; it's just SFT &mdash; and that's the point: no rollouts, no reward model, no verifier-in-the-loop training, so it's orders of magnitude cheaper than RL on the student. The only judgment calls are which problems to run the teacher on (coverage) and how hard you filter the traces (verify and curate, often with the same answer-checking verifier from RLVR). Then you fine-tune the small model on the teacher's question-trace-answer tuples. Stress the transfer asymmetry one more time, because it's the interview point: the reasoning <em>style</em> &mdash; decompose, attempt, check, backtrack &mdash; copies over beautifully, which is why a 7B distilled model can suddenly do AIME-level problems; but the student cannot exceed the teacher and tends to fumble the longest, most novel searches the teacher could do.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       11 · CONTROLLABLE EFFORT / BUDGET FORCING
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 11 of 12</p>
+    <h3>Controllable effort / budget forcing <span class="tag modern">dial the thinking</span></h3>
+    <p><strong>What:</strong> control <em>how much</em> a model thinks &mdash; token budgets, low/medium/high effort settings, and test-time tricks to force more or less reasoning (s1, Muennighoff et al., 2025). <strong>How:</strong> cap or grant a thinking-token budget; expose effort tiers; <em>force more</em> by suppressing the end-of-thinking token and appending "Wait" so the model keeps reasoning; <em>force less</em> by early-stopping the trace to cut overthinking. <strong>Solves:</strong> long-CoT models overthink easy tasks and underthink hard ones &mdash; one fixed effort fits nothing.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Cut latency &amp; cost on easy queries (early stop)</li><li class="fragment">Squeeze more accuracy on hard ones ("Wait" &rarr; keep thinking)</li><li class="fragment">Inference-time knob &mdash; no retraining</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Forced thinking has diminishing &amp; eventually negative returns</li><li class="fragment">Early stop can cut a trace mid-reasoning &rarr; wrong answer</li><li class="fragment">Right budget is per-problem &mdash; needs a difficulty estimate</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> distillation fixes <em>capability</em>; budget forcing controls <em>how much of it to spend per query</em> &mdash; a test-time effort dial.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2501.19393" target="_blank" rel="noopener noreferrer">s1: Simple test-time scaling &#8599;</a></p>
+    <aside class="notes">
+      Once you have a thinking model, the next problem is that it thinks a fixed-ish amount regardless of difficulty &mdash; burning seconds and tokens overthinking "what's 2+2" while still underthinking a hard olympiad problem. Budget forcing, from the s1 paper, is the elegant test-time lever. To force <em>more</em> thinking: when the model tries to emit its end-of-thinking token, suppress it and append the word "Wait" &mdash; the model dutifully second-guesses itself and often catches its own error, extrapolating accuracy upward past its natural stopping point. To force <em>less</em>: just cap the budget and early-stop the trace, which slashes latency on easy queries. Productized, this shows up as low/medium/high effort settings or an explicit token budget the user sets. The honest limits: forcing more thinking has diminishing and eventually negative returns &mdash; you can't "Wait" your way to infinite accuracy &mdash; and an aggressive early stop can guillotine a trace mid-derivation and produce a confidently wrong answer. The real win comes from estimating difficulty per query and budgeting adaptively, which is what good routers do.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Budget forcing</p>
+    <h3>Budget forcing &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Set budget<small>low/med/high</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Model thinks<small>emits CoT</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Wants to stop<small>end-think token</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Force more / less<small>"Wait" or early-stop</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Answer<small>tuned effort</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Pick a thinking budget or effort tier for the query (ideally by difficulty).</li>
+      <li class="fragment">The model generates its reasoning trace.</li>
+      <li class="fragment">It reaches a natural stopping point (the end-of-thinking token).</li>
+      <li class="fragment"><strong>Force more:</strong> suppress that token, append "Wait" &rarr; it keeps reasoning &amp; self-corrects.</li>
+      <li class="fragment"><strong>Force less:</strong> hit the budget cap &rarr; early-stop and answer now &mdash; cuts overthinking.</li>
+    </ol>
+    <p class="eqnote fragment">"Wait" = sequential test-time scaling: one longer, self-revising trace instead of more parallel samples.</p>
+    <aside class="notes">
+      Make the "Wait" trick concrete because it's memorable and the s1 result is striking: the model emits its closing think-token; you intercept it, replace it with "Wait," and let generation continue &mdash; the model re-examines its own work and frequently fixes an error, so forced extra thinking literally raises accuracy on benchmarks like AIME, up to a point. That's sequential scaling: a single trace made longer and self-revising, as opposed to the parallel scaling of best-of-N. Early stopping is the mirror image &mdash; on an easy query you don't want the model spiraling, so you cap the budget and force it to commit, reclaiming latency. Tie it back to the trade-off curve: forcing more thinking saturates and then degrades, and forcing less risks chopping a trace before the answer is reached, so the smart move is adaptive per-problem budgeting rather than a global max-thinking setting.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       12 · TOOL-INTEGRATED REASONING
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 12 of 12</p>
+    <h3>Tool-integrated reasoning <span class="tag sota">interleave code &amp; search</span></h3>
+    <p><strong>What:</strong> interleave real tool calls &mdash; code execution, search, a calculator &mdash; with chain-of-thought, so the model offloads what it's bad at (arithmetic, lookup) to a tool. <strong>How:</strong> reason in text until a sub-task needs a tool &rarr; emit a tool call (e.g. run Python) &rarr; the real result is fed back into the context &rarr; continue reasoning on grounded output &rarr; repeat until the answer. <strong>Solves:</strong> pure-text CoT silently miscalculates and hallucinates facts; a tool turns those into <em>exact</em>, grounded steps.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Exact arithmetic / code execution &mdash; no silent math slips</li><li class="fragment">Grounds facts via search &mdash; cuts hallucination</li><li class="fragment">Shorter text reasoning &mdash; offload heavy lifting to tools</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Latency &amp; failure modes of external tools (errors, timeouts)</li><li class="fragment">Must learn <em>when</em> to call a tool vs reason in text</li><li class="fragment">Tool results bloat the context across many turns</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> every rung so far reasons in pure text; tool integration breaks out of the model to get <em>exact</em> results &mdash; arithmetic and lookup stop being guesses.</p>
+    <aside class="notes">
+      The final rung closes a basic weakness: transformers are unreliable at exact arithmetic and they confidently hallucinate facts, no matter how long the chain-of-thought. Tool-integrated reasoning &mdash; the lineage runs through Toolformer, PAL/Program-Aided Language models, and ReAct, and it's now standard in o-class and R1-class agents &mdash; lets the model interleave real tool calls with its reasoning. It reasons in text until it hits a sub-task better done by a tool, emits a code block or search query, the runtime actually executes it, and the <em>true</em> result is injected back into the context so subsequent reasoning is grounded rather than guessed. Offloading a 12-digit multiplication to Python is exact every time; offloading a fact to search grounds it. This changes the test-time-compute picture: some "thinking" moves out of the token stream and into deterministic tools, often making the text reasoning shorter and more reliable. The costs are real &mdash; tool latency and failures, the model must learn the judgment of when to call versus reason, and across a long agentic loop the accumulated tool outputs can blow the context window, which is why reasoning-state compression becomes its own problem.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Tool-integrated reasoning</p>
+    <h3>Tool-integrated reasoning &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Reason in text<small>CoT</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Hit a sub-task<small>needs a tool</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Call tool<small>run code / search</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Inject result<small>real output</small></span>
+      <span class="anim-arrow fragment fade-in">&#8635;</span>
+      <span class="anim-node fragment fade-in">Continue<small>grounded CoT</small></span>
+    </div>
+    <ol>
+      <li class="fragment">The model reasons in text as usual.</li>
+      <li class="fragment">It reaches a step that's error-prone in text &mdash; big arithmetic, a fact, a computation.</li>
+      <li class="fragment">It emits a tool call: <code>run Python</code>, query search, hit a calculator.</li>
+      <li class="fragment">The runtime executes it; the <em>real</em> result is fed back into the context.</li>
+      <li class="fragment">Reasoning continues on the grounded result &mdash; loop until the final answer.</li>
+    </ol>
+    <p class="eqnote fragment">Offload arithmetic &amp; lookup to a tool; keep <em>judgement</em> in the CoT. Exact where it matters.</p>
+    <aside class="notes">
+      Walk one concrete trajectory: the model is solving a word problem, reasons about the setup in text, then instead of trying to multiply two large numbers in its head it writes a Python snippet, the sandbox runs it, and the exact value comes back into the context &mdash; now the next reasoning step builds on a correct number instead of a likely-wrong guess. Same pattern with search for a fact it isn't sure of. The loop arrow matters: this can repeat many times in an agentic task, alternating thought and action &mdash; that's the ReAct pattern. The two engineering lessons to leave them with: first, the model has to learn the judgment of when a tool beats text, because over-calling is slow and under-calling reintroduces the errors; second, every tool result lands in the context, so over a long horizon you must summarize or compress the accumulated reasoning and tool state or you'll exhaust the window &mdash; the bridge to agentic context management.
+    </aside>
+  </section>
+
+</section>
+
+<!-- ============================================================
+     SECTION 7 · COMPARE THE APPROACHES
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Compare · the cheat-sheet</p>
+    <h2>Ten ways to spend reasoning compute</h2>
+    <table class="cmp">
+      <thead>
+        <tr><th>Method</th><th>Spends compute how</th><th>Extra signal needed</th><th>Best for</th><th>Main failure mode</th></tr>
+      </thead>
+      <tbody>
+        <tr class="fragment"><td>Direct answer</td><td>1 forward pass, no CoT</td><td>none</td><td>recall, formatting, easy Qs</td><td>no serial depth &#8594; multi-step math fails</td></tr>
+        <tr class="fragment"><td>Chain-of-thought</td><td>1 longer trace (serial tokens)</td><td>none (prompt only)</td><td>step-by-step reasoning</td><td>one bad step derails the whole chain</td></tr>
+        <tr class="fragment"><td>Self-consistency</td><td>N parallel CoTs + vote</td><td>answer parser (no grader)</td><td>checkable-answer math</td><td>confident shared error wins the vote</td></tr>
+        <tr class="fragment"><td>Best-of-N + ORM</td><td>N samples, pick top-scored</td><td>outcome reward model</td><td>when a good verifier exists</td><td>BoN over-optimizes / games the ORM</td></tr>
+        <tr class="fragment"><td>PRM-guided search</td><td>beam/tree scored per step</td><td>process reward model</td><td>long deductions, prune early</td><td>PRM is costly + reward-hackable</td></tr>
+        <tr class="fragment"><td>ToT / MCTS</td><td>explores a tree of states</td><td>state value / rollout score</td><td>planning, backtracking puzzles</td><td>cost explodes; weak value &#8594; lost</td></tr>
+        <tr class="fragment"><td>STaR / RFT</td><td>train-time: keep correct traces</td><td>verifier on known answers</td><td>bootstrapping a reasoner</td><td>lucky-wrong traces; plateau</td></tr>
+        <tr class="fragment"><td>RLVR / GRPO</td><td>train-time RL on verifiable reward</td><td>automatic checker per prompt</td><td>scaling math/code reasoning</td><td>reward hacking, length drift, collapse</td></tr>
+        <tr class="fragment"><td>Long-CoT model</td><td>1 very long self-revising trace</td><td>baked in by RL (none at test)</td><td>hard contest-style problems</td><td>overthinking, latency, cost blow-up</td></tr>
+        <tr class="fragment"><td>Distillation</td><td>cheap: student mimics teacher CoT</td><td>teacher's reasoning traces</td><td>small fast reasoners</td><td>capped near teacher; some skills don't transfer</td></tr>
+      </tbody>
+    </table>
+    <p class="eqnote fragment">Top rows = <em>test-time</em> spend (per query); STaR / RLVR / Distill = <em>train-time</em> spend that bakes reasoning in. The dividing question is always: <strong>do you have a verifier?</strong></p>
+    <aside class="notes">
+      This is the interview cheat-sheet &mdash; the axis that organizes the whole field is "where do you spend the extra compute, and what signal lets you spend it well." Read it top to bottom as a ladder. Direct answering spends nothing extra and dies on multi-step problems. Plain CoT buys serial depth for free but is fragile &mdash; a single wrong step propagates. Self-consistency is the cheapest robustness upgrade: sample several CoTs and majority-vote, needing only an answer parser, no grader. Best-of-N adds an outcome reward model to pick rather than vote, which is stronger but invites over-optimization. PRM-guided search and ToT/MCTS spend compute on structured exploration and need step-level or state-level value signals &mdash; powerful for planning, but expensive and hackable. The bottom three are train-time: STaR/RFT and RLVR/GRPO move the verifier into the training loop so the model learns to reason on-policy, and distillation copies a teacher's traces into a small student. The single question that routes you through this table: do you have a reliable verifier? If yes, climb toward search and RLVR; if no, you're stuck near self-consistency and LLM-judge proxies.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 8 · THE MATH
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">The math · (a) self-consistency</p>
+    <h2>Self-consistency = marginalize over reasoning paths</h2>
+    <p>Sample \(N\) chains-of-thought; each trace \(i\) ends in a final answer \(a_i\). Pick the answer that the most traces agree on:</p>
+    $$ \hat{a} \;=\; \operatorname*{arg\,max}_{a}\; \sum_{i=1}^{N} \mathbf{1}\!\left[\,a_i = a\,\right] $$
+    <p class="eqnote fragment"><b>\(a_i\)</b> = parsed final answer of trace \(i\); <b>\(\mathbf{1}[\cdot]\)</b> = 1 when they match, else 0; the sum just <em>counts votes</em> for each answer.</p>
+    <p class="eqnote fragment">Why it works: the reasoning path \(r\) is a latent variable. We want \(p(a\mid x)=\sum_r p(a,r\mid x)\) &#8594; summing over <em>many</em> paths to the same answer marginalizes out the path. Greedy decoding commits to one path; voting integrates over many.</p>
+    <p class="eqnote fragment">Many wrong chains scatter across <em>different</em> wrong answers; correct chains <em>concentrate</em> on the one right answer &#8594; the mode is usually correct.</p>
+    <aside class="notes">
+      Self-consistency, from Wang et al. 2022, is the cleanest piece of math in the deck. The model defines a joint distribution over an answer and a reasoning path; the answer we actually care about is the marginal, summing the joint over all paths. We can't enumerate paths, so we Monte-Carlo it: sample N chains-of-thought at nonzero temperature, parse each one's final answer, and take the answer with the most votes &mdash; that's the argmax of the indicator sum, which is just counting. The intuition for why it beats greedy decoding: greedy commits to the single most-likely path, but the most-likely path isn't always correct. There are usually many distinct reasoning routes to the right answer, so correct traces pile up on one value while wrong traces spread thin across many different wrong values. The mode of the votes is therefore a much better estimate than any single sample. The failure mode to flag: if the model has a systematic bias, all the wrong chains can agree on the same wrong answer, and then voting confidently amplifies the error rather than averaging it out.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math · (b) GRPO advantage</p>
+    <h2>GRPO: the group is the baseline</h2>
+    <p>For a prompt, sample a group of \(G\) completions and score each with the verifiable reward \(r_i\). The advantage of completion \(i\) is its reward, <em>z-scored within its own group</em>:</p>
+    $$ \hat{A}_i \;=\; \frac{r_i - \operatorname{mean}(r_{1\ldots G})}{\operatorname{std}(r_{1\ldots G})} $$
+    <p class="eqnote fragment"><b>\(r_i\)</b> = reward of completion \(i\) (e.g. \(1\) if the checker says correct, else \(0\)); <b>\(\operatorname{mean}\)</b> over the group = the <strong>baseline</strong>; <b>\(\operatorname{std}\)</b> normalizes scale.</p>
+    <p class="eqnote fragment"><strong>No learned critic.</strong> PPO trains a separate value network for the baseline; GRPO just uses the group's mean &#8594; half the memory, simpler, more stable. Above-average completions get \(\hat{A}_i \gt 0\) (reinforced); below-average get \(\hat{A}_i \lt 0\) (suppressed).</p>
+    <p class="fragment">The full objective adds a KL leash to a frozen reference policy:</p>
+    $$ \mathcal{J} \;=\; \mathbb{E}\!\left[\, \hat{A}_i \cdot \rho_i \,\right] \;-\; \beta\, \mathbb{D}_{\mathrm{KL}}\!\left(\pi_\theta \,\|\, \pi_{\mathrm{ref}}\right) $$
+    <p class="eqnote fragment"><b>\(\rho_i\)</b> = clipped probability ratio \(\pi_\theta/\pi_{\mathrm{old}}\) (the PPO-style surrogate); <b>\(\beta\)</b> = KL coefficient. The KL term stops the policy drifting far from the reference &#8594; guards against reward hacking &amp; entropy collapse. Drop it / set \(\beta\) too low and the model degenerates.</p>
+    <aside class="notes">
+      GRPO, from the DeepSeekMath and R1 papers, is the algorithm everyone asks about. The key trick is in the advantage: instead of training a separate value network to predict expected reward &mdash; which is what PPO does and which doubles your memory footprint &mdash; GRPO samples a whole group of G completions for the same prompt, scores them all with the verifiable reward, and uses the group's own mean as the baseline. The advantage is then just the reward z-scored within the group: subtract the mean, divide by the standard deviation. A completion that beat its siblings gets a positive advantage and is reinforced; one that did worse than its group average gets a negative advantage and is pushed down. That's why "the group is the baseline" &mdash; no critic to train, no critic to go unstable. The reward itself is verifiable: a deterministic checker returns one for a correct math answer or passing unit tests, zero otherwise &mdash; no learned preference model like RLHF. The second equation is the actual objective: the clipped PPO surrogate using that advantage, minus a KL penalty pulling the policy toward a frozen reference. The KL leash is load-bearing &mdash; it stops the policy from sprinting off to whatever degenerate text maximizes reward, which is how you get reward hacking, language mixing, and entropy collapse. Set beta too low or remove it and the model quickly degenerates into gibberish that games the checker.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math · (c) test-time scaling</p>
+    <h2>Accuracy rises ~linearly in log-compute, then saturates</h2>
+    <div class="cols" style="grid-template-columns:1.1fr 1fr;align-items:center;gap:.5em 1.4em;">
+      <svg class="sl-graph" viewBox="0 0 520 300" role="img" aria-label="Accuracy versus log of test-time compute: a curve that rises roughly linearly then flattens into a saturation plateau.">
+        <!-- axes -->
+        <line class="sl-axis" x1="64" y1="36" x2="64" y2="250"/>
+        <line class="sl-axis" x1="64" y1="250" x2="500" y2="250"/>
+        <polygon class="sl-arrow" points="64,30 59,42 69,42"/>
+        <polygon class="sl-arrow" points="506,250 494,245 494,255"/>
+        <text class="sl-axlab" x="284" y="286" text-anchor="middle">test-time compute (log: N samples / CoT length)  &#8594;</text>
+        <text class="sl-axlab" x="20" y="143" text-anchor="middle" transform="rotate(-90 20 143)">accuracy</text>
+        <!-- step 1: the rising-then-saturating curve -->
+        <g class="fragment fade-in" data-fragment-index="1">
+          <path class="sl-curve" d="M 70 238 C 150 150, 230 96, 320 78 C 400 64, 450 60, 496 58"/>
+        </g>
+        <!-- step 2: the near-linear regime -->
+        <g class="fragment fade-in" data-fragment-index="2">
+          <line class="sl-fit" x1="92" y1="222" x2="262" y2="92"/>
+          <text class="sl-pow" x="110" y="150">~linear in log&#8202;C</text>
+        </g>
+        <!-- step 3: the saturation plateau -->
+        <g class="fragment fade-in" data-fragment-index="3">
+          <line class="sl-vmark" x1="320" y1="78" x2="320" y2="250"/>
+          <circle class="sl-mark" cx="320" cy="78" r="6"/>
+          <text class="sl-note" x="412" y="92" text-anchor="middle">diminishing returns &#8594; plateau</text>
+        </g>
+        <!-- step 4: ceiling = generation-verification gap closes -->
+        <g class="fragment fade-in" data-fragment-index="4">
+          <line class="sl-extrap" x1="320" y1="58" x2="496" y2="50"/>
+          <text class="sl-note" x="430" y="44" text-anchor="middle">ceiling &le; pass@N (verifier-limited)</text>
+        </g>
+      </svg>
+      <ol>
+        <li class="fragment" data-fragment-index="1">Spend more test-time compute (more samples, longer CoT, deeper search).</li>
+        <li class="fragment" data-fragment-index="2">Early on, accuracy climbs <strong>~linearly in the log</strong> of compute &#8594; each doubling buys a roughly constant gain.</li>
+        <li class="fragment" data-fragment-index="3">Then it <strong>saturates</strong>: extra compute searches paths the model can't reach, or re-finds known answers.</li>
+        <li class="fragment" data-fragment-index="4">The precondition: a <strong>generation&#8211;verification gap</strong> &mdash; the model can <em>generate</em> a correct answer somewhere in N tries even if it can't <em>pick</em> it greedily.</li>
+      </ol>
+    </div>
+    <p class="eqnote fragment">If <strong>pass@1 \(\approx\) pass@N</strong> there is no gap &#8594; sampling &amp; search buy nothing. Search only helps when <strong>pass@N \(\gg\) pass@1</strong>: a verifier (or vote) recovers the answer the model <em>could</em> produce.</p>
+    <aside class="notes">
+      Two ideas, both heavily probed. First, the shape: plot accuracy against the log of test-time compute &mdash; whether that compute is number of samples, chain length, or search width &mdash; and you get a curve that rises roughly linearly in log-compute and then flattens into a plateau. Linear-in-log means each doubling of compute buys a roughly constant additive gain in the productive regime; that's the same diminishing-returns shape as train-time scaling laws. Why it saturates: once you've sampled enough, extra samples just re-discover answers you already found, and search starts exploring branches the base model simply can't produce, so you hit a ceiling. Second, and this is the deeper point the source insists on: test-time scaling only works when there is a generation-verification gap. That gap means the model can generate a correct solution somewhere among N attempts even though its single greedy attempt is wrong &mdash; verifying or voting is easier than generating. The clean diagnostic is pass@1 versus pass@N: if pass@N is much larger than pass@1, the answer is reachable and a verifier or majority vote can recover it, so search pays off. But if pass@1 already equals pass@N, the model never produces the right answer at all, the gap is zero, and no amount of sampling or search will help &mdash; you need a better generator, not more test-time compute. That distinction is exactly what separates problems where reasoning helps from ones where it's wasted.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 9 · IN CODE
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">In code · self-consistency</p>
+    <h2>Sample N CoTs, parse answers, majority-vote</h2>
+    <pre><code class="language-python" data-trim data-line-numbers="1-7|9-17|19-24">import re
+from collections import Counter
+
+def extract_answer(text):
+    # grab the last "#### &lt;number&gt;" or final integer in the trace
+    m = re.findall(r"-?\d+", text.split("####")[-1])
+    return m[-1] if m else None
+
+def self_consistency(model, prompt, n=64, temperature=0.7):
+    answers = []
+    for _ in range(n):
+        # sample a DIFFERENT chain-of-thought each call (temp &gt; 0)
+        trace = model.generate(prompt, temperature=temperature)
+        a = extract_answer(trace)
+        if a is not None:          # drop unparseable traces
+            answers.append(a)
+    # majority vote == argmax of the vote counts
+    votes = Counter(answers)
+    return votes.most_common(1)[0][0], votes
+
+ans, votes = self_consistency(model, question, n=64)
+print(ans, votes)                  # e.g. "204" Counter({"204": 41, ...})
+# maj@64 can be far above pass@1 when pass@N &gt; pass@1</code></pre>
+    <aside class="notes">
+      This is self-consistency in twenty lines. The parser is the unglamorous but crucial part: math benchmarks like GSM8K use a "#### answer" marker, so we split on it and grab the trailing number; a flaky parser silently throws away correct votes and tanks your accuracy, so people spend real effort here. The loop samples n completions at temperature 0.7 &mdash; the temperature is mandatory, because at temperature zero every sample is identical and voting is pointless; you need diversity across chains so wrong ones disagree while right ones agree. We drop traces we can't parse rather than counting them as a vote. Then Counter plus most_common is literally the argmax of the indicator sum from the math slide. The print line is the punchline that sets up the worked example: maj@64 can land far above pass@1 whenever there's a generation-verification gap.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">In code · verifier-weighted vote</p>
+    <h2>Weight each answer by a verifier / reward score</h2>
+    <pre><code class="language-python" data-trim data-line-numbers="1-6|8-17|19-22">from collections import defaultdict
+
+# verifier(prompt, trace) -&gt; float reward in [0, 1]
+# (an ORM, a PRM's product of step scores, or a unit-test pass-rate)
+
+def weighted_self_consistency(model, prompt, verifier, n=64, t=0.7):
+    score = defaultdict(float)
+    for _ in range(n):
+        trace = model.generate(prompt, temperature=t)
+        a = extract_answer(trace)
+        if a is None:
+            continue
+        w = verifier(prompt, trace)     # confidence in THIS trace
+        score[a] += w                   # sum weights, not counts
+    if not score:
+        return None
+    # pick the answer with the most TOTAL verifier mass
+    return max(score, key=score.get)
+
+# plain self-consistency is the special case verifier == 1.0
+# best-of-N is the special case: argmax over single-trace score
+best = weighted_self_consistency(model, q, orm_score, n=64)</code></pre>
+    <aside class="notes">
+      The one-line change that unifies three methods. Instead of every trace casting an equal vote, we ask a verifier &mdash; an outcome reward model, a process reward model's product of per-step scores, or for code the fraction of unit tests that pass &mdash; for a confidence weight on each trace, and we sum those weights per answer instead of counting. The teaching point is the two comments at the bottom: plain self-consistency is exactly this with the verifier pinned to one, and best-of-N is this with the aggregation changed to take the single highest-scoring trace rather than summing across agreeing traces. So self-consistency, weighted voting, and best-of-N are three points on one continuum: how much you trust an external verifier versus the crowd's agreement. Weighting helps when the verifier is genuinely informative; if the verifier is noisy or gameable, equal-weight voting can actually be more robust, because best-of-N over-optimizes a flawed reward model.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 10 · WORKED EXAMPLE
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Worked example · (1) voting lifts accuracy</p>
+    <h2>Low pass@1, high maj@64 on an AIME-style problem</h2>
+    <p>One hard competition problem. The model is <em>capable but unreliable</em>: each independent CoT is right ~35% of the time, and the wrong answers scatter.</p>
+    <ol>
+      <li class="fragment"><strong>Greedy / pass@1.</strong> One shot, temp 0 &#8594; correct only <strong>~35%</strong> of the time. Coin-flippy.</li>
+      <li class="fragment"><strong>Sample 64 CoTs</strong> at temp 0.7. Say <strong>22</strong> land on the correct "204"; the other 42 split across a dozen different wrong numbers (e.g. 6&times;"180", 5&times;"96", 4&times;"240"&hellip;).</li>
+      <li class="fragment"><strong>Tally votes.</strong> "204" has 22 &mdash; the largest single pile, because <em>wrong reasoning disagrees on the wrong answer</em> while right reasoning concentrates.</li>
+      <li class="fragment"><strong>maj@64</strong> returns "204" &#8594; <strong>correct.</strong> A 35%-per-sample model answers this problem reliably.</li>
+      <li class="fragment"><strong>The gap that made it work:</strong> pass@64 (was the right answer in <em>any</em> of 64?) is ~99% &#8211; far above pass@1's 35%. Voting cashed that gap in.</li>
+    </ol>
+    <table class="cmp fragment" style="margin-top:.4em;">
+      <thead><tr><th>Answer</th><th>"204" (correct)</th><th>"180"</th><th>"96"</th><th>"240"</th><th>&hellip;9 more</th></tr></thead>
+      <tbody><tr><td>Votes / 64</td><td><strong>22</strong></td><td>6</td><td>5</td><td>4</td><td>1&#8211;3 each</td></tr></tbody>
+    </table>
+    <p class="eqnote fragment">No verifier needed &mdash; just a parser and a vote. The right answer is a <em>concentrated mode</em>; wrong answers are a <em>diffuse tail</em>.</p>
+    <aside class="notes">
+      Make the self-consistency math concrete on a realistic AIME-style example. Take a model that's capable but unreliable: each independent chain-of-thought has about a 35% chance of being right. Run it once greedily and you're at 35% &mdash; basically a coin flip on a hard problem. Now sample 64 chains at temperature 0.7 for diversity. The correct answer 204 shows up in, say, 22 of them, because there are several valid routes to it and they all converge on the same number. The 42 wrong chains don't converge &mdash; they make different mistakes and land on a dozen different wrong numbers, so the biggest wrong pile is only 6. Majority vote picks the 22-vote pile and gets it right. The structural reason this works every time the model is "right more often than any single wrong answer": correct reasoning concentrates on one value, wrong reasoning diffuses across many. The number that proves the headroom existed is pass@64 &mdash; the chance the right answer appeared in at least one of 64 tries &mdash; which for a 35% model is about 99%. That huge gap between pass@1 at 35% and pass@64 near 99% is the generation-verification gap, and majority voting is the cheapest way to cash it in: no reward model, just a parser and a Counter.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Worked example · (2) one long CoT vs many short + vote</p>
+    <h2>Spend a fixed FLOP budget two ways</h2>
+    <p>Fixed budget: <strong>6,400 generated tokens</strong>. Same model, same problem. How should you spend them?</p>
+    <div class="cols">
+      <div>
+        <h5>A &middot; one long CoT</h5>
+        <ul>
+          <li class="fragment">1 trace &times; <strong>6,400 tokens</strong> of self-revision.</li>
+          <li class="fragment">Serial depth: can backtrack &amp; check itself.</li>
+          <li class="fragment">But <strong>one</strong> trajectory &mdash; if it commits early to a wrong frame, the whole budget is wasted reinforcing it.</li>
+          <li class="fragment">Latency: long, fully <em>sequential</em> (token N waits for N&#8722;1).</li>
+        </ul>
+      </div>
+      <div>
+        <h5>B &middot; 64 short CoTs + vote</h5>
+        <ul>
+          <li class="fragment">64 traces &times; <strong>100 tokens</strong> each &#8594; same 6,400.</li>
+          <li class="fragment">Diversity: 64 <em>independent</em> shots at the answer.</li>
+          <li class="fragment">Majority vote over the 64 finals (the §9 loop).</li>
+          <li class="fragment">Latency: short &amp; fully <em>parallel</em> &#8594; far lower wall-clock.</li>
+        </ul>
+      </div>
+    </div>
+    <table class="cmp fragment" style="margin-top:.3em;">
+      <thead><tr><th>Spend</th><th>Tokens</th><th>Mechanism</th><th>Wins when&hellip;</th><th>Loses when&hellip;</th></tr></thead>
+      <tbody>
+        <tr class="fragment"><td>A: 1&times;6400 long</td><td>6400</td><td>serial depth, self-revision</td><td>each step is hard; needs backtracking</td><td>model anchors on a wrong frame early</td></tr>
+        <tr class="fragment"><td>B: 64&times;100 + vote</td><td>6400</td><td>parallel breadth + marginalize</td><td>steps are easy but error-prone; big gen&#8211;verif gap</td><td>100 tokens too short to even reach an answer</td></tr>
+      </tbody>
+    </table>
+    <p class="eqnote fragment"><strong>Rule of thumb:</strong> wide gen&#8211;verif gap &amp; checkable answers &#8594; spend on <em>breadth</em> (B). Deep problems needing genuine multi-step exploration &#8594; spend on <em>depth</em> (A). Best systems do both: many medium traces + verifier (best-of-N), or a long CoT with self-consistency on top.</p>
+    <aside class="notes">
+      This is the compute-allocation question &mdash; the same FLOP budget, two strategies, and the answer is "it depends on the problem," which is exactly what interviewers want you to articulate. Fix the budget at 6,400 generated tokens. Option A pours it all into one long chain-of-thought: a single trajectory that can revise itself, backtrack, and verify, which is what o1-style long-CoT models do. The risk is correlation &mdash; it's one sample, so if the model anchors on a wrong framing in the first few hundred tokens, the remaining 6,000 tokens just elaborate the mistake, and you also pay full sequential latency because token N waits for token N minus one. Option B slices the budget into 64 short 100-token chains and majority-votes &mdash; the section 9 loop. That buys independence: 64 uncorrelated shots, and the vote marginalizes out the path, so it shines precisely when there's a wide generation-verification gap and the final answer is checkable. It's also far faster in wall-clock because the 64 samples run in parallel. The trade-off cuts both ways: if the problem genuinely needs ten serial deduction steps, 100 tokens can't even reach an answer and breadth is wasted; if the steps are individually easy but the model is just noisy, breadth crushes depth. The empirically best systems usually combine them &mdash; many medium-length traces scored by a verifier (best-of-N or PRM search), or a long CoT with self-consistency layered on top &mdash; rather than going all-in on either extreme.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 11 · WHEN TO USE WHAT — DECISION
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">When to use what · routing</p>
+    <h2>Pick the reasoning strategy by the question</h2>
+    <p>The first question is never "how much should it think?" &mdash; it's <strong>"is the answer checkable?"</strong> That one fact picks your lane.</p>
+    <div class="mermaid">
+flowchart TD
+  Q["Incoming query"] --> C{"Is the answer<br/>checkable?"}
+  C -->|"math / code<br/>exact answer"| V["RLVR-trained model<br/>+ best-of-N with a verifier"]
+  C -->|"multi-step but<br/>not auto-checkable"| M["Long CoT<br/>+ self-consistency / PRM-guided search"]
+  C -->|"simple recall<br/>or formatting"| D["NO reasoning<br/>direct answer"]
+  C -->|"need lowest<br/>latency"| L["short-CoT<br/>or adaptive router"]
+    </div>
+    <p class="eqnote fragment">Checkability decides the lane; difficulty &amp; latency budget decide how much compute to spend in it.</p>
+    <aside class="notes">
+      Walk the tree top-down. The root question is checkability, because it determines whether a verifier exists &mdash; and a verifier is what makes best-of-N and search pay off. Left branch: math and code have deterministic checkers (answer match, unit tests), so an RLVR-trained model plus verifier-based best-of-N converts extra samples directly into accuracy. Middle: multi-step tasks with no automatic check (open derivations, planning) get long chain-of-thought with self-consistency voting, or PRM-guided step search if you have a process reward model. Right: simple recall or strict formatting &mdash; "capital of France?", JSON reshaping &mdash; should skip reasoning entirely; the first instinct is already correct and thinking only adds latency and a chance to overthink. Bottom: if latency is the hard constraint, force short CoT or route adaptively. The meta-point: pick the lane by checkability first, then size the compute by difficulty and your latency budget.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">When to use what · the effort dial</p>
+    <h2>One budget, three ways to spend it</h2>
+    <p>Given a fixed compute budget, you can spend it in <em>parallel</em>, in <em>sequence</em>, or on <em>search</em> &mdash; and you should spend <strong>more on hard problems, less on easy ones</strong>.</p>
+    <div class="approach-steps">
+      <span class="anim-node">Fixed budget<small>FLOPs / tokens</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Parallel vote<small>N short CoTs</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Sequential<small>one long CoT</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Search<small>tree / MCTS</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Adaptive<small>per-difficulty</small></span>
+    </div>
+    <ol>
+      <li class="fragment"><strong>Parallel</strong> &mdash; draw N samples, vote/verify. Low latency, robust to a single bad trace; needs answers that cluster or a verifier.</li>
+      <li class="fragment"><strong>Sequential</strong> &mdash; one long self-revising trace. Deep dependency &amp; self-correction; high latency, can derail.</li>
+      <li class="fragment"><strong>Search</strong> &mdash; tree / MCTS over steps. Best for large branching spaces with a strong step-verifier; most expensive.</li>
+      <li class="fragment"><strong>Adaptive allocation</strong> &mdash; estimate difficulty (e.g. early-sample agreement) and give hard-but-solvable problems more budget, easy ones almost none.</li>
+    </ol>
+    <p class="eqnote fragment">Compute-optimal &gt; uniform: a uniform budget over-spends on easy and under-spends on hard. Allocate where marginal accuracy-per-FLOP is highest.</p>
+    <aside class="notes">
+      The effort dial has three positions and a controller. Parallel scaling is embarrassingly parallel and low-latency &mdash; many short CoTs aggregated by majority vote or a verifier; it shines when correct answers cluster or you have a good verifier, but voting reinforces a confidently-wrong dominant mode. Sequential scaling is one long, self-revising trace &mdash; it builds on and corrects earlier work for deep dependencies, at the cost of latency and the risk of locking onto a wrong path. Search (tree / MCTS) uses a step-level verifier to prune a large branching space &mdash; powerful but an order of magnitude more LLM calls and largely sequential. The controller on top is adaptive, per-difficulty allocation, which is the compute-optimal idea from Snell et al.: estimate each problem's difficulty &mdash; cheaply, via agreement among a couple of early samples or a difficulty predictor &mdash; and route budget so genuinely hard-but-solvable problems get more and easy ones get almost none. A uniform budget wastes compute on the easy tail and starves the hard middle; adaptive allocation gets higher accuracy at the same total cost.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 12 · PITFALLS / MISCONCEPTIONS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Pitfalls · misconceptions</p>
+    <h2>People think X, but actually Y (1/2)</h2>
+    <div class="callout warn"><span class="t">&#9888; Pitfall</span>
+      <ul>
+        <li class="fragment"><strong>Think:</strong> more thinking always helps. <strong>Actually:</strong> on simple recall/format tasks long CoT <em>hurts</em> &mdash; the model talks itself out of a correct first instinct &mdash; and it always raises latency &amp; cost.</li>
+        <li class="fragment"><strong>Think:</strong> the visible CoT explains the answer. <strong>Actually:</strong> CoT can be <em>unfaithful</em> &mdash; right answer reached by a wrong or irrelevant trace; the stated steps may not be what the model actually used.</li>
+        <li class="fragment"><strong>Think:</strong> a verifiable reward is safe to optimize hard. <strong>Actually:</strong> reward hacking &mdash; length gaming, hard-coding test outputs, exploiting a lenient answer-extractor &mdash; meets the reward without solving the task.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      First three, and the first is the one teammates get wrong constantly. "More thinking always helps" &mdash; no: on factual recall or strict formatting the first-instinct answer is usually right, and extended reasoning gives the model room to introduce distractors, rationalize a wrong alternative, or drift off the required format. Net negative accuracy plus guaranteed extra latency and cost &mdash; the phenomenon is overthinking. Two: the visible CoT is not a reliable explanation. Faithfulness research shows a model can reach the right answer through a trace that is decorative, post-hoc, or simply not the causal path it used; test it by perturbing or truncating the CoT and seeing if the answer changes. Three: a verifiable reward feels unhackable but the policy optimizes the <em>signal</em>, not the task &mdash; it games length, special-cases known test inputs, hard-codes expected outputs, or exploits a sloppy regex extractor. The reward goes up while real reasoning stays bogus.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Pitfalls · misconceptions</p>
+    <h2>People think X, but actually Y (2/2)</h2>
+    <div class="callout warn"><span class="t">&#9888; Pitfall</span>
+      <ul>
+        <li class="fragment"><strong>Think:</strong> pass@64 is high, so the model is great. <strong>Actually:</strong> pass@k counts a problem solved if <em>any</em> of k tries works &mdash; it measures coverage, not single-shot reliability. <strong>pass@1 is the honest number.</strong></li>
+        <li class="fragment"><strong>Think:</strong> if you don't state k, the score still compares. <strong>Actually:</strong> always report <strong>k, temperature, and the selector</strong> (maj@k / BoN@k) &mdash; otherwise numbers aren't comparable and overstate deployed performance.</li>
+        <li class="fragment"><strong>Think:</strong> a high benchmark score = real reasoning. <strong>Actually:</strong> <em>contamination</em> &mdash; AIME/MATH/GPQA and their solutions are likely in pretraining, so scores can reflect memorization. Test on fresh/post-cutoff problems and perturbed variants.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Three evaluation traps. The pass@64 one is the most seductive: pass@k marks a problem solved if any of k samples succeeds, so it climbs with k and measures the model's <em>coverage</em> &mdash; whether a correct trace exists in the sample set &mdash; not whether the model reliably produces one in a single shot. In production you usually get one answer, so pass@1 is the honest deployed number; a big pass@1-to-pass@64 gap is a selection/reliability problem you fix with a verifier or RL, not evidence of greatness. That's why you must always disclose k, the temperature, and the aggregation method &mdash; maj@k and BoN@k additionally depend on the voter or verifier &mdash; or the comparison is meaningless and inflated. Finally contamination: the popular reasoning benchmarks and their worked solutions are widely published and almost certainly in pretraining data, and reasoning models are precisely sold on reasoning, so a memorized answer masquerades as reasoning. Detect it with freshly released problems (a new AIME year), number/phrasing perturbations that should preserve difficulty, and private held-out sets; report on contamination-controlled subsets.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 13 · WHAT'S NEW + PAPERS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">What's new</p>
+    <h2>How reasoning models actually got built</h2>
+    <div class="callout whatsnew"><span class="t">&#128640; What's new</span>
+      <ul>
+        <li class="fragment"><strong>CoT &#8594; sampling &#8594; search.</strong> Chain-of-thought, then self-consistency voting, then Tree-of-Thoughts &mdash; test-time compute became a first-class lever.</li>
+        <li class="fragment"><strong>Verifiers &amp; process supervision.</strong> "Let's Verify Step by Step" showed step-level PRMs beat outcome-only rewards for selecting correct solutions.</li>
+        <li class="fragment"><strong>RL from verifiable rewards.</strong> STaR&#8217;s generate-verify-retrain loop &#8594; GRPO (DeepSeekMath) &#8594; DeepSeek-R1, which got reasoning to emerge from <em>pure RL</em>.</li>
+        <li class="fragment"><strong>Test-time scaling laws.</strong> Snell et al. quantified accuracy-vs-compute; s1 showed budget-forcing controls trace length with a tiny SFT set.</li>
+        <li class="fragment"><strong>Products.</strong> OpenAI o1/o3 (hidden traces) and DeepSeek-R1 (visible) made long-CoT reasoning mainstream.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      The arc of the whole field in one slide. It starts with chain-of-thought (Wei) making intermediate tokens a tool, then self-consistency (Wang) showing you can sample many traces and vote, then Tree-of-Thoughts (Yao) generalizing voting into deliberate search. In parallel, the verifier line: "Let's Verify Step by Step" (Lightman) showed process reward models that grade each step beat outcome-only rewards for selection on hard math. The RL line is the engine of today's models: STaR (Zelikman) is the generate-verify-retrain seed, GRPO (DeepSeekMath / Shao) made critic-free RL practical, and DeepSeek-R1 demonstrated reasoning emerging from pure RL on verifiable rewards. Snell et al. gave us the test-time scaling laws and the compute-optimal framing, and s1 (Muennighoff) showed budget forcing &mdash; appending "Wait" to keep the model thinking &mdash; with only 1,000 curated examples. The products that made this real are OpenAI o1/o3, with hidden traces, and DeepSeek-R1, with visible ones.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">What's new · papers</p>
+    <h2>Papers &mdash; verified links</h2>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2201.11903" target="_blank" rel="noopener noreferrer">Chain-of-Thought Prompting Elicits Reasoning in Large Language Models</a> <span class="meta">&mdash; Wei et al., 2022. Intermediate steps unlock complex reasoning.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2203.11171" target="_blank" rel="noopener noreferrer">Self-Consistency Improves Chain of Thought Reasoning in Language Models</a> <span class="meta">&mdash; Wang et al., 2022. Sample many traces, marginalize by majority vote.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2305.10601" target="_blank" rel="noopener noreferrer">Tree of Thoughts: Deliberate Problem Solving with Large Language Models</a> <span class="meta">&mdash; Yao et al., 2023. Search over reasoning steps with self-evaluation.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2305.20050" target="_blank" rel="noopener noreferrer">Let's Verify Step by Step</a> <span class="meta">&mdash; Lightman et al., 2023. Process supervision (PRM) beats outcome supervision.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2203.14465" target="_blank" rel="noopener noreferrer">STaR: Bootstrapping Reasoning With Reasoning</a> <span class="meta">&mdash; Zelikman et al., 2022. Generate &#8594; verify &#8594; retrain on correct traces.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2408.03314" target="_blank" rel="noopener noreferrer">Scaling LLM Test-Time Compute Optimally can be More Effective than Scaling Model Parameters</a> <span class="meta">&mdash; Snell et al., 2024. Compute-optimal test-time allocation.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2402.03300" target="_blank" rel="noopener noreferrer">DeepSeekMath: Pushing the Limits of Mathematical Reasoning (GRPO)</a> <span class="meta">&mdash; Shao et al., 2024. Critic-free group-relative RL.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2501.12948" target="_blank" rel="noopener noreferrer">DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via RL</a> <span class="meta">&mdash; DeepSeek-AI, 2025. Reasoning emerges from pure RL.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2501.19393" target="_blank" rel="noopener noreferrer">s1: Simple Test-Time Scaling</a> <span class="meta">&mdash; Muennighoff et al., 2025. Budget forcing + 1K curated examples.</span></div>
+    <p class="small fragment"><strong>Products (cite by name):</strong> OpenAI o1 / o3 &mdash; hidden reasoning traces, effort settings (no arXiv paper).</p>
+    <aside class="notes">
+      These are the canonical reasoning papers and all nine arXiv links are verified to resolve. The teaching order mirrors the previous slide: CoT, self-consistency, Tree-of-Thoughts on the inference-scaling side; Let's Verify Step by Step for process supervision; STaR, DeepSeekMath/GRPO, and DeepSeek-R1 for the RL lineage; Snell et al. for the scaling laws; and s1 for controllable budget forcing. Note the self-consistency arXiv page now shows a 2023 revision but the original submission is 2022 &mdash; I cite the original year. OpenAI o1 and o3 are products with no peer-reviewed arXiv paper, so I name them rather than fabricate a link. If a student reads only two, I'd pick DeepSeek-R1 to see the modern RL recipe end to end, and Snell et al. to understand when test-time compute beats parameters.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 14 · PRACTICE
+     ============================================================ -->
+<section>
+  <p class="kicker">Practice</p>
+  <h2>Practice — click a question to reveal the answer</h2>
+  <p class="small muted">Full bank: <a href="../../interview-prep/28-reasoning-models-and-test-time-compute.md">28 · Reasoning Models &amp; Test-Time Compute</a> — from the answer key, condensed.</p>
+
+  <!-- ===== SET 1 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">What distinguishes a reasoning model (o1/o3, R1) from a standard instruction-tuned LLM? <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Reasoning models are trained (largely via RL on verifiable rewards) to generate a long internal chain-of-thought before answering &mdash; spending test-time compute to plan, branch, and self-correct &mdash; and usually expose a thinking/effort budget. Same transformer architecture; the difference is training objective and decoding behavior. <span class="watch">They trade latency &amp; tokens for accuracy on multi-step tasks, not on simple ones.</span></div></li>
+
+      <li class="qa"><span class="q">Why do intermediate CoT tokens let a transformer solve problems one forward pass cannot? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">A transformer has fixed depth, so one pass does a bounded number of serial steps. Each emitted token is fed back as input, so generating intermediate tokens unrolls computation along the sequence &mdash; adding serial depth via the autoregressive loop &mdash; and the scratchpad acts as external working memory for intermediate results.</div></li>
+
+      <li class="qa"><span class="q">Define test-time compute and give three ways to spend more of it. <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">The FLOPs/tokens spent generating an answer after training is fixed. Three mechanisms: longer chain-of-thought (more serial tokens); parallel sampling + aggregation (self-consistency or best-of-N with a verifier); and search (beam/lookahead/MCTS over reasoning steps). Also tool calls and self-refinement loops.</div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 2 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Explain self-consistency; why does majority vote over CoT beat greedy on math? <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Sample multiple CoT traces at nonzero temperature, then take the most frequent final answer (marginalize over paths). It wins because there are many valid paths to the right answer but errors are diverse and scattered &mdash; correct answers cluster, wrong ones disperse. <span class="watch">It counts final answers, not trace quality &mdash; it does not pick the "best" trace.</span></div></li>
+
+      <li class="qa"><span class="q">Best-of-N vs majority voting &mdash; what does BoN require that voting doesn't, and when prefer each? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">BoN picks the single highest-scoring candidate, so it needs a verifier/reward model; voting just counts answer frequency and needs no scorer. Prefer voting for discrete checkable answers that cluster; prefer BoN when you have a strong/deterministic verifier or free-form outputs that don't vote cleanly. Weighted (verifier-weighted) voting combines both.</div></li>
+
+      <li class="qa"><span class="q">What is the generation-verification gap, and why is it the precondition for search/BoN? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">The asymmetry where verifying/scoring a candidate is easier or more accurate than generating a correct one in one shot. When that gap exists, sampling many candidates and selecting via the verifier yields net gains. <span class="watch">No gap &#8594; selection adds no information and BoN/search can't beat a single good sample.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 3 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">What is RLVR, and how does its reward differ from RLHF's learned preference reward? <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">RL from Verifiable Rewards: the reward comes from automatically checking the final answer (answer match, unit tests, compiler) &mdash; objective, usually binary, hard to game on the answer itself. RLHF instead uses a learned reward model trained on human preferences &mdash; subjective, approximate, and exploitable. <span class="watch">RLVR is limited to domains where correctness is checkable.</span></div></li>
+
+      <li class="qa"><span class="q">Explain GRPO; how does it estimate advantages without a critic? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Group Relative Policy Optimization samples a group of G completions per prompt, scores each, and sets each advantage to its reward standardized within the group: A&#8345; = (r&#8345; &minus; mean(r)) / std(r). The group mean is the baseline, so no value network is needed; then a PPO-style clipped update with a KL penalty. <span class="watch">All-equal-reward groups give zero advantage &#8594; no gradient.</span></div></li>
+
+      <li class="qa"><span class="q">What is reward hacking in RLVR on math/code? Give two examples. <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">The policy maximizes the reward signal without genuinely solving the task. (1) Grader exploitation &mdash; hard-coding expected test outputs or exploiting a lenient answer-extractor so a wrong solution scores correct. (2) Format/length gaming &mdash; emitting a right-looking boxed number via an invalid route, or padding the trace because length correlates with reward.</div></li>
+
+      <li class="qa"><span class="q">Correct final answers but incoherent/irrelevant reasoning &mdash; what's happening, and how to detect/fix? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Outcome-only RLVR rewards the endpoint, so the model can reach it via shortcuts while the visible trace is decorative or unfaithful. Detect: perturb/truncate the CoT and check if the answer changes; have a PRM/judge score step validity. Fix: add process supervision, penalize unfaithful traces, or rejection-sample coherent correct traces.</div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 4 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Argue against "reasoning always improves accuracy, so always max thinking." <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">On simple factual/formatting tasks long CoT can introduce errors (overthinking &mdash; second-guessing a correct first instinct), lowering accuracy while always raising latency and cost. Beyond a model's capability, extra thinking doesn't help either. Counterexamples: "capital of France?", strict JSON reformatting, simple classification &mdash; direct answering is faster and at least as accurate.</div></li>
+
+      <li class="qa"><span class="q">What is compute-optimal allocation across difficulties, and why beat a uniform budget? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Give each problem the test-time compute that maximizes marginal accuracy per FLOP: easy problems get little (already solved), hard-but-solvable get more, hopeless ones aren't wasted on. A uniform budget over-spends on easy and under-spends on hard. Estimate difficulty (early-sample agreement, a predictor) and route budget accordingly for more accuracy at the same cost.</div></li>
+
+      <li class="qa"><span class="q">pass@1 is low but pass@64 is high &mdash; what does the gap mean, and how do you act? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">The model can generate correct solutions (coverage exists) but can't reliably produce/select one in a single attempt &mdash; a selection/reliability gap, not pure capability. Act: at inference add a verifier/reranker or self-consistency/BoN; in training do RL or rejection-sampling SFT on the correct traces to make the right path the default. <span class="watch">A strong verifier is often the highest-leverage fix.</span></div></li>
+
+      <li class="qa"><span class="q">Why is CoT faithfulness a safety/eval concern, and how do you test it? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">If the visible CoT doesn't reflect the actual computation, you can't trust it for oversight or as evidence &mdash; it may rationalize, hide the real (possibly unsafe) reason, or be right by luck. Test causally: perturb/truncate the CoT and see if the answer changes; inject hints/errors and check whether the model silently uses or acknowledges them.</div></li>
+    </ul>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 15 · TAKEAWAYS + CLOSING
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Takeaways</p>
+    <h2>What to remember</h2>
+    <div class="takeaways"><ul>
+      <li class="fragment"><strong>CoT is computation:</strong> intermediate tokens add serial depth a fixed-depth pass lacks &mdash; thinking <em>is</em> spending test-time compute.</li>
+      <li class="fragment"><strong>Checkability picks the lane:</strong> verifiable &#8594; RLVR + best-of-N; multi-step &#8594; CoT + self-consistency / PRM; simple &#8594; no reasoning.</li>
+      <li class="fragment"><strong>The gap is the precondition:</strong> search &amp; BoN only pay off when verifying is easier than generating.</li>
+      <li class="fragment"><strong>Spend compute where it helps:</strong> parallel vote, sequential long-CoT, or search &mdash; allocated <em>per difficulty</em>, not uniformly.</li>
+      <li class="fragment"><strong>RLVR powers modern reasoning:</strong> STaR &#8594; GRPO &#8594; R1 &mdash; but watch reward hacking, length gaming, and entropy collapse.</li>
+      <li class="fragment"><strong>Be honest in eval:</strong> report k &amp; sampling; <strong>pass@1</strong> is the deployed number; guard against contamination &amp; unfaithful CoT.</li>
+    </ul></div>
+    <aside class="notes">
+      The recap &mdash; the spine of the lecture, now earned. Chain-of-thought is literally extra serial computation, so "thinking" is the act of spending test-time compute. The single most useful decision rule is checkability: it tells you whether a verifier exists and therefore which lane &mdash; RLVR plus best-of-N for math/code, CoT plus self-consistency or a PRM for un-checkable multi-step work, and no reasoning at all for simple recall and formatting. The generation-verification gap is the precondition that makes any selection method worthwhile. How much to spend is the effort dial &mdash; parallel, sequential, or search &mdash; allocated adaptively by difficulty, not uniformly. The RL lineage from STaR through GRPO to R1 is what built today's models, with reward hacking and entropy collapse as the failure modes. And the honesty rules: always report k and sampling, treat pass@1 as the real number, and stay alert to contamination and unfaithful traces. If a student leaves with two sentences: "checkability picks the lane," and "pass@1 is the honest number."
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Further reading · closing</p>
+    <h2>Go deeper</h2>
+    <div class="paper"><a href="https://arxiv.org/abs/2501.12948" target="_blank" rel="noopener noreferrer">DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via RL</a> <span class="meta">&mdash; DeepSeek-AI, 2025. The modern RL recipe end to end.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2408.03314" target="_blank" rel="noopener noreferrer">Scaling LLM Test-Time Compute Optimally...</a> <span class="meta">&mdash; Snell et al., 2024. When inference compute beats parameters.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2305.20050" target="_blank" rel="noopener noreferrer">Let's Verify Step by Step</a> <span class="meta">&mdash; Lightman et al., 2023. Process supervision &amp; verifiers.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2501.19393" target="_blank" rel="noopener noreferrer">s1: Simple Test-Time Scaling</a> <span class="meta">&mdash; Muennighoff et al., 2025. Budget forcing with a tiny dataset.</span></div>
+    <p style="margin-top:1em;text-align:center;font-size:1.1em;"><strong>Checkability picks the lane. The verifier is the moat. pass@1 is the honest number.</strong></p>
+    <p style="text-align:center;opacity:.6;font-size:.85em;">End of module &mdash; thank you. Press <kbd>O</kbd> for overview.</p>
+    <aside class="notes">
+      Closing. Four reads to go deeper: DeepSeek-R1 for the full modern RL pipeline, Snell et al. for the compute-optimal test-time scaling story, Let's Verify Step by Step for verifiers and process supervision, and s1 for the controllable budget-forcing technique with a tiny SFT set. The one-line crystallization of the whole lecture: checkability picks the lane, the verifier is the moat, and pass@1 is the honest number. That's what I want them repeating on the way out. Offer to open the overview or jump back to the decision flow or any approach.
+    </aside>
+  </section>
+</section>
+
+    </div>
+  </div>
+  <!-- reveal.js core + plugins + mermaid (CDN), then shared deck runtime -->
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/math/math.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+  <script src="../assets/deck.js?v=2"></script>
+</body>
+</html>

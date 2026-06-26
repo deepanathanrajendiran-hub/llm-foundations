@@ -58,9 +58,10 @@
       <a class="nav-link" href="decks/synthetic-data.html"><span class="num">31</span> Synthetic Data</a>
 
       <div class="nav-group-title">Phase 3 · Reasoning &amp; Inference</div>
-      <span class="nav-link soon"><span class="num">28</span> Reasoning Models</span>
-      <span class="nav-link soon"><span class="num">11</span> Inference &amp; Serving</span>
-      <span class="nav-link soon"><span class="num">32</span> Small / Edge Models</span>
+      <a class="nav-link" href="decks/decoding-sampling.html"><span class="num">10</span> Decoding &amp; Sampling</a>
+      <a class="nav-link" href="decks/inference-optimization.html"><span class="num">11</span> Inference &amp; Serving</a>
+      <a class="nav-link" href="decks/reasoning-models.html"><span class="num">28</span> Reasoning Models</a>
+      <a class="nav-link" href="decks/small-language-models.html"><span class="num">32</span> Small / Edge Models</a>
 
       <div class="nav-group-title">Phase 4 · Building Apps</div>
       <span class="nav-link soon"><span class="num">29</span> Context Engineering</span>
@@ -161,12 +162,42 @@
           </a>
         </div>
 
+        <h2 style="font-size:1.15rem;color:var(--muted);font-weight:700;letter-spacing:.02em;border:0;margin:2.2em 0 .2em;">
+          Phase 3 · Reasoning &amp; Inference — built &amp; ready to teach
+        </h2>
+        <p style="color:var(--muted);margin-top:0;font-size:.97rem;">From logits to a served token: how the model's next-token decision is actually made, then how to run it fast and cheap &mdash; plus how models <em>reason</em> at inference and how they shrink to run on a phone. Four <strong>reveal.js slide decks</strong> — click to present (<kbd>←</kbd>/<kbd>→</kbd> nav · <kbd>S</kbd> speaker notes · <kbd>O</kbd> overview · <kbd>F</kbd> fullscreen); append <code>?print-pdf</code> to export a PDF.</p>
+        <div class="card-grid">
+          <a class="topic-card" href="decks/decoding-sampling.html">
+            <span class="badge">MODULE 10 · ▶ DECK</span>
+            <h3>Decoding &amp; Sampling Strategies</h3>
+            <p>Greedy &amp; beam, temperature, top-k / top-p (nucleus) / min-p / typical, repetition &amp; contrastive control, Mirostat, constrained (JSON/grammar) and speculative decoding. With a distribution-reshaping demo.</p>
+            <span class="pill">~17 min</span>
+          </a>
+          <a class="topic-card" href="decks/inference-optimization.html">
+            <span class="badge">MODULE 11 · ▶ DECK</span>
+            <h3>Inference Optimization &amp; Serving</h3>
+            <p>KV cache, quantization (GPTQ/AWQ/FP8), GQA/MLA, FlashAttention, PagedAttention/vLLM, prefix caching, continuous batching, speculative decoding and parallelism. With a KV-cache demo.</p>
+            <span class="pill">~18 min</span>
+          </a>
+          <a class="topic-card" href="decks/reasoning-models.html">
+            <span class="badge">MODULE 28 · ▶ DECK</span>
+            <h3>Reasoning Models &amp; Test-Time Compute</h3>
+            <p>CoT as computation, self-consistency, best-of-N, PRM-guided search, RLVR &amp; GRPO, the long-CoT &ldquo;thinking&rdquo; models (o1, DeepSeek-R1), and reasoning distillation. With a test-time-compute demo.</p>
+            <span class="pill">~17 min</span>
+          </a>
+          <a class="topic-card" href="decks/small-language-models.html">
+            <span class="badge">MODULE 32 · ▶ DECK</span>
+            <h3>Small Language Models &amp; Edge</h3>
+            <p>Why small wins, distillation, pruning, edge quantization (GGUF/AWQ/NF4), efficient architectures, the strong SLM families (Phi/Gemma/Qwen/SmolLM), on-device runtimes and the phone memory budget. With a shrink-pipeline demo.</p>
+            <span class="pill">~18 min</span>
+          </a>
+        </div>
+
         <h2 style="font-size:1.15rem;color:var(--muted);font-weight:700;letter-spacing:.02em;border:0;margin:2em 0 .2em;">
           Coming soon
         </h2>
         <p style="color:var(--muted);margin-top:0;font-size:.97rem;">New topics are added ~2 per week; the sidebar fills in as each lands.</p>
         <div class="card-grid">
-          <span class="topic-card disabled"><span class="badge">28 · PHASE 3</span><h3>Reasoning Models</h3><p>Test-time compute, RLVR, verifiers and self-improvement.</p></span>
           <span class="topic-card disabled"><span class="badge">13 · PHASE 4</span><h3>RAG</h3><p>Chunking, retrieval, reranking and RAG vs long-context.</p></span>
           <span class="topic-card disabled"><span class="badge">15 · PHASE 4</span><h3>Agents &amp; Tools</h3><p>The agentic loop, function calling, planning and memory.</p></span>
           <span class="topic-card disabled"><span class="badge">30 · PHASE 6</span><h3>Beyond Transformers</h3><p>SSMs, Mamba, linear attention and hybrid architectures.</p></span>

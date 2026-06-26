@@ -1,0 +1,1375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Small Language Models &amp; Edge AI — LLM Teaching Decks</title>
+  <meta name="description" content="A reveal.js lecture deck: why small wins, distillation, pruning, quantization, efficient architectures, strong SLM families, and on-device runtimes &amp; constraints." />
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/white.css" id="reveal-theme" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <link rel="stylesheet" href="../assets/deck.css?v=2" />
+
+  <!-- FOUC guard: set deck theme before first paint -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("deck-theme") ||
+          ((window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+        if (t === "dark") document.documentElement.classList.add("deck-dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+
+<!-- ============================================================
+     SECTION 1 · TITLE
+     ============================================================ -->
+<section>
+  <section class="deck-title">
+    <div class="logo">&#8721;</div>
+    <p class="kicker">PHASE 3 · REASONING &amp; INFERENCE · MODULE 32</p>
+    <h1>Small Language Models &amp; Edge AI</h1>
+    <p class="subtitle">Why small often wins &mdash; cost, latency, privacy, offline &mdash; and how a 1&ndash;3B model gets strong enough to ship on a phone: distillation, quantization, pruning, efficient architectures, great data, and on-device runtimes.</p>
+    <p class="keyhint"><kbd>&larr;</kbd><kbd>&rarr;</kbd> navigate · <kbd>S</kbd> speaker notes · <kbd>O</kbd> overview · <kbd>F</kbd> fullscreen · append <code>?print-pdf</code> to export</p>
+    <aside class="notes">
+      Welcome. The headlines chase the biggest frontier models, but a huge slice of real products runs on the <em>small</em> end &mdash; models that fit on a phone, a laptop, or a cheap VM. This module is about why you'd deliberately choose a 1&ndash;3B model over a frontier API, and how those small models got good enough to be worth choosing. The single sentence the whole lecture turns on: <em>on-device decode is memory-bandwidth bound, so quantization isn't optional &mdash; it's the price of admission.</em> We'll walk the shrink pipeline (distill &rarr; quantize &rarr; prune &rarr; package), do the phone memory-budget arithmetic, meet the strong SLM families, and end on the cascade pattern: let a small model handle most traffic and escalate only the hard cases.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 2 · ROADMAP
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Roadmap</p>
+    <h2>What you'll learn <span style="font-weight:500;opacity:.6;font-size:.6em;">(~16 min of content, 30&ndash;45 min taught)</span></h2>
+    <div class="callout"><span class="t">&#128203; The arc</span>
+      <ul>
+        <li class="fragment"><strong>Why SLMs</strong> &mdash; cost, latency, privacy, offline, control/compliance</li>
+        <li class="fragment"><strong>How they get strong</strong> &mdash; distill &rarr; prune &rarr; quantize &rarr; efficient architecture &rarr; data quality</li>
+        <li class="fragment"><strong>The strong families</strong> &mdash; Phi, Gemma, Qwen, Llama, SmolLM</li>
+        <li class="fragment"><strong>On-device runtimes &amp; edge constraints</strong> &mdash; llama.cpp/GGUF, Core ML/MLX, memory · battery · thermal · network</li>
+        <li class="fragment"><strong>SLM vs frontier &amp; closing the gap</strong> &mdash; RAG, fine-tuning, test-time compute, the cascade</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Five beats, in the order they build. One: why you'd reach for a small model at all &mdash; it's almost never "small is more accurate," it's privacy, latency, offline, and cost. Two: the compression toolkit that makes small models strong &mdash; distillation borrows a teacher's skill, pruning and quantization shrink the footprint, efficient architecture and clean data stretch every parameter. Three: the families you'll actually deploy. Four: the runtimes and the four hard edge constraints &mdash; memory, battery, thermal, network. Five: the decision &mdash; when to ship an SLM, how to close the gap to a frontier model, and the cascade that routes hard cases up. If they leave with two sentences, make them "quantization is the price of admission on-device" and "cascade: small handles most, escalate the rest."
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Core ideas to land</p>
+    <h2>Five things to take away</h2>
+    <div class="takeaways"><ul>
+      <li class="fragment"><strong>Quality of data beats quantity</strong> &mdash; for small models, clean dense tokens matter more than raw volume.</li>
+      <li class="fragment"><strong>Quantization is non-negotiable on-device</strong> &mdash; FP16 weights rarely fit; INT4 is the default.</li>
+      <li class="fragment"><strong>On-device decode is memory-bandwidth bound</strong> &mdash; you wait on reading weights, not on FLOPs.</li>
+      <li class="fragment"><strong>Structured pruning is what actually speeds up commodity HW</strong> &mdash; unstructured zeros don't.</li>
+      <li class="fragment"><strong>Cascade: small handles most, escalate the hard cases</strong> &mdash; route, don't pay frontier prices on every call.</li>
+    </ul></div>
+    <aside class="notes">
+      This is the executive summary &mdash; I come back to it as the recap. Watch how they chain. Clean data is <em>why</em> a 3B Phi model can out-punch its size; quantization is <em>how</em> it fits on the phone; bandwidth-bound decode is <em>why</em> smaller weights run faster (less to read each token); structured pruning is the kind of shrinking your phone's GPU can actually exploit, because dense math units can't skip scattered zeros; and the cascade is the system pattern that gets you frontier-ish quality at SLM cost &mdash; the small model answers the easy 80%, and only the hard 20% pays for the big model. Those five sentences are the spine of the whole deck.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 3 · WHY IT MATTERS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Why it matters</p>
+    <h2>Five reasons to choose small</h2>
+    <div class="flow">
+      <span class="box accent">Privacy<small>data never leaves device</small></span>
+      <span class="arrow">·</span>
+      <span class="box accent">Offline<small>works on a plane / clinic</small></span>
+      <span class="arrow">·</span>
+      <span class="box accent">Latency<small>no network round-trip</small></span>
+      <span class="arrow">·</span>
+      <span class="box green">Cost<small>no per-token API bill</small></span>
+      <span class="arrow">·</span>
+      <span class="box green">Control<small>own the weights &amp; updates</small></span>
+    </div>
+    <ul style="margin-top:.6em;">
+      <li class="fragment"><strong>Privacy:</strong> on-device inference means raw user data never leaves the phone &mdash; nothing to leak, subpoena, or breach.</li>
+      <li class="fragment"><strong>Offline &amp; latency:</strong> a flight-mode translator or a clinical scribe in a no-signal hospital can't depend on a cloud call.</li>
+      <li class="fragment"><strong>Cost &amp; control:</strong> no per-token bill at scale, and a regulated org owns its weights, data residency, and update cadence.</li>
+    </ul>
+    <aside class="notes">
+      Spell out the business case, because "small is cheaper to train" is the least interesting reason. Privacy is the big one: if inference runs on-device, the user's photos, messages, or health data never touch a third party &mdash; that turns a compliance nightmare into a non-event. Offline is a <em>hard</em> requirement, not a nice-to-have, for two categories worth naming: anything that must work without connectivity (in-flight, remote field work, a basement) and anything in a regulated, air-gapped setting (a hospital, a defense network). Latency follows: skipping the network round-trip can make a small local model <em>feel</em> faster than a big cloud one. Cost flips from per-token opex to a one-time download. And control &mdash; owning the weights, the data residency story, and the update schedule &mdash; is exactly what GDPR/HIPAA-bound industries need. We unpack the latency claim on the next slide because it's the counterintuitive one.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Why it matters · the latency surprise</p>
+    <h2>Lower tok/s can still mean lower end-to-end latency</h2>
+    <div class="cols">
+      <div>
+        <h5>Cloud frontier model</h5>
+        <ul>
+          <li class="fragment">High raw <strong>tok/s</strong> on a datacenter GPU</li>
+          <li class="fragment">But: network RTT + queueing + TLS + cold starts</li>
+          <li class="fragment">Tail latency spikes under load</li>
+        </ul>
+      </div>
+      <div>
+        <h5>On-device SLM</h5>
+        <ul>
+          <li class="fragment">Lower raw tok/s on a phone NPU/GPU</li>
+          <li class="fragment">But: <strong>zero network</strong> &mdash; no RTT, no queue</li>
+          <li class="fragment"><strong>Time-to-first-token</strong> is near-instant</li>
+        </ul>
+      </div>
+    </div>
+    <p class="fragment" style="margin-top:.5em;">Users feel <strong>time-to-first-token</strong> and tail latency, not datacenter throughput. Local often wins the metric that matters.</p>
+    <aside class="notes">
+      This is the slide interviewers love. The trap is comparing the wrong number: a datacenter GPU posts way more tokens-per-second than a phone, so people assume the cloud is always faster end-to-end. But end-to-end latency for an interactive feature is dominated by <em>time-to-first-token</em> and the tail, not steady-state throughput. The cloud path pays a fixed tax every request &mdash; DNS, TLS handshake, network round-trip, server-side queueing, occasional cold starts &mdash; and that tax balloons under load right when you care most. The on-device model has none of that: the moment the user hits enter, it's already decoding. For a short reply, near-instant first token plus a modest local tok/s can beat a faster-but-remote model. The lesson: optimize and report the metric the user feels, which is usually TTFT and p99, not the headline tok/s.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 4 · INTUITION
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Intuition</p>
+    <h2>Capability per parameter, not raw parameters</h2>
+    <ul>
+      <li class="fragment">Old mental model: <strong>more parameters = more capability.</strong> Roughly true at fixed training quality.</li>
+      <li class="fragment">But two 3B models can be worlds apart &mdash; the <strong>training recipe</strong> is the hidden variable.</li>
+      <li class="fragment">A small model trained on <strong>dense, clean, well-curated</strong> data learns more per parameter (the Phi "textbooks" bet).</li>
+      <li class="fragment">Distillation lets a small student inherit a big teacher's <strong>behavior</strong> without the teacher's size.</li>
+      <li class="fragment">So "smaller but smarter" is real &mdash; today's 3B rivals last generation's 7B because the <em>data and recipe</em> improved.</li>
+    </ul>
+    <aside class="notes">
+      The reframe to plant early: stop thinking in raw parameter count and start thinking capability-per-parameter. Parameters are capacity; the training recipe decides how much of that capacity becomes useful skill. Two models of identical size can differ enormously depending on what they were fed and how they were trained &mdash; this is exactly why SLMs improved far faster than parameter count alone would predict over the last few generations. Three levers do the work: better data (Phi's textbook-quality synthetic corpus packs more signal into every token, and small models are <em>more</em> sensitive to data quality because they have less capacity to waste), distillation (a small student trained on a large teacher's outputs beats the same small model trained from scratch on raw web text), and architecture/efficiency tricks we'll cover later. Net: a well-trained 3B today can match a 7B from a generation ago. That's the whole optimism of this module.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Intuition · the budget</p>
+    <h2>Everything shares ~8GB on a phone</h2>
+    <p>The model isn't alone &mdash; weights, KV cache, activations, <em>and the OS</em> all draw from one small pool.</p>
+    <div class="flow">
+      <span class="box ghost">OS + app<small>~3&ndash;4 GB, always</small></span>
+      <span class="arrow">+</span>
+      <span class="box accent">Weights<small>quantized, the big rock</small></span>
+      <span class="arrow">+</span>
+      <span class="box accent">KV cache<small>grows with context</small></span>
+      <span class="arrow">+</span>
+      <span class="box green">Activations<small>transient, per token</small></span>
+      <span class="arrow">=</span>
+      <span class="box">&le; ~8 GB total<small>or the OS kills you</small></span>
+    </div>
+    <ul style="margin-top:.5em;">
+      <li class="fragment">The OS reserves a big chunk and <strong>will kill your app</strong> if the system runs low &mdash; you don't get all 8GB.</li>
+      <li class="fragment">Weights are the fixed cost; the <strong>KV cache</strong> is the sneaky one &mdash; it grows linearly with context length.</li>
+    </ul>
+    <aside class="notes">
+      This is the constraint that governs every on-device decision, so make it physical. A typical phone has ~8GB of RAM, and you share it with everyone: the OS and other apps hold ~3&ndash;4GB at all times, and the OS aggressively kills background &mdash; and even foreground &mdash; apps under memory pressure. So your real budget is more like 4&ndash;5GB. Into that go three things: the weights (fixed, and the single biggest rock &mdash; this is why quantization is non-negotiable), the KV cache (grows linearly with context length and model size, and on long chats it can rival the weights themselves), and activations (transient working memory per forward pass). We'll do the actual arithmetic in the next section, but the intuition to lock in now is: you are not memory-rich, the OS is your landlord, and the KV cache is the line item people forget until their app gets killed mid-conversation.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 5 · HOW IT WORKS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">How it works · the shrink pipeline</p>
+    <h2>From frontier teacher to phone &mdash; one pass</h2>
+    <p>The standard recipe to ship a capable small model: borrow skill, then shrink, then package.</p>
+    <div class="keyanim"><script type="application/json">
+    {"title":"The shrink pipeline — teacher → distill → quantize → prune → package → device",
+     "nodes":[["Big teacher","frontier LLM"],["Distill","student learns"],["Quantize","INT4 / NF4"],["Prune","trim weights"],["Package","GGUF / Core ML"],["On-device","phone / browser"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"Start with a strong <strong>teacher</strong> &mdash; a frontier LLM whose behavior we want to capture."},
+       {"on":[1],"done":[0],"cap":"<strong>Distill:</strong> the small student trains on the teacher's outputs / soft labels &mdash; inherits skill it couldn't learn from raw web text."},
+       {"on":[2],"done":[0,1],"cap":"<strong>Quantize:</strong> drop FP16 &rarr; INT4/NF4 &mdash; ~4&times; smaller weights, the key to fitting on-device."},
+       {"on":[3],"done":[0,1,2],"cap":"<strong>Prune:</strong> trim redundant weights/heads/layers &mdash; <em>structured</em> pruning so commodity HW actually speeds up."},
+       {"on":[4],"done":[0,1,2,3],"cap":"<strong>Package:</strong> export to a runtime format &mdash; GGUF for llama.cpp, Core ML for Apple."},
+       {"on":[5],"done":[0,1,2,3,4],"cap":"<strong>Ship on-device:</strong> runs locally on a phone, laptop, or browser &mdash; private, offline, low-latency."}],
+     "interval":1900}
+    </script></div>
+    <aside class="notes">
+      Drive this off the widget &mdash; it's the spine of the whole "how" section. Step 1: pick a strong teacher; you want a model whose capability you can transfer. Step 2: distillation &mdash; the student trains on the teacher's generated answers (and ideally its soft logits), which is far richer supervision than raw web text, so the small student punches above its weight. Step 3: quantization &mdash; convert FP16 weights to INT4/NF4 for roughly a 4&times; memory cut; this is the step that actually makes it fit on a phone. Step 4: pruning &mdash; remove redundant structure; emphasize <em>structured</em> pruning (whole heads/channels/layers) because that's what dense hardware can exploit. Step 5: package into a runtime format &mdash; GGUF for llama.cpp, Core ML or MLX for Apple. Step 6: ship it, and now you have the privacy/offline/latency wins from section three. Order matters loosely: distill while in full precision, then quantize/prune, then package &mdash; you don't quantize first and then try to distill into 4-bit weights.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · the moving frontier</p>
+    <h2>Same quality, fewer parameters &mdash; every generation</h2>
+    <div class="cols">
+      <div>
+        <svg class="sl-graph" viewBox="0 0 360 250" role="img" aria-label="Accuracy versus log parameters, with a newer frontier curve shifted up and left of an older one">
+          <!-- axes -->
+          <path class="sl-axis" d="M48,210 L340,210" />
+          <path class="sl-axis" d="M48,210 L48,24" />
+          <polygon class="sl-arrow" points="340,210 332,205 332,215" />
+          <polygon class="sl-arrow" points="48,24 43,32 53,32" />
+          <text class="sl-axlab" x="150" y="236">log&#8202;(parameters) &#8594;</text>
+          <text class="sl-axlab" x="14" y="120" transform="rotate(-90 14,120)">accuracy &#8594;</text>
+          <!-- OLD generation frontier (accent) -->
+          <g class="fragment" data-fragment-index="1">
+            <path class="sl-curve" d="M60,196 C130,150 210,96 320,70" />
+            <text class="sl-pow" x="240" y="104">old gen</text>
+          </g>
+          <!-- NEWER generation frontier shifted UP-LEFT (new-accent) -->
+          <g class="fragment" data-fragment-index="2">
+            <path class="sl-curve2" d="M60,150 C120,96 190,60 320,44" />
+            <text class="sl-note" x="120" y="56">new gen &#8594; same quality, fewer params</text>
+          </g>
+          <!-- model marks on the newer frontier -->
+          <g class="fragment" data-fragment-index="3">
+            <circle class="sl-mark2" cx="96" cy="120" r="5" />
+            <text class="sl-mlab" x="60" y="112">Phi</text>
+            <circle class="sl-mark2" cx="150" cy="92" r="5" />
+            <text class="sl-mlab" x="142" y="82">Gemma</text>
+            <circle class="sl-mark2" cx="214" cy="68" r="5" />
+            <text class="sl-mlab" x="206" y="58">Qwen</text>
+          </g>
+          <!-- the shift arrow -->
+          <g class="fragment" data-fragment-index="4">
+            <path class="sl-ref" d="M200,108 L150,70" />
+            <polygon class="sl-arrow" points="150,70 158,74 153,80" />
+          </g>
+        </svg>
+      </div>
+      <div>
+        <ol>
+          <li class="fragment" data-fragment-index="1">The <strong>old frontier:</strong> accuracy rises with size &mdash; you bought quality with parameters.</li>
+          <li class="fragment" data-fragment-index="2">The <strong>new frontier shifts up-left</strong> &mdash; better data &amp; recipe give the same accuracy at far fewer params.</li>
+          <li class="fragment" data-fragment-index="3"><strong>Phi, Gemma, Qwen</strong> sit on this newer curve &mdash; small but strong.</li>
+          <li class="fragment" data-fragment-index="4">Read it as an arrow: today's <strong>3B</strong> reaches yesterday's <strong>7B&ndash;13B</strong> quality.</li>
+        </ol>
+      </div>
+    </div>
+    <aside class="notes">
+      This figure is the visual punchline of "smaller but smarter." X-axis is log parameter count, Y-axis is task accuracy. The old-generation curve (indigo) is the familiar story: accuracy climbs as you add parameters. The new-generation curve (teal) is shifted up and to the left &mdash; for any target accuracy, you now need far fewer parameters, because the data quality and training recipe improved. The marks &mdash; Phi, Gemma, Qwen &mdash; are families that live on that newer frontier; they're small in parameters but strong in capability. SmolLM and the compact Llama variants belong here too. The dashed arrow is the headline: the whole curve moved, so a well-trained 3B today lands where a 7B-to-13B did a generation or two ago. Don't over-read exact placements &mdash; it's a schematic of the <em>trend</em>, not a benchmark plot. The mechanism behind the shift is everything in the shrink pipeline plus better pretraining data.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · the memory budget</p>
+    <h2>Can a 3B INT4 model live in 8GB? The arithmetic</h2>
+    <table class="cmp">
+      <thead><tr><th>Line item</th><th>Estimate</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr class="fragment"><td>OS + other apps</td><td>~3&ndash;4 GB</td><td>Reserved by the system; you never see it</td></tr>
+        <tr class="fragment"><td>Weights (3B, INT4)</td><td>~1.5&ndash;1.8 GB</td><td>3e9 params &times; ~0.5 bytes (4-bit) + overhead</td></tr>
+        <tr class="fragment"><td>KV cache (4K ctx)</td><td>~0.3&ndash;0.8 GB</td><td>Grows linearly with context &amp; layers</td></tr>
+        <tr class="fragment"><td>Activations</td><td>~0.2&ndash;0.5 GB</td><td>Transient working memory per forward pass</td></tr>
+        <tr class="fragment"><td><strong>Total</strong></td><td><strong>~4&ndash;6 GB</strong></td><td><strong>Fits &mdash; with headroom you must defend</strong></td></tr>
+      </tbody>
+    </table>
+    <p class="eqnote fragment">FP16 weights alone would be ~6GB &mdash; over budget before the OS even loads. <strong>INT4 is what makes it fit.</strong> Long contexts can blow it up via the KV cache.</p>
+    <aside class="notes">
+      Now the concrete arithmetic that section four set up. Start from the top: the OS and other apps hold ~3&ndash;4GB you'll never get. Weights for a 3B model at INT4 are about 3 billion params times half a byte each, so ~1.5GB plus quantization scales and metadata &mdash; call it 1.5&ndash;1.8GB. Compare that to FP16, which would be 3e9 times 2 bytes = ~6GB &mdash; that alone busts the budget before the OS is even in the picture, which is the whole reason quantization is mandatory. The KV cache at a few thousand tokens of context is a few hundred MB, but it scales linearly, so a 32K-context chat can make it the largest single consumer &mdash; this is the line item that silently kills apps. Activations are a few hundred MB of transient working memory. Add it up and a 3B INT4 model fits in ~4&ndash;6GB with real headroom on an 8GB phone &mdash; but that headroom is thin and the KV cache is what eats it, so on-device you quantize the cache, use windowed attention, and cap context. The takeaway: weights set the floor, the KV cache sets the ceiling.
+    </aside>
+  </section>
+</section>
+
+<section>
+
+  <!-- ===== LANDSCAPE INTRO ===== -->
+  <section>
+    <p class="kicker">The approaches · part A landscape</p>
+    <h2>Two questions, one toolkit</h2>
+    <div class="flow" style="font-size:.78em;">
+      <span class="box ghost">Big model</span><span class="arrow">&#8594;</span>
+      <span class="box accent">Distill</span><span class="arrow">&#8594;</span>
+      <span class="box accent">Prune</span><span class="arrow">&#8594;</span>
+      <span class="box accent">Quantize</span><span class="arrow">&#8594;</span>
+      <span class="box green">Efficient arch</span><span class="arrow">&#8594;</span>
+      <span class="box green">"Textbook" data</span>
+    </div>
+    <p class="eqnote fragment">Two ways to land a strong small model &mdash; and most real recipes use <strong>both</strong>:</p>
+    <div class="cols" style="margin-top:.4em;">
+      <div><h5>Train a strong small model</h5><ul><li class="fragment">Distillation &#8594; learn from a teacher</li><li class="fragment">Efficient architecture &#8594; cheap capability</li><li class="fragment">Data quality &#8594; "textbooks" &amp; curriculum</li></ul></div>
+      <div><h5>Compress a big model</h5><ul><li class="fragment">Pruning &#8594; cut heads / channels / layers</li><li class="fragment">Quantization &#8594; INT8 / INT4 / NF4 / 1.58-bit</li><li class="fragment">(plus distillation, which spans both)</li></ul></div>
+    </div>
+    <aside class="notes">
+      This is the map for part A. Frame the whole section around two questions: how do you <em>train</em> a strong small model from scratch, and how do you <em>compress</em> a big one down to small? They are not rivals &mdash; the best modern SLMs use both: a Phi-style model is trained on curated data with an efficient architecture, then quantized to ship on a phone. Distillation deliberately straddles the divide: you can distill a from-scratch student or distill as a compression step. Tell students to keep this train-vs-compress axis in their head as we climb the five rungs &mdash; knowledge distillation, pruning, quantization, efficient architecture, and data quality &mdash; because interviewers love asking which lever you would reach for first given a constraint.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       1 · KNOWLEDGE DISTILLATION (classic)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 1 of 5</p>
+    <h3>Knowledge distillation <span class="tag classic">classic</span></h3>
+    <p><strong>What:</strong> a small <em>student</em> learns to mimic a large <em>teacher</em> instead of learning raw data from scratch (Hinton et al., 2015). <strong>How:</strong> run the teacher on data; train the student to match its outputs &mdash; hard labels, intermediate features, or soft logits. <strong>Solves:</strong> the teacher's soft outputs carry "dark knowledge" (which wrong answers are <em>plausible</em>), a far richer signal than one-hot labels.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Student can <strong>beat a same-size model trained from scratch</strong></li><li class="fragment">Soft targets are a smoother, denser learning signal</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Student is largely capped near the teacher; inherits its biases</li><li class="fragment">Needs teacher inference over the whole training set &mdash; not free</li></ul></div>
+    </div>
+    <p class="small"><strong>vs baseline:</strong> training a small model directly on hard labels wastes the teacher's uncertainty; distillation transfers <em>how the teacher thinks</em>, not just the right answer.</p>
+    <p class="small"><a href="https://arxiv.org/abs/1503.02531" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      Start here because distillation is the oldest and most general "make small strong" lever. The key intuition is dark knowledge: a teacher that says "70% cat, 25% dog, 5% car" tells the student that cats and dogs are similar and cars are not &mdash; structure a one-hot label throws away. Training on those soft targets gives the student a smoother loss surface and lets a small student reach accuracy a same-size from-scratch model cannot. The catch is the ceiling: the student rarely exceeds the teacher and copies its mistakes and biases. And you pay teacher inference cost across the corpus. This sets up the three flavors on the next slide &mdash; response, feature, and logit distillation.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Knowledge distillation</p>
+    <h3>Distillation &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Teacher<small>large model</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Run on data<small>get outputs</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Pick signal<small>label / feat / logit</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Match loss<small>student copies</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Student<small>small, strong</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Run the frozen teacher over your data, capturing its outputs.</li>
+      <li class="fragment"><strong>Response (hard-label):</strong> use the teacher's top answer as a pseudo-label &mdash; simplest, cheapest.</li>
+      <li class="fragment"><strong>Feature:</strong> also match the teacher's <em>intermediate hidden states</em> &mdash; richer, needs aligned layers.</li>
+      <li class="fragment"><strong>Logit (soft-label):</strong> match the full probability distribution at temperature <code>T</code> &mdash; the "dark knowledge."</li>
+      <li class="fragment">Train the student to minimize that match loss &#8594; small model, teacher-like behavior.</li>
+    </ol>
+    <p class="eqnote fragment">Soften with temperature: <code>p_i = softmax(z_i / T)</code> &mdash; high <code>T</code> spreads probability mass so similar-class info survives.</p>
+    <aside class="notes">
+      Walk the three flavors as a ladder of richness. Response-based (hard-label) distillation just trains the student on the teacher's predicted answers &mdash; this is exactly what Alpaca-style instruction distillation and reasoning-trace distillation do, and it is the easiest to run across modalities. Feature-based distillation additionally forces the student's hidden layers to resemble the teacher's &mdash; more signal but you must align layer widths and pick which layers to match. Logit (soft-label) distillation, the original Hinton recipe, matches the full softmax distribution, softened by a temperature T so the small probabilities on plausible wrong classes are visible. In practice for LLMs, response-level distillation on generated text dominates because you rarely have matching teacher logits, but the soft-label idea is what makes the whole thing work.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       2 · PRUNING (classic)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 2 of 5</p>
+    <h3>Pruning <span class="tag classic">classic</span></h3>
+    <p><strong>What:</strong> delete weights the model barely uses, then fine-tune to recover. <strong>How:</strong> score importance (magnitude, gradient) &#8594; remove the lowest &#8594; heal. Two regimes: <em>structured</em> (drop whole heads / channels / layers) vs <em>unstructured</em> (zero out individual weights). <strong>Solves:</strong> shrinks a trained model without retraining from scratch.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Structured pruning <strong>actually speeds up commodity HW</strong> &mdash; smaller dense matmuls</li><li class="fragment">Lottery-ticket intuition: a small subnetwork can match the full model</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Unstructured gives sparse weights &mdash; <strong>needs special kernels</strong> to see any speedup</li><li class="fragment">Aggressive pruning hurts accuracy; recovery fine-tune is required</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> distillation builds a new small model; pruning carves the small model <em>out of</em> the big one's existing weights.</p>
+    <p class="small"><a href="https://arxiv.org/abs/1803.03635" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      The headline interview point: structured vs unstructured. Unstructured pruning zeroes individual weights and can reach very high sparsity with little accuracy loss &mdash; but a sparse matrix with scattered zeros still runs as a dense matmul on a normal GPU or phone, so you save memory only if you have special sparse kernels (and most commodity hardware does not exploit it). Structured pruning removes whole units &mdash; attention heads, FFN channels, even entire layers &mdash; leaving a smaller <em>dense</em> network that every framework runs faster out of the box. That is why structured pruning is what people reach for when they want real on-device latency wins. The lottery-ticket hypothesis is the theoretical backbone: a randomly-initialized dense net contains a sparse subnetwork ("winning ticket") that, trained in isolation, matches the full model &mdash; evidence that most parameters are redundant and aggressive pruning <em>can</em> be near-lossless.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Pruning</p>
+    <h3>Pruning &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Trained model<small>dense</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Score<small>importance</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Remove<small>heads/chan/layers</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Fine-tune<small>heal</small></span>
+      <span class="anim-arrow fragment fade-in">&#8617;</span>
+      <span class="anim-node fragment fade-in">Smaller net<small>iterate</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Start from a fully trained dense model.</li>
+      <li class="fragment">Score each unit's importance &mdash; magnitude, gradient, or activation contribution.</li>
+      <li class="fragment"><strong>Structured:</strong> drop whole heads / channels / layers &#8594; smaller dense model, faster on any HW.</li>
+      <li class="fragment"><strong>Unstructured:</strong> zero individual low-magnitude weights &#8594; sparse, needs sparse kernels.</li>
+      <li class="fragment">Fine-tune to recover lost accuracy; optionally repeat (iterative pruning).</li>
+    </ol>
+    <p class="eqnote fragment"><strong>Lottery ticket:</strong> the surviving subnetwork, re-trained from its original init, can match the full model &mdash; the structure was the "winning ticket."</p>
+    <aside class="notes">
+      The loop is score &#8594; remove &#8594; heal, and doing it gradually (iterative magnitude pruning) beats one big cut because each round lets the network redistribute load before you cut again. Emphasize the recovery fine-tune: pruning always damages the model, and a short fine-tune restores most of it &mdash; skip it and accuracy craters. Tie the lottery-ticket idea back to whether near-lossless pruning is possible: Frankle &amp; Carbin showed that the sparse winning ticket, rewound to its original initialization and trained alone, matches the dense model, which is why we believe big models are massively over-parameterized and prunable. For SLMs the practical move is structured pruning followed by distillation fine-tuning &mdash; that is exactly the recipe behind models like NVIDIA's Minitron and the pruned Llama variants.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       3 · QUANTIZATION FOR EDGE (core) — 3 sub-slides
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 3 of 5</p>
+    <h3>Quantization for edge <span class="tag modern">core</span></h3>
+    <p><strong>What:</strong> store weights (and maybe activations) in low-bit formats instead of FP16. <strong>How:</strong> map a float range onto an integer grid via a <em>scale</em>; INT8, INT4, or NF4. <strong>Solves:</strong> the single biggest lever for fitting a model on a phone &mdash; INT4 is &frac14; the size of FP16, dropping a 7B model from ~14&nbsp;GB to ~3.5&nbsp;GB.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Huge memory cut; faster bandwidth-bound decode</li><li class="fragment">Weight-only INT4 is near-lossless on perplexity</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Outlier activations wreck a naive shared scale</li><li class="fragment">Below ~4-bit, quality drops fast without special tricks</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> pruning removes parameters; quantization keeps every parameter but stores each in fewer bits &mdash; orthogonal, and routinely stacked on top of pruning.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2305.14314" target="_blank" rel="noopener noreferrer">Read more &#8599; (QLoRA / NF4)</a></p>
+    <aside class="notes">
+      Quantization is <em>the</em> on-device lever &mdash; memory is the binding constraint on a phone, and quartering the weights is the most direct fix. Lay out the two axes the next slides assume. What you quantize: weight-only (compress storage, dequantize to compute &mdash; where INT4 GPTQ/AWQ live) vs weight-and-activation (quantize both so the matmul runs in INT8 &mdash; real compute speedups). When you quantize: PTQ (post-training, calibrate on a small set, cheap) vs QAT (simulate rounding during training, expensive, recovers accuracy at very low bits). The villain to flag now is outlier features: a few activation channels carry values orders of magnitude larger than the rest, and one shared scale either clips them or wastes precision &mdash; that motivates AWQ on the next slide.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Quantization</p>
+    <h3>Quantization &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">FP16 weights<small>full precision</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Calibrate<small>find ranges</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Pick format<small>INT8/INT4/NF4</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Round<small>to grid</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Pack GGUF<small>llama.cpp</small></span>
+    </div>
+    <ol>
+      <li class="fragment"><strong>INT8</strong> &mdash; 8-bit ints, ~2&times; smaller, almost always safe.</li>
+      <li class="fragment"><strong>INT4</strong> &mdash; 4-bit, ~4&times; smaller; the sweet spot for edge with per-group scales.</li>
+      <li class="fragment"><strong>NF4</strong> &mdash; "normal float 4", a non-uniform grid that <em>assumes weights are ~normally distributed</em> &#8594; spends precision where the mass is.</li>
+      <li class="fragment"><strong>PTQ vs QAT:</strong> calibrate-and-round (cheap) vs train-with-fake-quant (expensive, more accurate).</li>
+      <li class="fragment">Pack into <strong>GGUF</strong> &mdash; the single-file format <code>llama.cpp</code> mmaps and runs on CPU/Metal.</li>
+    </ol>
+    <p class="eqnote fragment">Linear map: <code>q = round(w / scale)</code>, recover <code>w &#8776; q &times; scale</code>. NF4 swaps the uniform grid for a normal-shaped one.</p>
+    <aside class="notes">
+      The mechanism is a linear map &mdash; divide by a scale, round, store the int &mdash; but the format choices matter for edge. INT8 is the safe default; INT4 with per-group scales (one scale per 32&ndash;128 weights) is the practical edge sweet spot. NF4, from the QLoRA paper, is the clever one: instead of evenly-spaced levels it uses a grid derived from the normal distribution, because neural-net weights cluster near zero and are roughly Gaussian &mdash; so NF4 places more representable values where the weights actually are, beating plain INT4 at the same bit-width. GGUF is the ecosystem glue: a self-contained file (weights plus metadata, plus the quant scheme) that llama.cpp memory-maps so the model loads fast and shares RAM &mdash; it is why local LLMs took off. PTQ is what you run 99% of the time; QAT is reserved for pushing below 4 bits.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · pushing the frontier</p>
+    <h3>Protecting precision &amp; going extreme-low-bit</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Naive 4-bit<small>uniform scale</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">AWQ<small>protect salient</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">3-bit<small>K-quants</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">2-bit<small>edge of usable</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">1.58-bit<small>BitNet</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Naive low-bit treats all weights equally &#8594; quietly destroys the few that matter most.</li>
+      <li class="fragment"><strong>AWQ</strong> (activation-aware): the ~1% of weights tied to large activations are <em>salient</em> &mdash; scale them up before rounding so they survive 4-bit.</li>
+      <li class="fragment">Per-group K-quants push reliably to <strong>3-bit</strong>; <strong>2-bit</strong> is the ragged edge of usability.</li>
+      <li class="fragment"><strong>1.58-bit (BitNet):</strong> weights restricted to <code>{-1, 0, +1}</code> &mdash; trained that way from scratch, not post-quantized.</li>
+      <li class="fragment">Below 4-bit, you need QAT or native low-bit training to hold quality.</li>
+    </ol>
+    <p class="eqnote fragment">1.58 = log&#8322;(3): three values per weight. BitNet replaces multiplies with adds &#8594; tiny, fast, edge-friendly.</p>
+    <aside class="notes">
+      This is the research-frontier slide. AWQ's insight is that not all weights are equal: a small fraction (~1%) connect to the outlier activation channels and dominate the output, so quantizing them carelessly causes most of the damage. AWQ identifies those salient weights by looking at activation magnitudes and applies a per-channel scaling that protects them before rounding &mdash; that is what makes 4-bit near-lossless without mixed precision. Going lower: GGUF K-quants reach 3-bit reliably and 2-bit is where quality gets shaky for general tasks. BitNet b1.58 is the extreme &mdash; ternary weights {-1, 0, +1}, about 1.58 bits each, but the trick is it is <em>trained</em> in low precision from the start, so the network learns to live there; this turns matrix multiplies into additions, which is enormous for power-constrained edge silicon. The general rule: post-training quant is fine to ~4 bits; below that you must train for it.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       4 · EFFICIENT ARCHITECTURE (modern)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 4 of 5</p>
+    <h3>Efficient architecture <span class="tag modern">modern</span></h3>
+    <p><strong>What:</strong> design the small model so each parameter and each token of context costs less. <strong>How:</strong> share KV heads (GQA), cap attention range (sliding-window), reuse the embedding matrix (tied embeddings), choose depth vs width, use SwiGLU FFNs. <strong>Solves:</strong> buys capability and on-device efficiency <em>for free</em> at the architecture level &mdash; before any compression.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Smaller KV cache &amp; faster decode with little quality loss</li><li class="fragment">Tied embeddings save real parameters at small scale</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Sliding-window can hurt true long-range recall</li><li class="fragment">Depth-vs-width is a tuning trade-off, not a free win everywhere</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> distillation, pruning, and quantization shrink an existing design; efficient architecture changes the design itself so it is born cheap.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2305.13245" target="_blank" rel="noopener noreferrer">Read more &#8599; (GQA)</a></p>
+    <aside class="notes">
+      This rung is about building the small model right from the start rather than compressing a wasteful one. GQA (grouped-query attention) is the headline: instead of every query head having its own K/V head (expensive cache) or all sharing one (MQA, slight quality loss), groups of query heads share a K/V head &mdash; most of the cache savings, almost none of the quality cost, which is why nearly every recent model uses it. Sliding-window attention caps how far back each token attends, making attention and the cache cost constant in window size rather than growing with context &mdash; great for memory, but it can lose genuine long-range dependencies. Tied embeddings reuse the input embedding matrix as the output projection: at small scale the vocab embedding is a big fraction of the parameters, so tying them is a meaningful saving. Depth-vs-width and SwiGLU round it out &mdash; the next slide makes each concrete.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Efficient architecture</p>
+    <h3>The cheap-capability levers &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">GQA<small>share KV heads</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Sliding window<small>cap range</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Tied embed<small>reuse matrix</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Depth vs width<small>shape</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">SwiGLU<small>better FFN</small></span>
+    </div>
+    <ol>
+      <li class="fragment"><strong>GQA:</strong> many query heads share a few K/V heads &#8594; shrinks the KV cache, the binding edge constraint.</li>
+      <li class="fragment"><strong>Sliding-window attention:</strong> each token attends only to the last <code>W</code> tokens &#8594; cache stops growing with context.</li>
+      <li class="fragment"><strong>Tied embeddings:</strong> input embedding = output projection &#8594; saves a vocab&times;dim matrix (big at small scale).</li>
+      <li class="fragment"><strong>Depth vs width:</strong> for a fixed budget, deeper often reasons better; wider runs faster &mdash; tune to the target.</li>
+      <li class="fragment"><strong>SwiGLU:</strong> a gated FFN that gives more capability per FLOP than plain ReLU/GELU.</li>
+    </ol>
+    <p class="eqnote fragment">All five are quality-per-parameter or quality-per-byte wins &mdash; they stack with distillation, pruning, and quantization.</p>
+    <aside class="notes">
+      Make each lever concrete. GQA and sliding-window both target the KV cache, which on a phone is often the real memory wall, not the weights. GQA is the more general win because it loses almost no quality; sliding-window is more aggressive and is why models like Mistral can hold long context cheaply, but you trade away some true long-range recall &mdash; production models often interleave windowed and full-attention layers to hedge. Tied embeddings matter disproportionately for SLMs: with a 32K-ish vocab and a small hidden size, the embedding table can be 20&ndash;40% of a tiny model's parameters, so sharing input and output projections is real savings. Depth-vs-width is the eternal tuning question &mdash; deeper helps multi-step reasoning, wider helps throughput. SwiGLU is the standard modern FFN because it consistently beats plain activations at equal compute. The punchline: architecture choices compound with every compression technique we covered.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       5 · DATA QUALITY / "TEXTBOOKS" (modern)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 5 of 5</p>
+    <h3>Data quality &mdash; "textbooks" <span class="tag modern">modern</span></h3>
+    <p><strong>What:</strong> train the small model on dense, clean, pedagogical data instead of raw web scrape (Gunasekar et al., 2023, the Phi line). <strong>How:</strong> curate or synthesize "textbook-quality" content plus exercises; order it as a curriculum (easy &#8594; hard). <strong>Solves:</strong> quality disproportionately helps small models &mdash; limited capacity is best spent on high-signal data.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Tiny models punch far above their weight (Phi)</li><li class="fragment">Dense, low-noise signal; less wasted capacity</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Narrow coverage; risk of benchmark contamination</li><li class="fragment">Heavy synthetic data &#8594; distribution narrowing / collapse risk</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> efficient architecture makes each parameter cheaper; data quality makes each <em>training token</em> count more &mdash; the data-side complement.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2306.11644" target="_blank" rel="noopener noreferrer">Read more &#8599; (Textbooks Are All You Need)</a></p>
+    <aside class="notes">
+      The final rung is data-centric, and it is why modern SLMs are so good. The Phi line's bet &mdash; "Textbooks Are All You Need" &mdash; is that a small model with limited capacity cannot afford to waste it modeling the noise, boilerplate, and contradictions of raw web text; feed it dense, clean, pedagogical content and it learns the actual skill far more efficiently. This is exactly why quality helps small models disproportionately: a frontier model has enough capacity to absorb noisy data and still extract the signal, but a 1&ndash;3B model does not. Honest caveats: curated/synthetic textbook data can be narrow, it is hard to audit for benchmark contamination (the teacher may have seen the test set), and leaning too hard on a single teacher's synthetic output risks distribution narrowing &mdash; the model-collapse failure mode. The next slide makes the curriculum mechanism concrete.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · Data quality / curriculum</p>
+    <h3>"Textbooks" &amp; curriculum &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Topic spec<small>+ persona</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Synthesize<small>textbook prose</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Filter<small>keep dense/clean</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Curriculum<small>easy &#8594; hard</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Train SLM<small>punches up</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Specify topics (and personas) to steer broad, deliberate coverage.</li>
+      <li class="fragment">Synthesize clean, pedagogical "textbook" prose plus worked exercises.</li>
+      <li class="fragment">Filter hard for density &amp; clarity &mdash; keep only high-signal documents.</li>
+      <li class="fragment"><strong>Curriculum:</strong> order the data easy &#8594; hard so the small model builds skills in sequence.</li>
+      <li class="fragment">Train the SLM &#8594; coding/reasoning ability far above its parameter count.</li>
+    </ol>
+    <p class="eqnote fragment"><strong>Curriculum example:</strong> teach arithmetic &amp; syntax before multi-step word problems &mdash; foundations first, like a real course.</p>
+    <aside class="notes">
+      The mechanism is "manufacture a curriculum." Topic and persona steering gives deliberate coverage instead of whatever the web happened to contain; the textbook-plus-exercise format packs structured reasoning and worked solutions into nearly every token, which is the high-information-density signal the Phi hypothesis bets on. The filter is what makes it quality-first &mdash; only the cleanest, densest docs survive. Curriculum learning is the ordering layer: just like a human course teaches arithmetic and grammar before multi-step word problems, presenting easy, foundational examples first and ramping difficulty can help a small model converge to better solutions than shuffling everything together &mdash; it builds prerequisite skills before they are needed. Tie it back to the collapse caveat: this only works if the synthetic data stays diverse and you keep some real data in the mix, or the small model overfits the teacher's narrow style.
+    </aside>
+  </section>
+
+</section>
+
+<section>
+
+  <!-- ===== PART B LANDSCAPE INTRO ===== -->
+  <section>
+    <p class="kicker">The approaches · part B landscape</p>
+    <h2>Families, runtimes &amp; deployment</h2>
+    <div class="flow" style="font-size:.78em;">
+      <span class="box ghost">SLM families</span><span class="arrow">&#8594;</span>
+      <span class="box accent">Small MoE</span><span class="arrow">&#8594;</span>
+      <span class="box accent">Speculative decode</span><span class="arrow">&#8594;</span>
+      <span class="box green">On-device runtimes</span><span class="arrow">&#8594;</span>
+      <span class="box green">Edge constraints</span><span class="arrow">&#8594;</span>
+      <span class="box green">RAG + small</span><span class="arrow">&#8594;</span>
+      <span class="box green">Cascade routing</span>
+    </div>
+    <p class="eqnote fragment">Part A was how to <em>make</em> a small model strong. Part B is how to <em>ship</em> it: which model, which engine, which hardware, and how to fall back when it's not enough.</p>
+    <div class="cols c3" style="margin-top:.4em;">
+      <div><h5>Pick a model</h5><ul><li class="fragment">Families &amp; their niches</li><li class="fragment">Dense vs small MoE</li></ul></div>
+      <div><h5>Run it fast</h5><ul><li class="fragment">Speculative decoding</li><li class="fragment">llama.cpp / MLX / ONNX / Core ML</li></ul></div>
+      <div><h5>Make it enough</h5><ul><li class="fragment">RAG for fresh facts</li><li class="fragment">Cascade to a frontier model</li></ul></div>
+    </div>
+    <aside class="notes">
+      This is the map for part B. Frame it as the deployment half of the lecture: part A covered distillation, quantization, and pruning &mdash; how a small model gets good. Part B is the engineering you do once you have one. First, which model: the open SLM families and where small Mixture-of-Experts fits. Second, how to run it fast and where: speculative decoding plus the on-device runtimes. Third, the systems reality &mdash; edge constraints &mdash; and the two ways to make a small model punch above its weight: RAG and cascade routing. Tell students every slide here answers a concrete product question, not a research one.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       6 · STRONG SLM FAMILIES (landscape)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 6 · families</p>
+    <h3>Strong SLM families <span class="tag modern">landscape</span></h3>
+    <p><strong>What:</strong> the open small-model families worth knowing in 2025. <strong>How:</strong> each picks a different recipe &mdash; data quality, multilingual breadth, or phone-shaped architecture. <strong>Solves:</strong> "which base model do I start from?" &mdash; the answer depends on your task, license, and target device.</p>
+    <table class="cmp">
+      <thead><tr><th>Family</th><th>Known for</th></tr></thead>
+      <tbody>
+        <tr class="fragment"><td><strong>Phi</strong> (Microsoft)</td><td>"Textbook-quality" synthetic data &#8594; strong reasoning per param</td></tr>
+        <tr class="fragment"><td><strong>Gemma</strong> (Google)</td><td>Open weights from Gemini research; solid 2B/9B all-rounders</td></tr>
+        <tr class="fragment"><td><strong>Qwen2.5</strong> (Alibaba)</td><td>Wide size ladder (0.5B&#8594;72B), strong multilingual + code/math</td></tr>
+        <tr class="fragment"><td><strong>Llama&#8209;3.2 1B/3B</strong> (Meta)</td><td>Edge-tuned small Llamas, broad tooling &amp; ecosystem support</td></tr>
+        <tr class="fragment"><td><strong>SmolLM2</strong> (HF)</td><td>Fully open data/recipe; 135M/360M/1.7B; transparent training</td></tr>
+        <tr class="fragment"><td><strong>MobileLLM</strong> (Meta)</td><td>Sub-1B, <em>deep-and-thin</em> + tied embeddings for phones</td></tr>
+      </tbody>
+    </table>
+    <p class="small"><strong>vs previous:</strong> part A was techniques; this is the menu of finished models those techniques produced.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2402.14905" target="_blank" rel="noopener noreferrer">MobileLLM &#8599;</a> &middot; <a href="https://arxiv.org/abs/2502.02737" target="_blank" rel="noopener noreferrer">SmolLM2 &#8599;</a></p>
+    <aside class="notes">
+      Give students a mental Rolodex of where to start. Phi (Microsoft) is the data-quality bet &mdash; train tiny models on curated, textbook-style synthetic data and they reason far above their parameter count. Gemma (Google) ships open weights distilled from Gemini-line research; the 2B and small variants are dependable general-purpose models. Qwen2.5 (Alibaba) has the widest size ladder, from half a billion to seventy-two billion, and is notably strong at multilingual, code, and math &mdash; often the default open pick. Llama-3.2 1B and 3B are Meta's explicitly edge-targeted small models, and they ride the enormous Llama tooling ecosystem. SmolLM2 from Hugging Face is the fully transparent option &mdash; open data and recipe &mdash; great when you need to audit provenance. MobileLLM is the research statement that for sub-billion models, deep-and-thin architectures with embedding sharing beat wide-and-shallow on real phones. The interview point: there is no single best &mdash; you choose on task, license, language coverage, and the device you must fit.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · choosing a family</p>
+    <h3>Strong SLM families &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Task<small>code? chat? edge?</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">License<small>commercial OK?</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Languages<small>multilingual?</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Device budget<small>RAM / sub-1B?</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Pick base<small>+ fine-tune</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Name the task &mdash; reasoning/code leans Phi/Qwen; broad chat leans Gemma/Llama.</li>
+      <li class="fragment">Check the license &mdash; some weights restrict commercial or regional use.</li>
+      <li class="fragment">Check language coverage &mdash; Qwen2.5 is strong multilingual; many others are English-first.</li>
+      <li class="fragment">Match the device &mdash; phone target &#8594; Llama-3.2-1B, SmolLM2, or MobileLLM-class.</li>
+      <li class="fragment">Pick the smallest base that clears your eval, then fine-tune on your domain.</li>
+    </ol>
+    <aside class="notes">
+      Turn the menu into a decision. Start from the task, because that narrows the field fastest: heavy reasoning and code push you toward Phi or Qwen; a general assistant is well served by Gemma or Llama. Then license &mdash; an easy way to get burned is to prototype on weights you can't ship commercially. Language coverage is the next filter; Qwen2.5 is the standout multilingual family while several others are English-centric. Then the device: a phone with a few gigabytes of usable RAM rules out anything above a 3B at INT4, so you're in Llama-3.2-1B, SmolLM2, or MobileLLM territory. The closing rule of thumb: pick the smallest base that passes your eval and fine-tune it, rather than starting big and shrinking later.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       7 · SMALL MIXTURE-OF-EXPERTS (modern)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 7 · small MoE</p>
+    <h3>Small Mixture-of-Experts <span class="tag modern">capacity vs cost</span></h3>
+    <p><strong>What:</strong> many expert FFNs, but a router fires only a <em>few</em> per token. <strong>How:</strong> a gate picks top-<code>k</code> experts (often 2 of 8); a token's compute touches only those, so <em>active</em> params &#8810; total params. <strong>Solves:</strong> buys big-model capacity at small-model per-token FLOPs &mdash; great when you're compute-bound but not memory-bound.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Big knowledge capacity, small active compute per token</li><li class="fragment">Faster decode than a dense model of equal total size</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment"><strong>All</strong> experts must sit in memory &mdash; total params set the VRAM/RAM bill</li><li class="fragment">Routing imbalance, harder to quantize, awkward on tight-RAM phones</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> dense families spend every parameter on every token; MoE decouples capacity (total params) from cost (active params) &mdash; but moves the new bottleneck to memory.</p>
+    <aside class="notes">
+      The one-sentence framing: MoE separates <em>capacity</em> from <em>per-token cost</em>. A dense 7B runs all 7B parameters for every token. An MoE might hold, say, 8 expert FFNs but route each token through only 2 of them, so it has the knowledge capacity of a much larger model while the compute per token stays small &mdash; that's why decode is fast. The catch, and the new cost, is the headline for edge: routing is dynamic and unpredictable, so you cannot know in advance which experts a token needs &mdash; therefore <em>every</em> expert must be resident in memory. So MoE saves FLOPs (and thus latency and energy) but not memory; on a phone where RAM is the binding constraint, a small MoE can be the wrong choice precisely because the total parameter count, not the active count, sets the footprint. Mention the secondary headaches: load-balancing the router so experts get used evenly, and that experts quantize less gracefully than a dense stack.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · small MoE</p>
+    <h3>Small MoE &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Token<small>hidden state</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Router<small>gate scores</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Top-k experts<small>e.g. 2 of 8</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Combine<small>weighted sum</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Next layer<small>few active FLOPs</small></span>
+    </div>
+    <ol>
+      <li class="fragment">A token's hidden state arrives at the MoE layer.</li>
+      <li class="fragment">A small <strong>router</strong> scores all experts and picks the top-<code>k</code> (e.g. 2 of 8).</li>
+      <li class="fragment">Only those <code>k</code> expert FFNs run &mdash; active FLOPs stay small.</li>
+      <li class="fragment">Their outputs are combined by the gate weights.</li>
+      <li class="fragment">All 8 experts still had to be <strong>loaded in memory</strong> &mdash; that's the cost.</li>
+    </ol>
+    <p class="eqnote fragment"><strong>active params</strong> set latency/energy · <strong>total params</strong> set the memory bill &mdash; on-device, memory usually wins.</p>
+    <aside class="notes">
+      Walk the routing and then nail the cost asymmetry. The router is a tiny learned layer that produces a score per expert; you keep the top-k, run only those expert FFNs, and blend their outputs weighted by the gate. Because only k of n experts fire, the FLOPs per token look like a small dense model &mdash; fast decode, low energy. But step five is the teaching point for edge: routing is data-dependent, so you can't pre-load just the experts you'll need; all of them must be resident. End on the equation line: active params govern latency and energy, total params govern memory, and on-device the memory term is almost always the binding one. That single contrast is exactly the trade-off an interviewer is fishing for when they ask "when is MoE worth it on edge?"
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       8 · SPECULATIVE DECODING (latency) — KEYANIM
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 8 · speculative decoding</p>
+    <h3>Speculative decoding <span class="tag sota">latency</span></h3>
+    <p><strong>What:</strong> a cheap SLM <em>drafts</em> several tokens; the big <em>target</em> verifies them in one parallel pass. <strong>How:</strong> draft proposes <code>&#947;</code> tokens; target scores all of them at once; a rejection-sampling check accepts the longest correct prefix and corrects the first wrong one. <strong>Solves:</strong> decode latency &mdash; you get multiple tokens per expensive target step <em>with the target's exact distribution</em>.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Output is <strong>distributionally identical</strong> to the target &mdash; zero quality loss</li><li class="fragment">2&ndash;3&times; fewer target forward passes when draft agrees</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">No win if the draft is too weak (everything rejected) or too slow</li><li class="fragment">Extra memory for two models; tuning <code>&#947;</code> &amp; draft size matters</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> MoE cuts FLOPs <em>per</em> token; speculative decoding produces <em>more tokens per target pass</em> &mdash; an orthogonal latency lever, losslessly.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2211.17192" target="_blank" rel="noopener noreferrer">Speculative decoding &#8599;</a></p>
+    <aside class="notes">
+      The headline that makes this magical: it is provably lossless. The draft (a small fast model) proposes a run of gamma tokens cheaply; the big target model then verifies all gamma in a single parallel forward pass &mdash; cheap because verifying tokens you already have is one batched pass, not gamma sequential ones. A rejection-sampling acceptance test, using both models' probabilities, accepts the longest correct prefix and, on the first disagreement, samples a correction from an adjusted distribution. The math guarantees the final stream is distributed exactly as if the target had generated it alone &mdash; no quality trade. The speedup comes entirely from the draft being right often: when it agrees you bought several tokens for the price of one target step. It dies at the extremes &mdash; a draft too weak gets rejected constantly (wasted work), a draft too large isn't cheap enough to be worth running ahead. Next slide animates the loop.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · speculative decoding</p>
+    <h3>Draft &#8594; verify &#8594; accept &mdash; the loop</h3>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Speculative decoding — draft, verify in parallel, accept the correct prefix",
+     "nodes":[["Draft SLM","propose γ toks"],["Target verifies","one parallel pass"],["Accept prefix","longest correct run"],["Correct","resample 1st mismatch"],["Emit + loop","multi-token step"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"<strong>Draft:</strong> the small fast model proposes <code>&#947;</code> tokens ahead &mdash; cheap guesses."},
+       {"on":[1],"done":[0],"cap":"<strong>Verify:</strong> the big target scores all <code>&#947;</code> proposals in <em>one</em> parallel forward pass."},
+       {"on":[2],"done":[0,1],"cap":"<strong>Accept:</strong> keep the longest prefix the target agrees with &mdash; those tokens are free."},
+       {"on":[3],"done":[0,1,2],"cap":"<strong>Correct:</strong> at the first mismatch, resample one token from the target's distribution &mdash; keeps output exact."},
+       {"on":[4],"done":[0,1,2,3],"cap":"<strong>Emit &amp; loop:</strong> several tokens advanced per target pass &mdash; same distribution, lower latency."}],
+     "loop":"&#8635;","interval":1900,"meter":true}
+    </script></div>
+    <p class="eqnote fragment">Tune two knobs: <strong>draft size</strong> (fast enough to run ahead, good enough to be accepted) and <strong>&#947;</strong> = tokens per round (too many &#8594; deep rejections waste the draft's work).</p>
+    <aside class="notes">
+      Drive the loop off the widget. Step one, the draft sprints ahead and proposes gamma tokens autoregressively &mdash; it's small so this is cheap. Step two, the target ingests the prompt plus all gamma proposed tokens in a single batched pass and produces a probability for each position; this is the expensive step but you do it once for many tokens. Step three, the acceptance test walks the proposals left to right and keeps the longest run the target would plausibly have produced &mdash; those tokens cost essentially nothing. Step four, at the first rejection you resample exactly one token from a corrected distribution, which is what makes the whole scheme distributionally exact rather than approximate. Step five, you've advanced several tokens for one target forward pass, then repeat. The meter is the acceptance rate &mdash; the lever that decides your speedup. Then the two knobs: the draft must be both fast enough to outrun the target and accurate enough to be accepted (a good draft is usually 10&ndash;20&times; smaller, same tokenizer/family), and gamma trades reach against waste &mdash; propose too far and a single early mismatch throws away the tail you speculated.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       9 · ON-DEVICE RUNTIMES (tooling)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 9 · runtimes</p>
+    <h3>On-device runtimes <span class="tag modern">tooling</span></h3>
+    <p><strong>What:</strong> the inference engines that actually run a quantized SLM on a laptop, phone, or browser. <strong>How:</strong> each targets specific silicon &mdash; CPU/GPU, Apple chips, NPUs, or the browser sandbox. <strong>Solves:</strong> portability &mdash; the same weights, the right engine for the device in front of you.</p>
+    <table class="cmp">
+      <thead><tr><th>Runtime</th><th>Best for</th></tr></thead>
+      <tbody>
+        <tr class="fragment"><td><strong>llama.cpp / GGUF</strong></td><td>Portable CPU/GPU; single-file GGUF + <code>mmap</code> for fast, low-RAM loads</td></tr>
+        <tr class="fragment"><td><strong>MLX</strong> (Apple)</td><td>Apple-silicon native; unified memory, Python-friendly Mac dev</td></tr>
+        <tr class="fragment"><td><strong>ONNX Runtime</strong></td><td>Cross-platform; one graph, many backends (mobile, server, edge)</td></tr>
+        <tr class="fragment"><td><strong>Core ML / ANE</strong></td><td>iOS production; offload to the Apple Neural Engine for low power</td></tr>
+        <tr class="fragment"><td><strong>WebGPU / WebLLM / transformers.js</strong></td><td>In-browser, zero install &mdash; runs on the user's own GPU</td></tr>
+      </tbody>
+    </table>
+    <p class="small"><strong>vs previous:</strong> families &amp; MoE chose <em>what</em> to run; runtimes decide <em>where</em> and <em>how fast</em> it runs on real silicon.</p>
+    <p class="small"><a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener noreferrer">llama.cpp &#8599;</a> &middot; <a href="https://github.com/mlc-ai/web-llm" target="_blank" rel="noopener noreferrer">WebLLM &#8599;</a></p>
+    <aside class="notes">
+      This is the practitioner's toolbox &mdash; teach it as "pick the engine that matches the silicon." llama.cpp is the portable default: a C/C++ engine, runs almost anywhere, and its GGUF single-file format plus memory-mapping makes loads fast and RAM-light. MLX is Apple's array framework built for Apple-silicon unified memory &mdash; the nicest path for local development on a Mac, very Pythonic. ONNX Runtime is the cross-platform workhorse: export your model to the ONNX graph once and run it across mobile, server, and edge backends with execution providers for each. Core ML is the iOS production answer, and it's the door to the Apple Neural Engine, the low-power NPU you want for battery-sensitive on-device inference. And WebGPU with WebLLM or transformers.js runs the model entirely in the browser on the visitor's own GPU &mdash; zero install, perfect privacy, but bounded by browser memory limits and first-load download size. The interview framing: there is no single best runtime, only the best match for the device, the OS, and whether you need an NPU.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · picking a runtime</p>
+    <h3>On-device runtimes &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Target device<small>Mac? iOS? web?</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Silicon<small>GPU / ANE / NPU</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Format<small>GGUF / ONNX / CoreML</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">mmap load<small>fast cold-start</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Run<small>right backend</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Start from the device: laptop/server &#8594; llama.cpp or ONNX; Mac dev &#8594; MLX; iOS prod &#8594; Core ML.</li>
+      <li class="fragment">No install / web reach &#8594; WebGPU + WebLLM / transformers.js, on the user's GPU.</li>
+      <li class="fragment">Convert weights to that engine's format (GGUF, ONNX, or Core ML).</li>
+      <li class="fragment"><code>mmap</code> the file &mdash; pages load lazily, so cold-start is fast and RAM tracks what's touched.</li>
+      <li class="fragment">Run on the matching backend; offload to ANE/NPU when battery matters.</li>
+    </ol>
+    <aside class="notes">
+      Make the choice mechanical. Branch on the device first &mdash; a Linux/Windows laptop or a server leans llama.cpp or ONNX Runtime; Mac-native development is happiest in MLX; shipping inside an iOS app means Core ML, which also unlocks the ANE. If you need to reach users with nothing to install, the browser stack (WebGPU plus WebLLM or transformers.js) runs on their own hardware. Then it's mechanical: convert to the engine's format, and lean on memory-mapping. The mmap point is worth dwelling on &mdash; instead of reading the whole file into RAM up front, mmap maps the file into the address space and the OS pages weights in on demand, so cold-start is fast and resident RAM tracks only what you actually touch, which is exactly what you want on a memory-tight device. Finish on the ANE/NPU offload for battery-sensitive features.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       10 · EDGE CONSTRAINTS (systems)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 10 · edge constraints</p>
+    <h3>Edge constraints <span class="tag sota">systems</span></h3>
+    <p><strong>What:</strong> the four physical limits that decide whether on-device inference is viable. <strong>How:</strong> memory, battery, thermal throttling, and intermittent network each impose a design consequence. <strong>Solves:</strong> nothing by itself &mdash; this is the reality you engineer <em>around</em>, and the KV cache is the one that bites first.</p>
+    <div class="cols">
+      <div>
+        <h5>Memory &amp; thermal</h5>
+        <ul>
+          <li class="fragment"><strong>KV cache</strong> grows with context &times; batch &mdash; the binding on-device limit, often beating the weights</li>
+          <li class="fragment">Sustained decode heats the SoC &#8594; <strong>thermal throttling</strong> slows you mid-conversation</li>
+        </ul>
+      </div>
+      <div>
+        <h5>Battery &amp; network</h5>
+        <ul>
+          <li class="fragment">Every token costs energy &#8594; report <strong>energy-per-token</strong>, not just tok/s</li>
+          <li class="fragment">Intermittent/no network &#8594; design <strong>offline-first</strong>, sync later</li>
+        </ul>
+      </div>
+    </div>
+    <p class="eqnote fragment"><strong>Decode is memory-bandwidth bound</strong> &mdash; you stream every weight per token &mdash; so a phone's headline <em>NPU TOPS &#8800; throughput</em>. Bandwidth, not FLOPs, sets your speed.</p>
+    <p class="small"><strong>vs previous:</strong> runtimes assumed the hardware cooperates; this is where the hardware fights back.</p>
+    <aside class="notes">
+      The four constraints, with a design consequence for each. Memory: model weights are fixed, but the KV cache grows linearly with context length and batch, and on a long chat it can rival or exceed the weights &mdash; it is usually the <em>binding</em> on-device memory limit, which is why quantized or windowed caches matter so much. Thermal: a phone has no fan; sustained generation heats the SoC until the OS throttles clocks, so a chat that starts fast slows after a minute &mdash; design for bursts, not marathons, and consider letting it cool between turns. Battery: each token costs joules, so the honest metric is energy-per-token alongside tokens-per-second and time-to-first-token. Network: assume connectivity drops &mdash; build offline-first and reconcile when it returns. Then the systems punchline they always probe: on-device decode is memory-bandwidth bound, because producing one token means streaming the entire model out of memory while the compute units sit idle. So a marketing NPU TOPS number describes peak FLOPs, not the memory bandwidth that actually gates decode &mdash; an NPU can advertise huge TOPS yet deliver worse real LLM throughput than the same phone's GPU. Select hardware on bandwidth, not TOPS.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · the on-device budget</p>
+    <h3>Edge constraints &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">RAM budget<small>e.g. 8GB phone</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Weights<small>3B INT4 &#8776;1.6GB</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">+ KV cache<small>grows w/ context</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">+ OS/app<small>shared RAM</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Thermal/battery<small>sustained = throttle</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Start from <em>usable</em> RAM &mdash; the OS and other apps already claimed a chunk of the 8GB.</li>
+      <li class="fragment">Weights: a 3B model at INT4 is roughly 1.5&ndash;2&nbsp;GB resident.</li>
+      <li class="fragment">Add the KV cache &mdash; it grows with context length, and it's what actually overflows you.</li>
+      <li class="fragment">Add activations + OS/app overhead; if the total exceeds the budget, the OS kills your app.</li>
+      <li class="fragment">Even if it fits, sustained decode heats the chip &#8594; throttling; track energy-per-token.</li>
+    </ol>
+    <aside class="notes">
+      Do the back-of-envelope live, because this exact estimate is a hard interview question. Take an 8GB phone: the OS and foreground apps may leave you only 3&ndash;4GB usable, not 8. A 3B model at INT4 is about 1.5 to 2GB of weights. That looks fine &mdash; until you add the KV cache, which scales with context length and is the term that actually pushes you over the edge on a long conversation, then activations and runtime overhead on top. If the working set exceeds the budget, the OS memory killer terminates your process &mdash; which is exactly the "app dies after a few minutes" bug. And even when it fits, the second wall is physics: no fan means sustained generation throttles the clocks, so report energy-per-token and design the feature for short bursts. The KV cache and thermal throttling are the two that surprise people who only sized the weights.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       11 · RAG + SMALL MODEL (deployment)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 11 · RAG + small</p>
+    <h3>RAG + small model <span class="tag modern">deployment</span></h3>
+    <p><strong>What:</strong> retrieve relevant text and feed it to the SLM so it reasons over facts instead of recalling them. <strong>How:</strong> embed the query &#8594; search a vector index &#8594; stuff the top-k passages into the prompt &#8594; the small model answers from that context. <strong>Solves:</strong> a small model's biggest weakness &mdash; thin world knowledge &mdash; by moving facts from weights into the context window.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Fresh, private, citable facts without retraining</li><li class="fragment">A 1&ndash;3B model punches far above its weight on closed-book gaps</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Can't fix weak <em>reasoning</em> &mdash; only missing knowledge</li><li class="fragment">Bad retrieval &#8594; confident wrong answers; long context strains small models</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> the constraints slide capped what the model can hold; RAG sidesteps that by keeping knowledge <em>outside</em> the weights, in a retrievable index.</p>
+    <aside class="notes">
+      RAG is the single highest-leverage trick for making a small model useful, because it attacks the right weakness. Scaling a model down costs world knowledge first &mdash; a 1.5B simply hasn't memorized much &mdash; but it can still <em>read</em>. So instead of asking it to recall, you retrieve the relevant passages and let it reason over them in-context; facts live in a vector index you can update without retraining, which also gives you freshness, privacy, and citations. That's why a tiny model plus good retrieval often beats a much larger closed-book model on knowledge tasks. But be honest about the ceiling: RAG supplies <em>knowledge</em>, it does not supply <em>reasoning</em> &mdash; if the question needs multi-hop synthesis the small model still can't do, perfect retrieval won't save it. And it has its own failure modes: retrieve the wrong passages and the model answers confidently from bad context, and stuffing many long passages strains a small model's limited effective context. So RAG closes the knowledge gap, not the reasoning gap.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · RAG + small</p>
+    <h3>RAG + small &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Query<small>user question</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Embed<small>to vector</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Retrieve<small>top-k passages</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Stuff context<small>+ prompt</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">SLM answers<small>grounded</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Embed the query into a vector with a small embedding model.</li>
+      <li class="fragment">Search the index for the top-k most similar passages.</li>
+      <li class="fragment">Stuff those passages into the prompt as grounding context.</li>
+      <li class="fragment">The SLM answers <em>from the context</em> &mdash; reasoning over facts, not recalling them.</li>
+      <li class="fragment">Ideal for on-device: a tiny index + small model = private, offline knowledge.</li>
+    </ol>
+    <aside class="notes">
+      The pipeline is the standard query &#8594; embed &#8594; retrieve &#8594; stuff &#8594; generate, but the on-device angle is what makes it shine here. The embedding model can be small and the index can live entirely on the device, so you get a private, offline knowledge assistant with no API calls. Two things to emphasize: first, the small model is now doing reading comprehension over supplied text rather than closed-book recall, which is a far easier job for limited parameters &mdash; that's the whole point. Second, retrieval quality becomes the bottleneck; garbage passages in mean a confident wrong answer out, so the index and the retriever matter as much as the model. And remind them of the ceiling from the previous slide &mdash; RAG hands the model facts, but the multi-hop reasoning over those facts is still bounded by the small model's capability.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       12 · CASCADE / HYBRID ROUTING (SOTA) — KEYANIM
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches · 12 · cascade routing</p>
+    <h3>Cascade / hybrid routing <span class="tag sota">deployment SOTA</span></h3>
+    <p><strong>What:</strong> the SLM handles the easy majority of traffic; only hard cases escalate to a frontier model. <strong>How:</strong> a router (confidence score, complexity classifier, or a quick self-check) decides per request whether the small model's answer is good enough or must be sent up. <strong>Solves:</strong> the cost/quality dilemma &mdash; most queries get cheap on-device answers, the few hard ones still get frontier quality.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Big cost &amp; latency win &mdash; most traffic never leaves the device</li><li class="fragment">Frontier quality preserved on the cases that need it</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Router errors: <em>over-escalate</em> (cost) or <em>under-escalate</em> (bad answers ship)</li><li class="fragment">Two systems to maintain; escalation needs a network round-trip</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> RAG made one small model smarter; cascading admits the small model has limits and routes <em>around</em> them &mdash; the production architecture that ties part B together.</p>
+    <aside class="notes">
+      This is the architecture that makes SLMs economically irresistible, and the one interviewers love to dig into. The premise: in most real workloads the bulk of queries are easy &mdash; greetings, simple lookups, formatting &mdash; and a well-tuned small model answers them perfectly for almost nothing, on-device, with zero latency to the cloud. The trick is knowing which queries are <em>not</em> easy. That's the router's job, and it's the whole ballgame: it can use the model's own confidence (token log-probs or a self-consistency check), a learned complexity classifier on the query, or a verifier on the draft answer. Easy &#8594; ship the SLM's answer; hard &#8594; escalate to a frontier API. The two failure modes are symmetric and both expensive in their own way: over-escalation sends easy traffic to the costly model and burns your savings; under-escalation ships a wrong small-model answer to the user. Calibrating that threshold &mdash; usually against a labeled set with a cost/quality target &mdash; is the real engineering. Next slide animates the path.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · cascade routing</p>
+    <h3>Query &#8594; SLM &#8594; route &#8594; answer &mdash; the loop</h3>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Cascade routing — small model first, escalate only hard cases",
+     "nodes":[["Query","incoming"],["SLM (on-device)","fast, cheap"],["Confidence / router","easy?"],["Escalate","frontier API"],["Answer","best path"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"A <strong>query</strong> arrives &mdash; most are easy, a few are hard."},
+       {"on":[1],"done":[0],"cap":"The <strong>on-device SLM</strong> answers first &mdash; fast, cheap, private."},
+       {"on":[2],"done":[0,1],"cap":"A <strong>router</strong> scores it: confidence / complexity / a quick self-check &mdash; is this good enough?"},
+       {"on":[3],"done":[0,1,2],"cap":"Hard or low-confidence &#8594; <strong>escalate</strong> to a frontier model over the network."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Return the <strong>best-path answer</strong> &mdash; cheap on-device for the many, frontier for the few."}],
+     "loop":"&#8635;","interval":1900,"meter":true}
+    </script></div>
+    <p class="eqnote fragment">The router threshold sets the trade: too eager to escalate &#8594; <strong>cost</strong> climbs; too reluctant &#8594; <strong>quality</strong> drops. Calibrate it on labeled traffic.</p>
+    <aside class="notes">
+      Walk the path off the widget. A query arrives; the on-device SLM answers it first &mdash; that's the fast, cheap, private default. Then the router evaluates that answer or the query: it can read the model's confidence (low max-probability or high entropy signals "unsure"), run a lightweight complexity classifier, or do a quick self-verification. If the signal says easy and confident, you ship the small model's answer and you never touched the network. If it says hard or low-confidence, you escalate to a frontier model over an API and return that instead. The meter is the escalation rate &mdash; the dial that sets your bill. Close on calibration, because it's the crux: the threshold is a business decision encoded as a number, tuned on labeled traffic against a target like "keep 90% on-device while holding accuracy above X." Get it right and you capture most of the cost savings with almost none of the quality loss; that balance is exactly why cascade routing is the deployment SOTA for SLMs and the natural capstone for this part.
+    </aside>
+  </section>
+
+</section>
+
+<!-- ============================================================
+     SECTION 7 · COMPARE — the cheat-sheet
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Compare</p>
+    <h2>Cheat-sheet: the shrink-it toolbox</h2>
+    <p class="small muted">Twelve levers for getting an SLM onto a small device &mdash; what each does, what it saves, and what you pay.</p>
+    <table class="cmp">
+      <thead><tr><th>Technique</th><th>What it does</th><th>Saves</th><th>Cost / trade-off</th></tr></thead>
+      <tbody>
+        <tr class="fragment"><td>Distillation</td><td>Train a small student on a big teacher's outputs (soft logits + hard labels)</td><td>Params &amp; FLOPs &mdash; a 1&ndash;3B student does the teacher's job</td><td>Capped near the teacher; inherits its biases; needs teacher access</td></tr>
+        <tr class="fragment"><td>Structured pruning</td><td>Remove whole heads / channels / layers, then heal with fine-tune</td><td>Real wall-clock latency &amp; memory on commodity HW</td><td>Coarse &#8594; bigger accuracy hit; needs retraining to recover</td></tr>
+        <tr class="fragment"><td>Unstructured pruning</td><td>Zero out individual low-magnitude weights (high sparsity)</td><td>Storage (sparse format); FLOPs in theory</td><td>No speedup on commodity HW without sparse kernels &mdash; mostly a storage win</td></tr>
+        <tr class="fragment"><td>INT8 quant</td><td>Store weights (&plusmn; activations) in 8-bit integers</td><td>&#189; the memory &amp; bandwidth vs FP16</td><td>Activation outliers need care (SmoothQuant); mild quality loss</td></tr>
+        <tr class="fragment"><td>INT4 / NF4</td><td>4-bit weights; NF4 = info-optimal grid for Gaussian weights</td><td>&#188; the memory vs FP16 &mdash; the on-device default</td><td>Noticeable loss without group-wise scales / AWQ; agentic tasks fragile</td></tr>
+        <tr class="fragment"><td>AWQ / GPTQ</td><td>Smarter 4-bit PTQ: protect salient channels (AWQ) / error-compensate (GPTQ)</td><td>Same 4-bit footprint, much better accuracy</td><td>Calibration pass needed; GPTQ's 2nd-order solve is slow to produce</td></tr>
+        <tr class="fragment"><td>BitNet 1.58-bit</td><td>Ternary weights {&minus;1,0,+1}; trained quantization-aware from scratch</td><td>Extreme memory cut; matmul becomes add/subtract</td><td>Must pretrain QAT (can't PTQ an existing model); ecosystem immature</td></tr>
+        <tr class="fragment"><td>GQA / sliding-window</td><td>Share K/V heads (GQA) and cap attention span (window)</td><td>Shrinks the KV cache &mdash; the binding on-device memory</td><td>MQA can lose quality; windows can drop long-range recall</td></tr>
+        <tr class="fragment"><td>Small MoE</td><td>Many experts, route to top-k &#8594; high capacity, low active FLOPs</td><td>Compute (only k experts fire per token)</td><td>All experts must fit in RAM; routing/load-balance overhead</td></tr>
+        <tr class="fragment"><td>Speculative decoding</td><td>Tiny draft proposes k tokens; the SLM verifies in one pass</td><td>Latency / per-token wall-clock &mdash; exact same output</td><td>Win hinges on acceptance rate; draft must also fit in RAM</td></tr>
+        <tr class="fragment"><td>RAG</td><td>Retrieve facts into the prompt instead of storing them in weights</td><td>Lets a small model punch above its knowledge weight</td><td>Needs an index + embeddings; fails on reasoning the model can't do</td></tr>
+        <tr class="fragment"><td>Cascade routing</td><td>SLM handles easy traffic, escalates hard cases to a frontier model</td><td>Average cost &amp; latency across the whole workload</td><td>Router errors; two systems to maintain; privacy of escalated data</td></tr>
+      </tbody>
+    </table>
+    <aside class="notes">
+      This is the interview cheat-sheet for the whole module &mdash; I reveal rows top to bottom and group them in my head into three buckets. First, <em>make the model smaller</em>: distillation, pruning (structured vs unstructured &mdash; stress that only structured pruning speeds up commodity hardware, because unstructured needs sparse kernels), and the quantization family from INT8 down through INT4/NF4, AWQ/GPTQ, and the BitNet ternary frontier. Second, <em>make the runtime cheaper</em>: GQA and sliding-window shrink the KV cache, small MoE cuts active FLOPs, speculative decoding cuts latency. Third, <em>don't put everything on-device</em>: RAG offloads knowledge to an index, cascade routing offloads hard requests to the cloud. The single thread to point at: on a phone the binding constraint is almost always memory and memory-bandwidth, so the techniques that shrink bytes (quantization, KV reduction) matter most, and the ones that only cut FLOPs (unstructured pruning, MoE) help less than their headline numbers suggest.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 8 · THE MATH
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">The math &middot; (a) weight memory</p>
+    <h2>How much RAM do the weights need?</h2>
+    <p>Weights-only footprint is just parameter count times bytes per parameter:</p>
+    $$ M \approx N_{params} \times b\ \text{bytes} $$
+    <p class="eqnote fragment"><b>\(N_{params}\)</b> = parameter count (7B \(= 7 \times 10^9\)); <b>\(b\)</b> = bytes per stored weight.</p>
+    <p class="eqnote fragment">FP16 stores each weight in 16 bits \(=\) <strong>2 bytes</strong>. So a 7B model: \(7 \times 10^9 \times 2 \approx 14\) GB.</p>
+    <p class="eqnote fragment">Each lower precision just changes \(b\): INT8 \(= 1\) byte, INT4 \(= 0.5\) byte.</p>
+    <table class="cmp fragment" style="margin-top:.4em;">
+      <thead><tr><th>Precision</th><th>Bytes / param</th><th>7B weights</th><th>vs FP16</th></tr></thead>
+      <tbody>
+        <tr><td>FP16 / BF16</td><td>2</td><td>&#8776; 14 GB</td><td>1&times;</td></tr>
+        <tr><td>INT8</td><td>1</td><td>&#8776; 7 GB</td><td>&#189;</td></tr>
+        <tr><td>INT4 / NF4</td><td>0.5</td><td>&#8776; 3.5 GB</td><td>&#188;</td></tr>
+      </tbody>
+    </table>
+    <p class="eqnote fragment">Rule of thumb interviewers love: <strong>FP16 GB &#8776; 2 &times; params-in-billions.</strong></p>
+    <aside class="notes">
+      Start with the one formula every on-device interview asks: memory is parameter count times bytes per parameter. The only subtlety is bytes-per-param, and it is set entirely by the precision you store the weights in. FP16 and BF16 are 16-bit, so two bytes &mdash; that is where the "double the billions" rule of thumb comes from: a 7B model is roughly 14 GB just for weights. Halve the bits to INT8 and you halve the memory to about 7 GB; quarter the bits to INT4 or NF4 and you are at about 3.5 GB. Note two real-world caveats so nobody is surprised on the device: group-wise quant stores a small scale per block of 32&ndash;128 weights, which adds a few percent overhead, and this number is weights only &mdash; the KV cache, activations, and the OS still have to fit alongside it, which is exactly the phone-fit check at the end of this section.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math &middot; (b) the distillation loss</p>
+    <h2>What the student actually trains on</h2>
+    <p>Two signals, blended: imitate the teacher's <em>soft</em> probabilities <strong>and</strong> get the hard label right.</p>
+    $$ \mathcal{L} = \alpha\, T^{2}\, \mathrm{KL}\!\big(p_T^{\tau} \,\Vert\, p_S^{\tau}\big) \;+\; (1-\alpha)\, \mathrm{CE}\big(y,\, p_S\big) $$
+    <p class="eqnote fragment"><b>\(p_S, p_T\)</b> = student / teacher softmax outputs; <b>\(y\)</b> = the true hard label.</p>
+    <p class="eqnote fragment"><b>\(\tau\)</b> = temperature &mdash; <em>softens</em> both distributions: \(p^{\tau} = \mathrm{softmax}(z/\tau)\). High \(\tau\) exposes the teacher's "dark knowledge" (cat \(\approx\) 0.2, dog \(\approx\) 0.1, car \(\approx\) 0.001).</p>
+    <p class="eqnote fragment"><b>KL term</b> = match the teacher's full probability shape, not just its top pick.</p>
+    <p class="eqnote fragment"><b>CE term</b> = standard cross-entropy on the ground-truth label, so the student stays anchored to truth, not just to the teacher.</p>
+    <p class="eqnote fragment">The <b>\(T^{2}\)</b> factor rescales the soft gradient (it shrinks by \(1/T^{2}\) when you soften), keeping the two terms balanced; <b>\(\alpha\)</b> trades soft vs hard.</p>
+    <aside class="notes">
+      This is the loss to be able to write on a whiteboard. The whole idea of distillation is that the teacher's <em>soft</em> probabilities carry more information than a one-hot label: when the teacher says cat 0.7, dog 0.2, car 0.001, it is telling the student that cats and dogs are similar and neither is a car &mdash; Hinton called that "dark knowledge." Temperature tau is what reveals it: dividing logits by tau before softmax flattens the distribution so those small runner-up probabilities become learnable signal; at tau equals one you are back to the raw distribution. The KL term pushes the student's softened distribution toward the teacher's softened distribution &mdash; matching the whole shape. The cross-entropy term keeps the student honest against the real label, which matters because the teacher is sometimes wrong. Two gotchas: you apply the same tau to teacher and student, and you multiply the soft term by T-squared because softening scales the gradients down by one over T-squared, so without it the hard label would dominate. Alpha is the mixing knob, often around 0.5 to 0.9 toward the soft term.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math &middot; (c) phone-fit check</p>
+    <h2>Does a 3B INT4 model fit an 8 GB phone?</h2>
+    <p>Add up everything that must live in RAM <em>at once</em>, not just the weights:</p>
+    <ul>
+      <li class="fragment"><strong>Weights:</strong> \(3 \times 10^9 \times 0.5\) byte \(\approx 1.5\) GB, plus group scales \(\to \approx\) <strong>1.5&ndash;1.8 GB</strong>.</li>
+      <li class="fragment"><strong>KV cache:</strong> grows with context. For a GQA 3B at a few-thousand-token context \(\approx\) <strong>0.3&ndash;0.8 GB</strong> (and it climbs with every token).</li>
+      <li class="fragment"><strong>Activations / runtime scratch:</strong> intermediate tensors + framework buffers \(\approx\) <strong>0.3&ndash;0.5 GB</strong>.</li>
+      <li class="fragment"><strong>OS + other apps:</strong> the system already reserves <strong>3&ndash;4 GB</strong> on an 8 GB phone &mdash; you do <em>not</em> get all 8.</li>
+    </ul>
+    <p class="eqnote fragment">Total \(\approx 1.8 + 0.6 + 0.4 + 3.5 \approx\) <strong>6.3 GB</strong> &#8594; it fits, but with little headroom.</p>
+    <div class="callout warn fragment"><span class="t">&#9888; Binding constraint</span> Not the weights &mdash; it's the <strong>OS reservation + the growing KV cache</strong>. The app's real budget is &#8776;4&ndash;5 GB, and the KV cache is the part that <em>grows during use</em>, so long contexts are what trip the OOM-killer. Shrink it with quantized KV cache + sliding-window attention.</div>
+    <aside class="notes">
+      This is the question that separates people who have shipped on-device from people who have only read about it. Naively, "3B at INT4 is 1.5 GB, my phone has 8 GB, easy." Wrong &mdash; you have to budget everything resident at once. Weights are about 1.5 to 1.8 GB once you include the per-group scales. The KV cache is the sneaky one: it starts small but grows linearly with the conversation, a few hundred megabytes to most of a gigabyte at multi-thousand-token context, and it is the thing that keeps growing while the app runs. Activations and the runtime's scratch buffers are a few hundred megabytes. And critically, an 8 GB phone does not give you 8 GB &mdash; iOS and Android reserve roughly 3 to 4 GB for the OS, the GPU, and other apps, and they will kill your process the moment you push past your share. Add it up and you land around 6 GB, so it fits with thin headroom. The teaching punchline: the binding constraint is the OS reservation plus the growing KV cache, not the static weights &mdash; which is why on-device engineering obsesses over KV-cache quantization and sliding-window attention, and why you test at your longest realistic context, not an empty one.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 9 · IN CODE
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">In code &middot; distillation loss</p>
+    <h2>KD loss: soft KL at temperature T + hard CE</h2>
+    <pre><code class="language-python" data-trim data-line-numbers="1-3|5-9|11-15|17-21">import torch
+import torch.nn.functional as F
+
+def kd_loss(student_logits, teacher_logits, labels, T=2.0, alpha=0.5):
+    # --- soft target: match the teacher's SOFTENED distribution ---
+    # divide logits by T, then KL(teacher || student) in log-space
+    s_log = F.log_softmax(student_logits / T, dim=-1)
+    t_prob = F.softmax(teacher_logits / T, dim=-1)
+
+    # KL expects log-probs for input, probs for target; batchmean = per-sample
+    kl = F.kl_div(s_log, t_prob, reduction="batchmean")
+    # T**2 rescales the soft gradient (softmax/T shrinks grads by 1/T^2)
+    soft = kl * (T * T)
+
+    # --- hard target: ordinary cross-entropy on the real labels ---
+    hard = F.cross_entropy(student_logits, labels)
+
+    # blend: alpha toward the teacher, (1 - alpha) toward ground truth
+    return alpha * soft + (1.0 - alpha) * hard
+
+# loss = kd_loss(student(x), teacher(x).detach(), y, T=2.0, alpha=0.7)
+# teacher is frozen -> .detach() so no gradient flows back into it
+</code></pre>
+    <p class="eqnote fragment">The two lines that matter: <code>/ T</code> softens both distributions, and <code>* T*T</code> keeps the soft gradient on the same scale as the hard one.</p>
+    <aside class="notes">
+      Walk this top to bottom. Block one is just imports. Block two is the soft target: we divide both the student and teacher logits by temperature T before the softmax, which flattens them so the teacher's runner-up probabilities &mdash; the dark knowledge &mdash; become learnable. Note the asymmetry KL-div expects: log-probabilities for the input (student) and plain probabilities for the target (teacher). Block three multiplies the KL by T-squared; this is the single most-forgotten line &mdash; because softening by T shrinks the gradients by one over T-squared, you scale back up by T-squared so the soft loss doesn't get drowned out by the hard loss. Block four is plain cross-entropy on the true labels, and the return blends them with alpha. The comment at the bottom is the other classic gotcha: the teacher is frozen, so you detach its logits &mdash; you are never training the teacher, only the student. In practice you precompute teacher logits offline so you don't pay a forward pass through the big model every step.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">In code &middot; INT4 quantize</p>
+    <h2>A tiny absmax INT4 quantize / dequantize</h2>
+    <pre><code class="language-python" data-trim data-line-numbers="1-2|4-13|15-19|21-26">import torch
+
+def quantize_int4_absmax(w, group_size=64):
+    # group the weights so one outlier only poisons its own block
+    w = w.reshape(-1, group_size)              # (n_groups, group_size)
+    # absmax scale per group: map [-amax, +amax] -> the int4 grid [-7, 7]
+    amax = w.abs().amax(dim=1, keepdim=True)    # largest magnitude in group
+    scale = amax / 7.0                          # 4-bit signed range is -8..7; use 7
+    q = torch.round(w / scale).clamp(-7, 7)     # nearest grid point, integers
+    return q.to(torch.int8), scale              # store int4-in-int8 + fp scales
+
+def dequantize_int4(q, scale):
+    # reconstruct an approximation: w_hat = q * scale  (per group)
+    return (q.float() * scale)
+
+# --- round-trip sanity check ---
+W = torch.randn(256, 64)                        # an fp weight matrix
+q, scale = quantize_int4_absmax(W, group_size=64)
+W_hat = dequantize_int4(q, scale).reshape(W.shape)
+err = (W - W_hat).abs().mean()
+print(f"mean abs error: {err:.4f}")            # small -> 4 bits kept most signal
+</code></pre>
+    <p class="eqnote fragment"><strong>absmax</strong> = symmetric, zero-point-free: the scale is just the group's largest magnitude over 7. <strong>group_size</strong> is the accuracy/overhead knob &mdash; smaller groups isolate outliers but store more scales.</p>
+    <aside class="notes">
+      This is the toy version of what GGUF and bitsandbytes do for real. The core idea is a linear map: pick a scale that maps the weights' range onto the small integer grid, round, and store the integers plus the scale. We use absmax &mdash; symmetric quantization with no zero-point &mdash; so the scale is simply the largest absolute value in the group divided by seven, mapping the range onto the signed 4-bit grid. The reshape into groups is the whole reason this works well: a single large outlier weight only ruins the precision of its own 64-weight block instead of the entire tensor, which is exactly why group-wise beats per-tensor. Quantize rounds and clamps to integers; dequantize multiplies back by the scale to get an approximation. The round-trip test prints a small mean error, showing four bits keep most of the signal. Real schemes add the niceties &mdash; NF4 uses a non-uniform grid tuned to the Gaussian shape of weights, AWQ scales salient channels up before quantizing &mdash; but the skeleton is exactly this.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 10 · WORKED EXAMPLE
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Worked example &middot; the plan</p>
+    <h2>Shrink a 7B model to fit a phone</h2>
+    <p>Goal: from a <strong>14 GB FP16 7B</strong> down to something that lives happily on an 8 GB phone &mdash; while keeping as much task accuracy as we can.</p>
+    <div class="approach-steps">
+      <span class="anim-node">7B FP16<small>14 GB</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Distill<small>&#8594; 3B student</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Quantize<small>INT4 / NF4</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Prune<small>structured</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Package<small>GGUF</small></span>
+    </div>
+    <ol>
+      <li class="fragment"><strong>Distill</strong> the 7B teacher into a ~3B student (soft-KL + hard-CE on a task-rich dataset). Weights fall \(14 \to 6\) GB at FP16.</li>
+      <li class="fragment"><strong>Quantize</strong> the 3B student to INT4/NF4 with AWQ-style calibration. Weights fall \(6 \to \approx 1.7\) GB.</li>
+      <li class="fragment"><strong>Structured-prune</strong> a few low-importance heads/layers, then fine-tune to heal. Trim toward \(\approx 1.4\) GB and a little faster.</li>
+      <li class="fragment"><strong>Package GGUF</strong> (e.g. <code>Q4_K_M</code>) so llama.cpp can mmap it and run on the device.</li>
+    </ol>
+    <aside class="notes">
+      This is question 18 from the bank, the canonical "shrink a 7B to a phone" walkthrough &mdash; order matters and each step solves a different problem. Step one, distillation, is the biggest single lever: instead of compressing the 7B, we transfer its behavior into a 3B student trained on the soft-KL-plus-hard-CE loss from the math section over a task-rich dataset, which roughly halves the weights to 6 GB and, crucially, keeps far more accuracy than just shrinking the 7B by force. Step two, quantization to INT4 or NF4 with AWQ-style calibration, is the cheapest big win &mdash; it does not retrain, just re-stores the weights at a quarter precision, taking 6 GB down to about 1.7. Step three, structured pruning of low-importance heads and layers followed by a short heal-fine-tune, squeezes out a bit more memory and latency &mdash; structured, not unstructured, because we want a real speedup on the phone's CPU/GPU. Step four packages it as GGUF so llama.cpp can memory-map and run it. On the next slide we do the actual accuracy and footprint math at each step.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Worked example &middot; the numbers</p>
+    <h2>Footprint vs accuracy at each step</h2>
+    <p>Illustrative trajectory on a task benchmark (start: teacher = 100% relative quality):</p>
+    <table class="cmp">
+      <thead><tr><th>Step</th><th>Params / precision</th><th>Weights</th><th>Rel. accuracy</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr class="fragment"><td>0 &middot; Teacher</td><td>7B FP16</td><td>&#8776; 14 GB</td><td>100%</td><td>Reference; doesn't fit the phone</td></tr>
+        <tr class="fragment"><td>1 &middot; Distill</td><td>3B FP16</td><td>&#8776; 6 GB</td><td>&#8776; 92%</td><td>Smaller capacity, but soft labels recover most of it</td></tr>
+        <tr class="fragment"><td>2 &middot; INT4 / NF4</td><td>3B 4-bit</td><td>&#8776; 1.7 GB</td><td>&#8776; 90%</td><td>Group-wise + AWQ keeps the loss tiny</td></tr>
+        <tr class="fragment"><td>3 &middot; Prune + heal</td><td>~2.6B 4-bit</td><td>&#8776; 1.4 GB</td><td>&#8776; 88%</td><td>Drop low-importance heads/layers, fine-tune to recover</td></tr>
+        <tr class="fragment"><td>4 &middot; GGUF pack</td><td><code>Q4_K_M</code></td><td>&#8776; 1.5 GB</td><td>&#8776; 88%</td><td>K-quant keeps sensitive tensors higher-precision</td></tr>
+      </tbody>
+    </table>
+    <p class="eqnote fragment"><strong>Net:</strong> 14 GB &#8594; ~1.5 GB (&#8776; 9&times; smaller) for roughly a 12-point relative-accuracy give-up &mdash; and now it actually <em>fits</em> beside the OS + KV cache on an 8 GB phone.</p>
+    <div class="callout fragment"><span class="t">Order &amp; honesty matters</span> Distill <em>first</em> (biggest, best-quality cut), quantize <em>second</em> (cheap, near-lossless), prune <em>last</em> (smallest, riskiest gain). Re-run the <strong>phone-fit budget</strong> &mdash; weights are only ~1.5 GB; KV cache + activations + OS decide whether it really runs.</div>
+    <aside class="notes">
+      These numbers are illustrative, not measured &mdash; say that out loud &mdash; but the shape is realistic and the relative ordering is what interviewers want. Watch the two columns move in opposite directions: weights collapse from 14 GB to roughly 1.5, about a 9x cut, while relative accuracy slides from 100 down to about 88. Distillation costs the most accuracy per step because you are genuinely reducing capacity, but it buys the most memory and the soft labels claw a lot of it back. Quantization is almost free on accuracy with group-wise plus AWQ &mdash; a couple of points for a 3.5x memory cut, the best trade on the board. Pruning gives the smallest, riskiest gain, which is why it goes last and always with a heal-fine-tune. The GGUF step barely changes the numbers; Q4_K_M just chooses how many sensitive tensors stay at higher precision. End on the honesty note from the math section: the 1.5 GB is weights only, so re-run the full phone-fit budget &mdash; OS reservation plus the growing KV cache is what actually decides whether this ships, and you validate it at your longest realistic context with a real eval, not just perplexity, because agentic and tool-calling tasks degrade before perplexity does.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 11 · DECISION — SLM vs frontier
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Decision</p>
+    <h2>SLM vs frontier — pick the path</h2>
+    <div class="mermaid">
+flowchart TD
+  Q1{"Need privacy / offline /<br/>low-latency / data-residency?"} -->|Yes| OD["On-device SLM<br/>data never leaves the device"]
+  Q1 -->|No| Q2{"Broad, open-ended<br/>capability needed?"}
+  Q2 -->|Yes| CL["Cloud frontier LLM<br/>top reasoning + world knowledge"]
+  Q2 -->|No| Q3{"Narrow, high-volume,<br/>well-defined task?"}
+  Q3 -->|Yes| FT["Fine-tuned SLM<br/>cheap per call, consistent"]
+  Q3 -->|Mixed traffic| CR["Cascade / route<br/>SLM handles most, escalate hard cases"]
+    </div>
+    <p class="eqnote fragment">Most real products land on <strong>cascade</strong> — a small model carries the easy 80%, a frontier model catches the hard tail.</p>
+    <aside class="notes">
+      This is the interview-favourite decision tree. The first fork is the one that overrides everything else: if you have a hard privacy, offline, low-latency, or data-residency requirement, you go on-device regardless of capability — the data simply can't leave the device. If there's no such constraint, ask whether you actually need broad open-ended capability; if so, just call a frontier API and don't fight it. If the task is narrow, high-volume, and well-defined, a fine-tuned SLM wins on cost and consistency. And for mixed traffic the right answer is almost always a cascade: route most requests to a cheap small model and escalate only the hard cases. Point out that the tree isn't "small vs big" — it's "what does the task actually demand," and most production systems end up hybrid.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Decision · closing the gap</p>
+    <h2>Four ways a small model punches up</h2>
+    <div class="approach-steps">
+      <span class="anim-node">Base SLM<small>limited capacity</small></span>
+      <span class="anim-arrow fragment fade-in">+</span>
+      <span class="anim-node fragment fade-in">RAG<small>facts in-context</small></span>
+      <span class="anim-arrow fragment fade-in">+</span>
+      <span class="anim-node fragment fade-in">Fine-tune<small>narrow task</small></span>
+      <span class="anim-arrow fragment fade-in">+</span>
+      <span class="anim-node fragment fade-in">Test-time compute<small>CoT · vote · verify</small></span>
+      <span class="anim-arrow fragment fade-in">+</span>
+      <span class="anim-node fragment fade-in">Cascade<small>escalate hard</small></span>
+    </div>
+    <ol>
+      <li class="fragment"><strong>RAG</strong> — retrieve facts at inference, so the model looks up knowledge instead of memorizing it. Closes knowledge/recency gaps; <em>doesn't</em> fix reasoning.</li>
+      <li class="fragment"><strong>Fine-tune</strong> — specialize on a narrow, stable task; matches or beats a prompted big model on that slice, cheaper per call.</li>
+      <li class="fragment"><strong>Test-time compute</strong> — extended CoT, sample-and-vote, verifier-guided search trade latency/energy for accuracy.</li>
+      <li class="fragment"><strong>Cascade</strong> — let the SLM answer easy queries, escalate low-confidence ones to a frontier model.</li>
+    </ol>
+    <aside class="notes">
+      The gap between a 1–3B model and a frontier model is real, but four levers shrink it. RAG is the biggest single win for knowledge-bound tasks: the small model retrieves relevant facts and reasons over them in-context, so it doesn't have to store the world — but be honest that RAG fixes <em>knowledge</em>, not <em>capability</em>; multi-hop reasoning still strains a weak model and garbage retrieval gives garbage answers. Fine-tuning wins for a narrow, high-volume, stable slice where you have good data. Test-time compute — chain-of-thought, self-consistency voting, best-of-N with a verifier — recovers reasoning by spending inference compute, which is often impractical on a phone's battery and thermal budget. And cascade ties it together: cheap local model first, frontier escalation for the hard tail. Stack these and a small model punches well above its parameter count.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 12 · PITFALLS — think X / actually Y
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Pitfalls · misconceptions</p>
+    <h2>People think X, but actually Y (1/2)</h2>
+    <div class="callout warn"><span class="t">&#9888; Pitfall</span>
+      <ul>
+        <li class="fragment"><strong>Think:</strong> "INT4 perplexity barely moved, so the quant is safe." <strong>Actually:</strong> perplexity is an average over generic text — it hides collapse on rare-but-critical tokens (JSON delimiters, function names), so <em>agentic / tool-calling / long-context</em> tasks can fall off a cliff while perplexity looks fine.</li>
+        <li class="fragment"><strong>Think:</strong> "self-hosting an SLM is obviously cheaper than a per-token API." <strong>Actually:</strong> raw compute is the small part — hidden ops, eval pipelines, on-call/SRE, model updates &amp; security dominate; break-even depends entirely on <em>volume</em> and utilization. Low/bursty traffic favours the API.</li>
+        <li class="fragment"><strong>Think:</strong> "distillation matched my eval set, so it's done." <strong>Actually:</strong> the student often only mimicked the teacher in-domain — <em>distribution narrowing</em> means it breaks on production inputs the eval never covered.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Three of the most common ways SLM projects go wrong. One — the perplexity trap: people quantize to INT4, see perplexity move by a fraction of a point, and ship. But perplexity is a smooth average over ordinary text; it's blind to the rare, high-stakes tokens that tool-calling and structured output depend on — a single mis-predicted JSON brace breaks a function call. Diagnose with task-specific evals (parse-success rate, exact-match on schemas), and fix by calibrating on tool-call data, keeping the lm-head in higher precision, or adding constrained decoding. Two — the "obviously cheaper" fallacy: GPU price is the visible tip; the iceberg is MLOps, eval, on-call, OTA updates, and security. Break-even is driven by volume and utilization, and idle owned hardware is wasted fixed cost. Three — the distillation eval mirage: matching the teacher on your eval often just means the student learned the teacher's in-domain behaviour; the distribution narrowed and it fails on the long tail in production. Test on OOD and production-representative data, not just the eval you distilled toward.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Pitfalls · misconceptions</p>
+    <h2>People think X, but actually Y (2/2)</h2>
+    <div class="callout warn"><span class="t">&#9888; Pitfall</span>
+      <ul>
+        <li class="fragment"><strong>Think:</strong> "higher NPU TOPS = faster LLM." <strong>Actually:</strong> decoding is <em>memory-bandwidth bound</em>, not compute bound — peak TOPS rarely matters. NPUs also hit unsupported ops &amp; immature compilers, so real throughput often trails the GPU on the same chip.</li>
+        <li class="fragment"><strong>Think:</strong> "one 1.5B model can be a great general assistant." <strong>Actually:</strong> reset expectations — a 1.5B model can't match frontier breadth, reasoning, or reliability. <em>Scope it</em>: define a narrow use set, fine-tune + RAG, constrain outputs, cascade hard cases.</li>
+        <li class="fragment"><strong>Think:</strong> "on-device = perfectly private." <strong>Actually:</strong> telemetry, model-update channels, and cloud fallback can still leak data — and the device itself can be compromised.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Three more. The TOPS myth is everywhere in hardware marketing: an NPU advertising more tera-ops looks like it should be faster, but autoregressive decode at batch 1 reads the whole weight matrix per token and does little math — it's bandwidth-bound, so peak compute is mostly irrelevant. NPUs also frequently lack ops for dynamic shapes or certain attention forms, forcing CPU/GPU fallbacks and data shuffling, so the flexible GPU often wins in practice. Measure real tokens/sec, don't trust the spec sheet. The "1.5B general assistant" ask is a recurring product-management trap — you have to reset expectations: a tiny model will hallucinate more, reason worse, and break outside its training. The fix isn't a bigger promise, it's tighter scope — narrow the use set, fine-tune for it, add RAG for knowledge, constrain structured outputs, and cascade the hard cases up. And a quick honesty check on privacy: on-device shrinks the attack surface but isn't magic — telemetry, update channels, and cloud fallback are all leak paths.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 13 · WHAT'S NEW + PAPERS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">What's new</p>
+    <h2>Small models are having a moment</h2>
+    <div class="callout whatsnew"><span class="t">&#128640; What's new</span>
+      <ul>
+        <li class="fragment"><strong>Data quality won.</strong> The phi "textbooks" thesis went mainstream — curated + synthetic "textbook-quality" data lets tiny models punch far above their parameter count.</li>
+        <li class="fragment"><strong>Open small-model families exploded.</strong> Gemma, Qwen2.5, Llama 3.2, SmolLM2 — strong open weights from 135M up, with mobile-targeted variants.</li>
+        <li class="fragment"><strong>On-device shipped to billions.</strong> Apple Intelligence (~3B on-device), Gemini Nano on Android, Llama 3.2 1B/3B for edge — SLMs are now a default product tier.</li>
+        <li class="fragment"><strong>Quantization frontier keeps dropping.</strong> 4-bit is routine (NF4/AWQ/GPTQ); BitNet b1.58 trains natively in ternary weights.</li>
+        <li class="fragment"><strong>Architecture for small.</strong> MobileLLM shows depth &gt; width, GQA + tied embeddings for sub-billion on-device models.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Where the field is right now. First, the data-quality thesis won decisively — Microsoft's phi line proved that "textbook-quality" curated and synthetic data lets a tiny model reach capabilities you'd expect from something much larger, and SmolLM2 is the open, fully-documented version of that recipe. Second, open small-model families exploded: Gemma from Google, Qwen2.5 from Alibaba with strong multilingual and coding, Meta's Llama 3.2 1B/3B for edge, and Hugging Face's SmolLM2 down to 135M. Third, on-device went from demo to shipping to billions of devices — Apple Intelligence runs a roughly 3B model on-device, Gemini Nano is on Android, and Llama 3.2's small variants target phones directly. Fourth, the quantization frontier keeps dropping: 4-bit is now routine via NF4, AWQ, and GPTQ, and BitNet b1.58 shows you can train natively in ternary weights if you do it from scratch. Finally, architecture research specifically for small models — MobileLLM found that for sub-billion models, depth beats width, and GQA plus tied embeddings are essential.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">What's new · papers</p>
+    <h2>Papers — verified links (1/2)</h2>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2306.11644" target="_blank" rel="noopener noreferrer">Textbooks Are All You Need (phi-1)</a> <span class="meta">— Gunasekar et al., 2023. Curated/synthetic data &#8594; tiny model, big results.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2403.08295" target="_blank" rel="noopener noreferrer">Gemma: Open Models Based on Gemini Research and Technology</a> <span class="meta">— Gemma Team (Mesnard et al.), 2024. Open 2B/7B weights.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2412.15115" target="_blank" rel="noopener noreferrer">Qwen2.5 Technical Report</a> <span class="meta">— Qwen Team, 2024. Strong multilingual + coding across sizes.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2502.02737" target="_blank" rel="noopener noreferrer">SmolLM2: When Smol Goes Big — Data-Centric Training of an SLM</a> <span class="meta">— Ben Allal et al., 2025. Open recipe for truly tiny models.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2402.14905" target="_blank" rel="noopener noreferrer">MobileLLM: Optimizing Sub-billion Parameter LMs for On-Device</a> <span class="meta">— Liu et al., 2024. Depth&gt;width, GQA, tied embeddings.</span></div>
+    <div class="paper fragment">Llama 3.2 1B/3B · Apple Intelligence on-device · Gemini Nano <span class="meta">— Meta / Apple / Google, 2024. Shipping on-device SLM tiers (no single arXiv).</span></div>
+    <aside class="notes">
+      These are the verified primary sources for what makes small models strong. The first half is about training small models well: phi-1 for the textbook-quality data thesis; Gemma, Qwen2.5, and SmolLM2 as the major open families (note SmolLM2 publishes the full data recipe, which is rare); and MobileLLM for the architecture findings specific to sub-billion on-device models — depth over width, grouped-query attention, tied embeddings. The last entry is the shipping reality: Llama 3.2's 1B/3B edge variants, Apple Intelligence's on-device model, and Gemini Nano on Android — cited by name because they're product releases, not arXiv papers. If a student reads only two, I'd pick phi-1 to understand <em>why</em> data quality matters disproportionately for small models, and MobileLLM for the architecture levers.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">What's new · papers</p>
+    <h2>Papers — verified links (2/2)</h2>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2402.17764" target="_blank" rel="noopener noreferrer">The Era of 1-bit LLMs: All LLMs are in 1.58 Bits (BitNet b1.58)</a> <span class="meta">— Ma et al., 2024. Native ternary {&#8722;1,0,1} weights.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2305.14314" target="_blank" rel="noopener noreferrer">QLoRA: Efficient Finetuning of Quantized LLMs (NF4)</a> <span class="meta">— Dettmers et al., 2023. 4-bit NormalFloat + LoRA on a frozen base.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2306.00978" target="_blank" rel="noopener noreferrer">AWQ: Activation-aware Weight Quantization</a> <span class="meta">— Lin et al., 2023. Protect activation-salient channels at 4-bit.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2208.07339" target="_blank" rel="noopener noreferrer">LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale</a> <span class="meta">— Dettmers et al., 2022. Mixed-precision for outlier channels.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/1910.01108" target="_blank" rel="noopener noreferrer">DistilBERT: smaller, faster, cheaper and lighter</a> <span class="meta">— Sanh et al., 2019. The classic distillation result.</span></div>
+    <aside class="notes">
+      The second half is the compression toolkit, classic to frontier. DistilBERT (2019) is the historical anchor — distillation gave ~40% smaller, ~60% faster at ~97% of BERT's quality. LLM.int8() (Dettmers, 2022) is where outlier-activation handling started for LLMs: keep the handful of outlier channels in higher precision, quantize the rest to 8-bit. AWQ (Lin, 2023) is the 4-bit weight-only workhorse — it protects the channels that multiply large activations, not the largest weights, which is the detail interviewers love to probe. QLoRA (Dettmers, 2023) gave us NF4, a 4-bit type whose levels are placed by quantiles of a normal distribution, plus the trick of LoRA-fine-tuning on top of a frozen 4-bit base. And BitNet b1.58 (Ma, 2024) is the frontier: ternary weights, but only when trained quantization-aware from scratch — it is not a PTQ method. Together these span the whole "how do you shrink the bytes" story.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 14 · PRACTICE — click a question to reveal
+     ============================================================ -->
+<section>
+  <p class="kicker">Practice</p>
+  <h2>Practice — click a question to reveal the answer</h2>
+  <p class="small muted">Full bank: <a href="../../interview-prep/32-small-language-models-and-edge.md">32 · Small Language Models &amp; Edge</a> — from the answer key, condensed.</p>
+
+  <!-- ===== SET 1 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">What is a "small language model," and what parameter ranges do people mean? <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">A model small enough to run on constrained hardware (phone, laptop, edge) or self-host cheaply — typically ~100M&#8211;7B params, sometimes up to ~13B. The defining trait is deployability under tight memory/compute/power budgets, not an exact count; "small" is relative to tens-to-hundreds-of-billions frontier models. <span class="watch">Don't give a single rigid cutoff as if it's official.</span></div></li>
+
+      <li class="qa"><span class="q">Why can an SLM have lower end-to-end latency than a bigger cloud model with higher raw TPS? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">End-to-end latency includes network round-trip, queuing, and time-to-first-token — not just generation throughput. A local SLM eliminates RTT and congestion, so TTFT is near-instant; for short responses the fixed network/queue overhead of a cloud call dominates. Cloud's TPS edge only shows on long outputs.</div></li>
+
+      <li class="qa"><span class="q">Why have SLMs improved faster than parameter count alone would predict? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Better data (curated/dedup'd/synthetic "textbook" data), distillation from strong teachers, training far past Chinchilla compute-optimal (optimal for training cost, not for a fixed inference budget), improved architectures (GQA, better positional encodings, tied embeddings), and stronger post-training (SFT, RLHF/DPO). Quantization and runtimes made them practical. Quality of data and training, not raw size, drove the gains.</div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 2 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Why does data quality disproportionately benefit small models? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Small models have limited capacity, so every parameter must be spent efficiently. High-quality, dense, low-noise data teaches more per token and wastes less capacity memorizing noise/boilerplate. Large models have spare capacity to absorb messy web data; small ones don't — so curation and synthetic high-signal data (the phi thesis) give outsized gains.</div></li>
+
+      <li class="qa"><span class="q">Structured vs unstructured pruning — which actually speeds up commodity hardware, and why? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Structured pruning removes whole units (neurons, heads, channels, layers) &#8594; smaller dense matrices that standard dense kernels run faster, so it speeds up commodity CPUs/GPUs. Unstructured pruning zeros individual weights &#8594; sparse matrices that need special kernels/hardware (or fixed patterns like 2:4) to help; otherwise it only saves storage, not wall-clock. <span class="watch">Unstructured sparsity ≠ general speedup.</span></div></li>
+
+      <li class="qa"><span class="q">Compare INT8, INT4, and NF4. What does NF4 assume about the weights? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">INT8 = 8-bit uniform, near-lossless. INT4 = 4-bit, 16 levels, smaller but lossier. NF4 (NormalFloat4, from QLoRA) is 4-bit with non-uniform levels chosen via quantiles of a standard normal — information-theoretically optimal for normally distributed data. NF4 assumes weights are roughly zero-mean Gaussian, placing levels denser near zero where most weights lie.</div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 3 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Estimate the memory of a 7B model at FP16, INT8, INT4 (weights only). <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Bytes &#8776; params &times; bits/8. FP16 = 2 B/param &#8594; 7B&times;2 &#8776; 14 GB. INT8 = 1 B &#8594; &#8776; 7 GB. INT4 = 0.5 B &#8594; &#8776; 3.5 GB. So roughly 14 / 7 / 3.5 GB. Real footprint is a bit higher due to quant metadata (scales/zero-points per block) and overhead; embeddings count in the params.</div></li>
+
+      <li class="qa"><span class="q">How does AWQ decide which weights to protect at 4-bit, and why does it matter? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">A small fraction of weight channels are salient — identified by the <em>magnitude of the activations they multiply</em>, not by weight magnitude. AWQ scales those channels up (and inversely scales the activations) before quantizing everything to 4-bit, preserving their effective precision. Activation-important weights carry outsized impact on outputs, so protecting them keeps accuracy high. <span class="watch">It's activation-importance, not "keep the largest weights."</span></div></li>
+
+      <li class="qa"><span class="q">INT4 perplexity is fine but tool-calling degrades — diagnose and fix. <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Perplexity averages over generic text and hides failures on rare-but-critical tokens (JSON delimiters, function names) that tool-calling needs. Diagnose with task-specific evals (schema exact-match, parse-success rate), inspect logits on format tokens. Fix: AWQ/GPTQ with tool-call examples in calibration, keep sensitive layers/lm-head higher precision, raise bit-width, add constrained/grammar decoding, or QAT on agentic data. <span class="watch">Perplexity is not a sufficient quant-quality signal.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 4 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Why is on-device decoding memory-bandwidth bound, and what does that imply for hardware? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Autoregressive decode runs at batch 1: each step reads the entire weight matrix (and KV cache) from memory to do relatively little matmul, so arithmetic intensity (FLOPs/byte) is very low — time is dominated by moving weights, not computing. Implication: prioritize memory bandwidth and smaller/quantized weights over raw FLOPs/TOPS; batching and speculative decoding help by amortizing weight reads.</div></li>
+
+      <li class="qa"><span class="q">Why might an NPU give worse real LLM throughput than the GPU despite higher TOPS? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Advertised TOPS is peak (usually integer) compute, but decoding is bandwidth-bound, so peak TOPS rarely matters. NPUs often lack ops (dynamic shapes, certain attention) &#8594; CPU/GPU fallbacks and data shuffling; immature compilers/quant support; fixed-function pipelines ill-suited to autoregressive decode; sometimes lower usable bandwidth. <span class="watch">Don't equate TOPS with real LLM throughput.</span></div></li>
+
+      <li class="qa"><span class="q">Explain speculative decoding and the draft model's role. <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">A small fast "draft" model proposes several future tokens; the large "verifier"/target checks them in one parallel forward pass and, via an accept/resample rule, keeps the longest valid prefix, correcting at the first rejection. Because verifying many tokens is parallel and cheap vs sequential decoding, you get several tokens per target pass when the draft is right — speeding up while keeping output distributed exactly as the target.</div></li>
+
+      <li class="qa"><span class="q">What property makes speculative decoding distribution-exact? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Modified rejection sampling: accept a draft token x with prob min(1, p_target(x)/p_draft(x)); on rejection, resample from the normalized residual &#8733; max(0, p_target &#8722; p_draft). This makes the output distributed exactly as the target for <em>any</em> draft. <span class="watch">The draft needn't match the target — the accept/resample rule makes it exact; a closer draft just raises acceptance/speed.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 5 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Give a decision framework: deploy an SLM vs call a frontier API. <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Favour an SLM when the task is narrow, privacy/offline/latency/data-residency are required, volume is high, and acceptable quality is reachable via fine-tune/RAG. Favour a frontier API for broad open-ended tasks needing top reasoning/world knowledge at low volume with fast iteration. Decide on a quality bar (eval it), cost at expected volume, latency/privacy needs, and ops capacity. Often a hybrid/cascade is best.</div></li>
+
+      <li class="qa"><span class="q">What hidden costs accompany self-hosting an SLM fleet beyond raw compute? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">MLOps/infra (serving, autoscaling, monitoring), eval pipelines + continuous regression testing, on-call/SRE and incident response, model updates/retraining and version rollout (OTA for devices), security (patching, isolation, prompt-injection defense), data/labeling, compliance/audit, and the talent to do it all. These ongoing costs often dwarf GPU price and are easy to underestimate.</div></li>
+
+      <li class="qa"><span class="q">A team insists on one 1.5B model as a broad assistant — what do you reset and propose? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Reset: a 1.5B model can't match frontier breadth, reasoning, world knowledge, or reliability — expect more hallucination, weaker long-context/multi-step, brittleness outside training. Propose scoping: define a narrow high-value use set, fine-tune for it, add RAG for knowledge and constrained decoding for structure, cascade hard cases to a larger model, and set measurable per-task quality bars instead of "general assistant."</div></li>
+    </ul>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 15 · TAKEAWAYS + FURTHER READING
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Takeaways</p>
+    <h2>What to remember</h2>
+    <div class="takeaways"><ul>
+      <li class="fragment"><strong>"Small" is relative &amp; about deployability</strong> — ~100M&#8211;7B, defined by fitting tight memory/power budgets, not a number.</li>
+      <li class="fragment"><strong>Data &amp; training, not size, drove the gains</strong> — textbook-quality data, distillation, long training, GQA/tied embeddings.</li>
+      <li class="fragment"><strong>Quantization is the on-device enabler</strong> — INT4 &#8776; 4&times; smaller; decode is bandwidth-bound, so fewer bytes &#8594; more tokens/sec.</li>
+      <li class="fragment"><strong>Measure the right things</strong> — TTFT, TPS, and energy-per-token; perplexity hides task collapse.</li>
+      <li class="fragment"><strong>Close the gap, don't pretend it's gone</strong> — RAG (knowledge), fine-tune (narrow), test-time compute (reasoning), cascade (hard tail).</li>
+      <li class="fragment"><strong>Scope, then ship</strong> — a tiny model is a specialist, not a frontier assistant.</li>
+    </ul></div>
+    <aside class="notes">
+      The recap, earned. Read it back as the through-line: "small" is a relative, deployability-driven label, not a parameter cutoff. The reason small models got so good so fast is data and training quality — textbook-quality data, distillation, training well past compute-optimal, and small-model architecture tricks — not raw scale. Quantization is what makes them fit and run, and because decode is memory-bandwidth bound, shrinking the bytes directly buys throughput. When you evaluate, measure TTFT, tokens-per-second, and energy-per-token, and never trust perplexity as a stand-in for task quality. The gap to frontier is real but shrinkable with RAG, fine-tuning, test-time compute, and cascades. And the product lesson that ties it together: scope a small model to a narrow job and it shines; ask it to be a general assistant and it disappoints. If they leave with one sentence: "data quality and quantization make small models viable — scope them and measure the right metrics."
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Further reading · closing</p>
+    <h2>Go deeper</h2>
+    <div class="paper"><a href="https://arxiv.org/abs/2306.11644" target="_blank" rel="noopener noreferrer">Textbooks Are All You Need (phi-1)</a> <span class="meta">— Gunasekar et al., 2023. Why data quality wins for small models.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2502.02737" target="_blank" rel="noopener noreferrer">SmolLM2 — Data-Centric Training of a Small Language Model</a> <span class="meta">— Ben Allal et al., 2025. A fully-open small-model recipe.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2305.14314" target="_blank" rel="noopener noreferrer">QLoRA: Efficient Finetuning of Quantized LLMs</a> <span class="meta">— Dettmers et al., 2023. NF4 + LoRA, the practical 4-bit toolkit.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2402.14905" target="_blank" rel="noopener noreferrer">MobileLLM</a> <span class="meta">— Liu et al., 2024. Architecture for sub-billion on-device models.</span></div>
+    <p style="margin-top:1em;text-align:center;font-size:1.1em;"><strong>Data quality + quantization make small viable. Scope it, measure TTFT/TPS/energy, cascade the hard tail.</strong></p>
+    <p style="text-align:center;opacity:.6;font-size:.85em;">End of Module 32 — thank you. Press <kbd>O</kbd> for overview.</p>
+    <aside class="notes">
+      Closing. Four reads to go deeper: phi-1 for the data-quality thesis, SmolLM2 for a fully-open recipe you can actually reproduce, QLoRA for the practical 4-bit fine-tuning toolkit, and MobileLLM for sub-billion on-device architecture. And the one-line crystallization: data quality and quantization make small models viable, so scope them tightly, measure TTFT, tokens-per-second, and energy-per-token rather than perplexity, and cascade the hard tail to a frontier model. That's the sentence I want them repeating on the way out. Thank them and offer to open the overview or jump back to the decision tree.
+    </aside>
+  </section>
+</section>
+
+    </div>
+  </div>
+  <!-- reveal.js core + plugins + mermaid (CDN), then shared deck runtime -->
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/math/math.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+  <script src="../assets/deck.js?v=2"></script>
+</body>
+</html>

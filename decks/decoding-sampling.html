@@ -1,0 +1,1412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Decoding &amp; Sampling Strategies — LLM Teaching Decks</title>
+  <meta name="description" content="A reveal.js lecture deck: how LLMs turn logits into tokens — greedy, beam, temperature, top-k/top-p/min-p, penalties, constrained &amp; speculative decoding." />
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/white.css" id="reveal-theme" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <link rel="stylesheet" href="../assets/deck.css?v=2" />
+
+  <!-- FOUC guard: set deck theme before first paint -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("deck-theme") ||
+          ((window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+        if (t === "dark") document.documentElement.classList.add("deck-dark");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+
+<!-- ============================================================
+     SECTION 1 · TITLE
+     ============================================================ -->
+<section>
+  <section class="deck-title">
+    <div class="logo">&#8721;</div>
+    <p class="kicker">PHASE 3 · REASONING &amp; INFERENCE · MODULE 10</p>
+    <h1>Decoding &amp; Sampling Strategies</h1>
+    <p class="subtitle">The last mile of generation: how a model turns raw logits into actual tokens &mdash; greedy, beam, temperature, top-k/p, min-p, penalties, contrastive, constrained, and speculative decoding.</p>
+    <p class="keyhint"><kbd>&#8592;</kbd><kbd>&#8594;</kbd> navigate &middot; <kbd>S</kbd> speaker notes &middot; <kbd>O</kbd> overview &middot; <kbd>F</kbd> fullscreen &middot; append <code>?print-pdf</code> to export</p>
+    <aside class="notes">
+      Welcome. This module is about the step everyone forgets is even a choice: the model gives you a score for every word in the vocabulary at every position, and decoding is the rule that picks the actual next token. The same trained model, with the same weights, can be a boring robot or a wild improviser depending purely on these settings &mdash; and they cost nothing to change at inference time. The thesis of the whole lecture is one sentence: <em>decoding navigates a single trade-off &mdash; coherence versus diversity</em>, and every knob (temperature, top_p, top_k, penalties, seed) is just a different way to ride that dial. We'll climb the full ladder classic to SOTA, do the softmax math, write the code, and end on the surprisingly hard problem of making any of it reproducible.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 2 · ROADMAP
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Roadmap</p>
+    <h2>What you'll learn <span style="font-weight:500;opacity:.6;font-size:.6em;">(~16 min of content, 30&ndash;45 min taught)</span></h2>
+    <div class="callout"><span class="t">&#128203; The arc</span>
+      <ul>
+        <li class="fragment"><strong>Greedy &amp; beam</strong> &mdash; the deterministic, likelihood-maximizing baseline</li>
+        <li class="fragment"><strong>Temperature</strong> &mdash; reshape the distribution before you pick</li>
+        <li class="fragment"><strong>Truncation:</strong> top-k &#8594; top-p (nucleus) &#8594; min-p / typical</li>
+        <li class="fragment"><strong>Penalties</strong> (repetition, frequency/presence) &#8594; <strong>contrastive</strong> &amp; Mirostat</li>
+        <li class="fragment"><strong>Constrained</strong> (grammar/JSON) &#8594; <strong>speculative &amp; best-of-n</strong> &mdash; speed and search</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Five movements. First, the deterministic baseline &mdash; greedy and beam &mdash; which maximize likelihood and, surprisingly, that's exactly why they go bland and repetitive in open-ended text. Second, temperature, the one knob that reshapes the whole distribution. Third, the truncation family &mdash; top-k, then nucleus top-p, then the newer min-p and typical sampling that adapt to the model's confidence. Fourth, the control layer: penalties to stop loops, then contrastive methods and Mirostat that target a quality set-point. Fifth, the production concerns: forcing valid structure with constrained decoding, and going faster or searching harder with speculative decoding and best-of-n. Each rung exists because the previous one had a specific failure mode.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Core ideas to land</p>
+    <h2>Five things to take away</h2>
+    <div class="takeaways"><ul>
+      <li class="fragment"><strong>Logits are not probabilities.</strong> Softmax (and temperature) turns scores into a distribution first.</li>
+      <li class="fragment"><strong>The universal trade-off = coherence vs diversity.</strong> Every knob rides that one dial.</li>
+      <li class="fragment"><strong>Truncate THEN renormalize.</strong> After dropping the tail, the survivors must sum to 1 again.</li>
+      <li class="fragment"><strong>Speculative decoding is exact, not approximate.</strong> Same output distribution, just faster.</li>
+      <li class="fragment"><strong>Determinism is harder than it looks.</strong> Even temperature 0 isn't a guarantee on a GPU.</li>
+    </ul></div>
+    <aside class="notes">
+      This is the executive summary &mdash; I'll return to it at the end as the recap. Idea one: a logit is an unbounded raw score; only after softmax is it a probability, and temperature acts on the logits before that. Idea two: the spine of the whole deck &mdash; coherence (safe, high-probability, on-topic) versus diversity (surprising, creative, varied) &mdash; and tuning is just choosing where on that line to sit. Idea three: the single most common bug &mdash; people truncate to a candidate set and forget to renormalize, or they renormalize wrong. Idea four: a beautiful result &mdash; speculative decoding provably preserves the target model's distribution, so it's a free speedup, not a quality trade. Idea five: reproducibility is deceptively deep &mdash; fixing a seed isn't enough once you add batching and GPU floating-point nondeterminism. If they remember nothing else: "coherence vs diversity" and "truncate then renormalize."
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 3 · WHY IT MATTERS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Why it matters</p>
+    <h2>Decoding is the last mile</h2>
+    <div class="flow">
+      <span class="box">Logits<small>raw scores, one per token</small></span>
+      <span class="arrow">&#8594;</span>
+      <span class="box accent">Softmax<small>scores &#8594; probabilities</small></span>
+      <span class="arrow">&#8594;</span>
+      <span class="box green">Selection rule<small>greedy? sample? truncate?</small></span>
+      <span class="arrow">&#8594;</span>
+      <span class="box">Token<small>append &amp; feed back</small></span>
+    </div>
+    <ul style="margin-top:.6em;">
+      <li class="fragment">The model only ever outputs <strong>a vector of logits</strong> &mdash; one score per vocabulary entry.</li>
+      <li class="fragment">Decoding is the <strong>selection rule</strong> that turns that vector into one concrete token.</li>
+      <li class="fragment">Same weights, same prompt &mdash; the <em>rule</em> alone decides robot vs. poet.</li>
+    </ul>
+    <aside class="notes">
+      Frame this as the part of inference people skip over. A trained LLM does one thing per step: produce a logit vector over the whole vocabulary. It does not output text &mdash; it outputs scores. Softmax converts those scores into a probability distribution; then a selection rule collapses that distribution to a single token; then you append it and loop. The punchline is that the model's weights are fixed &mdash; all the behavioral difference between a deterministic factual assistant and a wild creative writer comes from this last-mile rule. That's why it's worth a whole module: it's high-leverage, runs entirely at inference time, and is the thing you actually tune in production.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Why it matters · the free knobs</p>
+    <h2>Every API knob lives here &mdash; and costs nothing to change</h2>
+    <div class="cols">
+      <div>
+        <h5>The knobs you already know</h5>
+        <ul>
+          <li class="fragment"><code>temperature</code> &mdash; flatten or sharpen</li>
+          <li class="fragment"><code>top_p</code> / <code>top_k</code> &mdash; how big a shortlist</li>
+          <li class="fragment"><code>frequency_penalty</code> / <code>presence_penalty</code></li>
+          <li class="fragment"><code>seed</code> &mdash; reproducibility (sort of)</li>
+          <li class="fragment"><code>stop</code> &mdash; where to halt</li>
+        </ul>
+      </div>
+      <div>
+        <h5>Why they're special</h5>
+        <ul>
+          <li class="fragment"><strong>No retraining</strong> &mdash; pure inference-time settings</li>
+          <li class="fragment"><strong>No extra parameters</strong> &mdash; weights untouched</li>
+          <li class="fragment"><strong>Instant</strong> &mdash; change per request</li>
+          <li class="fragment">Wrong defaults can <strong>silently tank quality</strong></li>
+        </ul>
+      </div>
+    </div>
+    <p class="fragment" style="margin-top:.5em;">The cheapest lever you have &mdash; and the easiest to misconfigure.</p>
+    <aside class="notes">
+      Open any chat-completion API and the sampling block is right there: temperature, top_p, top_k, the two penalties, seed, stop. Every one of these is a decoding choice. What makes them special &mdash; and worth understanding deeply &mdash; is that they are free: no fine-tuning, no extra weights, no architecture change, applied per request and changeable on the fly. That's also the trap: because they're free and hidden, teams ship bad defaults (temperature 1.0 on a factual extractor, top_p 1.0 with no truncation) and quietly degrade quality without realizing the model itself is fine. Knowing what each knob does is one of the highest-return things a practitioner can learn.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 4 · INTUITION
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Intuition</p>
+    <h2>How do you pick the next word?</h2>
+    <ul>
+      <li class="fragment">Each step, the model hands you a <strong>scorecard</strong> &mdash; a number for every possible next word.</li>
+      <li class="fragment"><strong>Always take the top word?</strong> &#8594; safe, predictable &hellip; and often boring &amp; loopy. (greedy)</li>
+      <li class="fragment"><strong>Roll weighted dice?</strong> &#8594; sometimes pick a lower word in proportion to its score. (sampling)</li>
+      <li class="fragment"><strong>Keep a shortlist, then roll?</strong> &#8594; ignore the long tail of nonsense, gamble only among good options. (top-k / top-p)</li>
+      <li class="fragment">The whole field is just <em>how much risk</em> you let into that pick.</li>
+    </ul>
+    <aside class="notes">
+      This is the mental model I lean on all lecture. Picture the model as a contestant who, every turn, writes a score next to every word in the dictionary. Decoding is your policy for reading that scorecard. Policy one: always circle the highest number &mdash; that's greedy, totally deterministic, and exactly why it gets stuck repeating itself. Policy two: roll dice weighted by the scores, so a word twice as likely gets picked roughly twice as often &mdash; that's plain sampling, more varied but it can wander into the garbage in the long tail. Policy three, the smart middle: first cross off everything below a shortlist, then roll dice only among the survivors &mdash; that's top-k and top-p. Every technique in this deck is a variation on "how big is the shortlist and how loaded are the dice." That single framing &mdash; risk dial &mdash; is what I want them holding.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Intuition · the autoregressive loop</p>
+    <h2>Pick a token, feed it back, repeat</h2>
+    <div class="mermaid">
+flowchart LR
+  P["Prompt<br/>tokens so far"] --> M["Model<br/>forward pass"]
+  M --> L["Logits<br/>one per vocab token"]
+  L --> D["Decode<br/>selection rule"]
+  D --> T["Next token"]
+  T -->|append &amp; loop| P
+  T -.->|EOS or stop| E["Done"]
+    </div>
+    <p class="eqnote fragment">Generation is this loop run hundreds of times &mdash; the <em>chosen</em> token becomes part of the next input.</p>
+    <aside class="notes">
+      Here is the engine of all text generation: the autoregressive loop. Start with the prompt tokens; run a forward pass; get logits; apply your decoding rule to pick one token; append that token to the context; and loop. The dotted branch is the exit &mdash; you stop when the model emits an end-of-sequence token or hits a stop sequence. Two things to stress. First, the feedback: the token you choose becomes part of the input for the very next step, so one risky pick can steer everything after it &mdash; errors compound. Second, the decode box is the only place your knobs act; everything else (the forward pass, the logits) is fixed by the trained model. This loop is the skeleton that the entire "how it works" section hangs off.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 5 · HOW IT WORKS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">How it works · the pipeline</p>
+    <h2>From raw logits to a sampled token</h2>
+    <p>One step of decoding, in order. Watch the distribution get reshaped, trimmed, renormalized, then sampled.</p>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Decoding pipeline — logits → softmax → temperature → truncate → renorm → sample",
+     "nodes":[["Logits","raw scores"],["Softmax","to probs"],["Temperature","reshape"],["Truncate","top-k / top-p / min-p"],["Renorm","sum to 1"],["Sample","draw token"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"The model emits <strong>logits</strong> &mdash; one unbounded score per vocab token. Not probabilities yet."},
+       {"on":[1],"done":[0],"cap":"<strong>Softmax</strong> exponentiates &amp; normalizes &#8594; a valid probability distribution summing to 1."},
+       {"on":[2],"done":[0,1],"cap":"<strong>Temperature</strong> divides the <em>logits</em> first: T&gt;1 flattens, T&lt;1 sharpens. (Order matters!)"},
+       {"on":[3],"done":[0,1,2],"cap":"<strong>Truncate</strong> the tail: keep top-k, or the nucleus (top-p), or min-p survivors &mdash; zero out the rest."},
+       {"on":[4],"done":[0,1,2,3],"cap":"<strong>Renormalize</strong> the survivors so they sum to 1 again &mdash; the step people forget."},
+       {"on":[5],"done":[0,1,2,3,4],"cap":"<strong>Sample</strong> one token from the trimmed distribution (or argmax if greedy). Append &amp; loop."}],
+     "interval":1900,"meter":true}
+    </script></div>
+    <aside class="notes">
+      Drive the whole pipeline off this widget &mdash; it's the spine of the section. Step one: the model gives logits, raw real-valued scores that can be negative or huge; emphasize they are NOT probabilities. Step two: softmax exponentiates each and divides by the sum, producing a proper distribution. Step three is the subtle one &mdash; temperature is applied to the logits <em>before</em> softmax (divide each logit by T), so it must come conceptually before or fused with the softmax; T above 1 flattens toward uniform, below 1 sharpens toward the peak. Step four: truncation drops the unreliable tail &mdash; top-k by count, top-p by cumulative mass, min-p by a relative threshold. Step five is the bug magnet &mdash; after you zero out the tail the survivors no longer sum to 1, so you must renormalize. Step six: draw a token from that final distribution; greedy is just the degenerate case where you take the argmax. Then append and run the loop again.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · the distribution reshapes</p>
+    <h2>Same logits, four different distributions</h2>
+    <div class="cols">
+      <div>
+        <svg class="sl-graph" viewBox="0 0 540 280" role="img" aria-label="Probability bars reshaping with temperature and top-p">
+          <!-- axes -->
+          <path class="sl-axis" d="M 60 240 L 510 240" />
+          <path class="sl-axis" d="M 60 240 L 60 30" />
+          <polygon class="sl-arrow" points="510,240 502,235 502,245" />
+          <polygon class="sl-arrow" points="60,30 55,38 65,38" />
+          <text class="sl-axlab" x="270" y="268" text-anchor="middle">tokens (sorted by score)</text>
+          <text class="sl-axlab" x="20" y="135" text-anchor="middle" transform="rotate(-90 20 135)">P(token)</text>
+
+          <!-- state 0: raw bars (default T=1) -->
+          <g class="fragment" data-fragment-index="1">
+            <rect x="80"  y="90"  width="44" height="150" fill="var(--accent)"/>
+            <rect x="140" y="135" width="44" height="105" fill="var(--accent)"/>
+            <rect x="200" y="170" width="44" height="70"  fill="var(--accent)"/>
+            <rect x="260" y="195" width="44" height="45"  fill="var(--accent)"/>
+            <rect x="320" y="210" width="44" height="30"  fill="var(--accent)"/>
+            <rect x="380" y="222" width="44" height="18"  fill="var(--accent)"/>
+            <rect x="440" y="230" width="44" height="10"  fill="var(--accent)"/>
+            <text class="sl-mlab" x="270" y="52" text-anchor="middle">T = 1 &mdash; raw distribution</text>
+          </g>
+
+          <!-- state 1: T>1 flatter -->
+          <g class="fragment fade-in-then-out" data-fragment-index="2">
+            <rect x="80"  y="150" width="44" height="90" fill="var(--new-accent)" opacity="0.85"/>
+            <rect x="140" y="160" width="44" height="80" fill="var(--new-accent)" opacity="0.85"/>
+            <rect x="200" y="172" width="44" height="68" fill="var(--new-accent)" opacity="0.85"/>
+            <rect x="260" y="182" width="44" height="58" fill="var(--new-accent)" opacity="0.85"/>
+            <rect x="320" y="190" width="44" height="50" fill="var(--new-accent)" opacity="0.85"/>
+            <rect x="380" y="198" width="44" height="42" fill="var(--new-accent)" opacity="0.85"/>
+            <rect x="440" y="205" width="44" height="35" fill="var(--new-accent)" opacity="0.85"/>
+            <text class="sl-note" x="270" y="72" text-anchor="middle">T &gt; 1 &mdash; flatter, more diverse</text>
+          </g>
+
+          <!-- state 2: T<1 sharper -->
+          <g class="fragment" data-fragment-index="3">
+            <rect x="80"  y="50"  width="44" height="190" fill="var(--accent)"/>
+            <rect x="140" y="165" width="44" height="75"  fill="var(--accent)"/>
+            <rect x="200" y="205" width="44" height="35"  fill="var(--accent)"/>
+            <rect x="260" y="222" width="44" height="18"  fill="var(--accent)"/>
+            <rect x="320" y="231" width="44" height="9"   fill="var(--accent)"/>
+            <rect x="380" y="235" width="44" height="5"   fill="var(--accent)"/>
+            <rect x="440" y="237" width="44" height="3"   fill="var(--accent)"/>
+            <text class="sl-mlab" x="270" y="40" text-anchor="middle">T &lt; 1 &mdash; sharper, safer</text>
+          </g>
+
+          <!-- state 3: top-p nucleus greys out the tail -->
+          <g class="fragment" data-fragment-index="4">
+            <rect x="200" y="205" width="44" height="35" fill="var(--muted)" opacity="0.35"/>
+            <rect x="260" y="222" width="44" height="18" fill="var(--muted)" opacity="0.35"/>
+            <rect x="320" y="231" width="44" height="9"  fill="var(--muted)" opacity="0.35"/>
+            <rect x="380" y="235" width="44" height="5"  fill="var(--muted)" opacity="0.35"/>
+            <rect x="440" y="237" width="44" height="3"  fill="var(--muted)" opacity="0.35"/>
+            <path class="sl-vmark" d="M 192 30 L 192 240" />
+            <text class="sl-note" x="370" y="100" text-anchor="middle">top-p cuts the tail &#8594;</text>
+          </g>
+        </svg>
+      </div>
+      <div>
+        <ol>
+          <li class="fragment" data-fragment-index="1"><strong>Raw (T=1):</strong> the model's natural distribution &mdash; tallest bar is the most likely token, with a long low tail.</li>
+          <li class="fragment" data-fragment-index="2"><strong>T &gt; 1 flattens:</strong> bars even out, low-probability tokens get a real shot &#8594; more <em>diversity</em>.</li>
+          <li class="fragment" data-fragment-index="3"><strong>T &lt; 1 sharpens:</strong> the peak grows, the tail shrinks toward zero &#8594; more <em>coherence</em>.</li>
+          <li class="fragment" data-fragment-index="4"><strong>top-p truncates:</strong> grey out everything past the cumulative mass cutoff &mdash; the nucleus survives, the tail is banned.</li>
+        </ol>
+        <p class="eqnote fragment" data-fragment-index="4">Temperature <em>reshapes</em>; truncation <em>removes</em>. They compose.</p>
+      </div>
+    </div>
+    <aside class="notes">
+      This is the visual payoff of the section &mdash; one set of logits, four pictures. Start with the raw distribution at temperature 1: one dominant bar, a moderate second, and a fat tail of unlikely tokens. Advance: temperature above 1 squashes the bars toward each other &mdash; the gaps shrink, so unlikely tokens become genuinely samplable, which is diversity. Advance again: temperature below 1 does the opposite &mdash; it stretches the gaps, the top bar towers, the tail collapses toward zero, which is coherence and safety. Final advance: top-p (nucleus) is a different operation entirely &mdash; it doesn't reshape, it cuts. Sort by probability, walk down accumulating mass until you hit p (say 0.9), and ban everything after that. The greyed bars are gone; you'll renormalize and sample only from the nucleus. The takeaway on the right is the one to hammer: temperature reshapes the whole curve, truncation removes the tail, and you typically apply both together &mdash; temperature first, then truncate, then renormalize, then sample.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works · the decode loop</p>
+    <h2>Why one risky pick echoes forever</h2>
+    <div class="approach-steps">
+      <span class="anim-node">Context<small>tokens so far</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Forward<small>logits</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Decode<small>pick token</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Append<small>grow context</small></span>
+      <span class="anim-arrow fragment fade-in">&#8635;</span>
+      <span class="anim-node fragment fade-in">Repeat<small>until EOS / stop</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Feed the current context (prompt + everything generated so far) through the model.</li>
+      <li class="fragment">Get logits for the next position; apply temperature, truncate, renormalize.</li>
+      <li class="fragment">Pick one token &mdash; argmax (greedy) or a weighted draw (sampling).</li>
+      <li class="fragment"><strong>Append it to the context</strong> &mdash; the chosen token now conditions every future step.</li>
+      <li class="fragment">Loop until the model emits EOS or you hit a stop sequence / max length.</li>
+    </ol>
+    <p class="eqnote fragment">Because each pick is fed back in, a single off-distribution token can derail the rest &mdash; errors compound.</p>
+    <aside class="notes">
+      Close the section by making the loop concrete and explaining why it matters for everything downstream. The mechanics: context in, logits out, decode to a single token, append, repeat. The KV cache makes the forward pass cheap per step (we cover that in another module), but conceptually it's a fresh prediction conditioned on the growing prefix each time. The teaching point is the append step &mdash; this is autoregression, and it means the token you commit to is not a throwaway: it becomes evidence the model conditions on next. So an unlucky sample early on doesn't just add one odd word; it shifts the model into a region of context it would never have reached on its own, and the rest of the generation can spiral &mdash; this is exposure bias and it's why repetition loops and topic drift happen. That's the bridge into the approaches section: every decoding strategy is, in part, a way to manage the risk that this feedback loop amplifies.
+    </aside>
+  </section>
+</section>
+
+<section>
+
+  <!-- ===== LANDSCAPE INTRO ===== -->
+  <section>
+    <p class="kicker">The approaches &middot; part A &middot; landscape</p>
+    <h2>Same logits, six ways to choose</h2>
+    <div class="flow" style="font-size:.82em;">
+      <span class="box">Greedy<small>argmax</small></span><span class="arrow">&#8594;</span>
+      <span class="box">Beam<small>width-k</small></span><span class="arrow">&#8594;</span>
+      <span class="box accent">Temperature<small>shape knob</small></span><span class="arrow">&#8594;</span>
+      <span class="box accent">Top-k<small>fixed cutoff</small></span><span class="arrow">&#8594;</span>
+      <span class="box green">Top-p<small>nucleus</small></span><span class="arrow">&#8594;</span>
+      <span class="box green">Min-p<small>relative</small></span>
+    </div>
+    <p class="eqnote fragment">Each one <em>fixes a weakness of the one before it.</em> Same probability distribution every step &mdash; only the <strong>selection rule</strong> changes.</p>
+    <ul style="margin-top:.5em;">
+      <li class="fragment">Greedy &amp; beam <strong>maximize likelihood</strong> &mdash; great for translation, bland for chat.</li>
+      <li class="fragment">Temperature <strong>reshapes</strong> the distribution before we ever sample.</li>
+      <li class="fragment">Top-k / top-p / min-p <strong>truncate the tail</strong> so we sample safely &mdash; each smarter about <em>where</em> to cut.</li>
+    </ul>
+    <aside class="notes">
+      This is the spine of the whole deck and exactly the ground interviewers love: "why did the field move from greedy to beam to sampling to nucleus to min-p?" The unifying frame I want them to hold: the model hands you the same distribution over the vocabulary at every step; all six strategies differ only in how they pick a token from it. The first two chase the single most-likely string &mdash; perfect when there is one right answer (translation), terrible for open chat because the highest-probability text is generic and repetitive. Temperature is a different lever &mdash; it reshapes the distribution itself. Then the truncation family fixes sampling's fatal flaw: a long tail of bad-but-nonzero tokens. We climb that ladder one rung at a time, each rung patching the previous rung's specific failure.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       1 · GREEDY DECODING (classic)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 1 of 6</p>
+    <h3>Greedy decoding <span class="tag classic">classic</span></h3>
+    <p><strong>What:</strong> at every step take the single highest-probability token. <strong>How:</strong> compute logits &#8594; softmax &#8594; <code>argmax</code> &#8594; append &#8594; repeat until EOS. <strong>Solves:</strong> the simplest possible decoder &mdash; deterministic, fast, zero hyperparameters.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Fully deterministic &amp; cheap (1 forward pass/token)</li><li class="fragment">Strong for short factual answers</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Locally optimal &#8800; globally most-probable string</li><li class="fragment">Bland, gets stuck in repetition loops</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> this is the baseline &mdash; every later method exists to fix something greedy gets wrong.</p>
+    <aside class="notes">
+      Greedy is the floor everything else builds on. The defining rule is one word: argmax. It is deterministic given a fixed prompt and model, costs nothing extra, and works fine for short, closed-form answers like "what is 2+2." The first big idea to surface: argmax at each step is <em>locally</em> greedy and does not guarantee the globally most probable sequence &mdash; a slightly lower-probability token now can unlock a much higher-probability continuation later, and greedy can never see that. The second weakness is degeneration: because the highest-likelihood next token is often a word it just used, greedy famously falls into "I am very very very..." loops. Those two failures &mdash; no lookahead, and repetition &mdash; motivate beam search and sampling respectively.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Greedy decoding</p>
+    <h3>Greedy decoding &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Logits<small>vocab scores</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Softmax<small>probs</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Argmax<small>pick top-1</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Append<small>to sequence</small></span>
+      <span class="anim-arrow fragment fade-in">&#8635;</span>
+      <span class="anim-node fragment fade-in">Repeat<small>until EOS</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Model emits a logit vector over the whole vocabulary.</li>
+      <li class="fragment">Softmax turns logits into a probability distribution.</li>
+      <li class="fragment">Take <code>argmax</code> &mdash; the single most probable token.</li>
+      <li class="fragment">Append it to the running sequence; feed it back in.</li>
+      <li class="fragment">Loop until the EOS token (or a length cap) is produced.</li>
+    </ol>
+    <aside class="notes">
+      Walk the loop literally. Note that softmax is unnecessary for greedy &mdash; argmax of the logits equals argmax of the probabilities, so an efficient implementation skips the softmax entirely and just takes the top logit. Each chosen token is fed back in as context for the next step; that autoregressive feedback is why a single bad early pick can derail the whole generation. Emphasize the loop arrow: nothing here is reconsidered. Once a token is committed it is permanent, which is precisely the limitation beam search relaxes by keeping several candidate sequences alive at once.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       2 · BEAM SEARCH (classic)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 2 of 6</p>
+    <h3>Beam search <span class="tag classic">classic</span></h3>
+    <p><strong>What:</strong> keep the <em>k</em> best partial sequences (hypotheses) alive instead of one. <strong>How:</strong> at each step expand all <em>k</em> beams, score by <strong>sum of log-probs</strong>, keep the top <em>k</em>; apply <strong>length normalization</strong> so long hypotheses aren't penalized. <strong>Solves:</strong> greedy's no-lookahead &mdash; explores a wider slice of the search tree.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Higher-likelihood sequences than greedy</li><li class="fragment">Excellent for tasks with one right answer (MT, summarization)</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment"><em>k</em>&times; the compute/memory of greedy</li><li class="fragment">Short, generic, repetitive in open-ended chat</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> greedy commits to one token; beam hedges across <em>k</em> hypotheses and can recover from a locally-bad first pick.</p>
+    <p class="small"><a href="https://arxiv.org/abs/1610.02424" target="_blank" rel="noopener noreferrer">Diverse beam search &#8599;</a></p>
+    <aside class="notes">
+      Beam search is greedy with a budget of <em>k</em> parallel guesses. Width <em>k</em>=1 is exactly greedy; larger <em>k</em> explores more of the tree and tends to find higher-likelihood strings. Two technical points interviewers probe. First, why sum log-probs rather than multiply raw probabilities: probabilities are tiny numbers in [0,1], multiplying hundreds of them underflows to zero in floating point, so we add their logs instead &mdash; mathematically identical, numerically stable. Second, length normalization: because every extra token adds another negative log-prob, raw scores favor shorter sequences, so we divide the cumulative score by length (often length to a power alpha) to stop beam from truncating early. The deeper insight: beam optimizes likelihood, which is the right objective for machine translation (one faithful rendering) but wrong for open chat &mdash; the highest-likelihood chat reply is bland and safe ("I don't know," "Thank you"), and beams collapse onto near-identical variants, which is why diverse beam search adds a penalty between groups to spread them out.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Beam search</p>
+    <h3>Beam search &mdash; step by step <span style="font-weight:500;opacity:.6;font-size:.6em;">(width k = 2)</span></h3>
+    <div class="approach-steps">
+      <span class="anim-node">Start<small>k beams</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Expand<small>all next tokens</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Score<small>&Sigma; log-prob</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Prune<small>keep top-k</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Normalize<small>by length</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Hold <em>k</em> partial hypotheses, each with a cumulative log-prob score.</li>
+      <li class="fragment">Expand: for each beam, consider every possible next token.</li>
+      <li class="fragment">Score each candidate = parent score + log P(next token).</li>
+      <li class="fragment">Prune the <em>k</em>&times;vocab candidates back down to the top <em>k</em>.</li>
+      <li class="fragment">At the end, divide scores by length (normalization) and return the best.</li>
+    </ol>
+    <aside class="notes">
+      Drive this as the search-tree picture. At each depth we have <em>k</em> living beams; expanding them gives <em>k</em> times the vocabulary candidates, and we keep only the best <em>k</em> &mdash; that prune step is what bounds the cost to roughly <em>k</em> times greedy per step in both compute and memory. The score is purely additive in log space: a beam's score is its parent's score plus the log-probability of the token it just appended. The final length-normalization step is where many implementations differ &mdash; without it the model prefers to emit EOS early because every extra token only ever lowers the score; dividing by length (or length^alpha) levels the playing field. Note completed beams (those that hit EOS) are set aside and compared at the end against the normalized scores of the rest.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       3 · TEMPERATURE SCALING (the shape knob)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 3 of 6</p>
+    <h3>Temperature scaling <span class="tag modern">the shape knob</span></h3>
+    <p><strong>What:</strong> a single knob that controls how peaked vs. flat the distribution is. <strong>How:</strong> divide every logit by <em>T</em> <em>before</em> softmax: <code>softmax(z / T)</code>. <strong>Solves:</strong> gives sampling a continuous dial between deterministic and wildly creative &mdash; without it, sampling is all-or-nothing.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">One intuitive knob: creativity vs. focus</li><li class="fragment"><em>T</em>&#8594;0 recovers greedy; <em>T</em>=1 is the raw model</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">High <em>T</em> alone reaches deep into the bad tail</li><li class="fragment">Doesn't truncate &mdash; needs top-k/top-p as a guard</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> greedy/beam pick a token; temperature instead <em>reshapes</em> the distribution &mdash; it's a pre-step, not a selection rule.</p>
+    <aside class="notes">
+      Temperature is conceptually different from everything around it &mdash; it does not choose a token, it reshapes the distribution that some sampler will then draw from. The operation is exact: divide the logits by a scalar T, then softmax as usual; placement matters &mdash; it is on the logits, before softmax. T&lt;1 sharpens (the model gets more confident, closer to greedy), T&gt;1 flattens (more uniform, more surprising), and the limit T&#8594;0 is exactly greedy because all the mass piles onto the top logit. The reason it works lives in the exponential: softmax exponentiates, and dividing the exponent by T&gt;1 shrinks the <em>gaps</em> between logits so the ratios between probabilities compress toward 1 (flatter); dividing by T&lt;1 magnifies those gaps (peakier). Crucially it never changes which token is the argmax &mdash; scaling preserves order &mdash; so temperature only ever redistributes mass, it never reranks. Note T=0 is undefined in the formula (division by zero); in practice "temperature 0" is implemented as "just take argmax."
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Temperature</p>
+    <h3>Temperature &mdash; step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Logits z<small>raw scores</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Divide z / T<small>scale</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Softmax<small>new probs</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Sample<small>draw token</small></span>
+    </div>
+    <svg class="sl-graph" viewBox="0 0 360 170" role="img" aria-label="Probability bars under different temperatures">
+      <line class="sl-axis" x1="30" y1="140" x2="345" y2="140"></line>
+      <text class="sl-axlab" x="187" y="162" text-anchor="middle">tokens (sorted by logit)</text>
+      <!-- T<1: sharpened -->
+      <g class="fragment" data-fragment-index="1">
+        <text class="sl-mlab" x="75" y="22" text-anchor="middle" fill="var(--accent)">T &lt; 1 &middot; sharpen</text>
+        <rect x="40" y="40" width="18" height="100" fill="var(--accent)"></rect>
+        <rect x="62" y="120" width="18" height="20" fill="var(--accent)" opacity=".55"></rect>
+        <rect x="84" y="132" width="18" height="8" fill="var(--accent)" opacity=".4"></rect>
+      </g>
+      <!-- T=1: raw -->
+      <g class="fragment" data-fragment-index="2">
+        <text class="sl-mlab" x="187" y="22" text-anchor="middle">T = 1 &middot; raw</text>
+        <rect x="152" y="68" width="18" height="72" fill="var(--muted)"></rect>
+        <rect x="174" y="92" width="18" height="48" fill="var(--muted)" opacity=".7"></rect>
+        <rect x="196" y="110" width="18" height="30" fill="var(--muted)" opacity=".5"></rect>
+      </g>
+      <!-- T>1: flattened -->
+      <g class="fragment" data-fragment-index="3">
+        <text class="sl-mlab" x="300" y="22" text-anchor="middle" fill="var(--new-accent)">T &gt; 1 &middot; flatten</text>
+        <rect x="264" y="96" width="18" height="44" fill="var(--new-accent)"></rect>
+        <rect x="286" y="102" width="18" height="38" fill="var(--new-accent)" opacity=".8"></rect>
+        <rect x="308" y="108" width="18" height="32" fill="var(--new-accent)" opacity=".7"></rect>
+      </g>
+    </svg>
+    <aside class="notes">
+      The bars are the whole lesson. Same three tokens, same underlying logits, three temperatures. Reveal them left to right: at T&lt;1 the top token towers and the rest are squashed &mdash; nearly deterministic; at T=1 you see the model's honest distribution; at T&gt;1 the bars level out so even unlikely tokens get a real shot. A concrete numeric anchor for the Q&amp;A: two tokens with logits 4.0 and 2.0 have a gap of 2; at T=2 the effective logits become 2.0 and 1.0, gap 1, so the probability ratio drops from e^2&#8776;7.4 down to e^1&#8776;2.7 &mdash; the favorite is still favored, just less. End by stressing the dependency that motivates the next rung: high T floods the tail with probability mass, so in practice you almost always pair temperature with a truncation method.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       4 · TOP-K SAMPLING (modern)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 4 of 6</p>
+    <h3>Top-k sampling <span class="tag modern">modern</span></h3>
+    <p><strong>What:</strong> sample, but only from the <em>k</em> highest-probability tokens. <strong>How:</strong> sort logits, keep the top <em>k</em>, zero out the rest, <strong>renormalize</strong> the survivors to sum to 1, then sample. <strong>Solves:</strong> pure sampling's fatal flaw &mdash; the long tail of bad-but-nonzero tokens that occasionally get drawn.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Cuts the garbage tail; cheap &amp; simple</li><li class="fragment">Keeps diversity within the top set</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment"><em>k</em> is fixed &mdash; ignores how confident the model is</li><li class="fragment">Too small when flat; too big when peaked</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> temperature reshapes mass but keeps the whole tail; top-k <em>cuts</em> the tail off so a high temperature can't drag in nonsense.</p>
+    <aside class="notes">
+      Top-k is the first true truncation method. Pure sampling from the full distribution sounds principled but has a killer bug: the tail holds thousands of low-probability tokens, and collectively they carry enough mass that you eventually draw one, derailing the text. Top-k fixes this bluntly &mdash; keep the k most probable tokens, discard everything else, renormalize the kept probabilities so they form a valid distribution again (this renormalize step is mandatory; otherwise the surviving probabilities sum to less than 1), then sample. The weakness is that k is a constant: when the model is razor-sharp (one token at 0.95) a k of 50 still admits 49 junk tokens; when the model is genuinely uncertain (mass spread over hundreds of plausible tokens) the same k=50 amputates good options. That mismatch &mdash; a fixed budget against a variable distribution &mdash; is exactly what nucleus sampling was invented to fix.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Top-k</p>
+    <h3>Top-k sampling &mdash; step by step <span style="font-weight:500;opacity:.6;font-size:.6em;">(k = 3)</span></h3>
+    <div class="approach-steps">
+      <span class="anim-node">All probs<small>full vocab</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Sort<small>descending</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Keep top-k<small>cut tail</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Renormalize<small>sum &#8594; 1</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Sample<small>draw</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Start from the full probability distribution over the vocabulary.</li>
+      <li class="fragment">Sort tokens by probability, highest first.</li>
+      <li class="fragment">Keep only the top <em>k</em>; set every other token's probability to 0.</li>
+      <li class="fragment">Renormalize the <em>k</em> survivors so they sum back to 1.</li>
+      <li class="fragment">Sample one token from that truncated, renormalized set.</li>
+    </ol>
+    <aside class="notes">
+      The five steps in order &mdash; the renormalize step is the one candidates forget on a whiteboard. A subtle interaction worth flagging: order of operations with temperature. Most implementations apply temperature to the logits first, then truncate to top-k, then renormalize; if you instead truncate first and scale after, you get a slightly different distribution, so libraries fix the order and you should know which one yours uses. Mention top_k=1 as the trick question: keeping exactly one token and sampling from it is deterministic argmax &mdash; you have reproduced greedy decoding. That observation bridges nicely back to slide one: every strategy is the same machine with a different cutoff.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       5 · TOP-P / NUCLEUS SAMPLING (modern) — KEY (keyanim)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 5 of 6</p>
+    <h3>Top-p / nucleus sampling <span class="tag modern">modern</span></h3>
+    <p><strong>What:</strong> keep the <em>smallest</em> set of tokens whose cumulative probability &ge; <em>p</em> (Holtzman et al., 2019). <strong>How:</strong> sort by probability, walk down adding mass until the running total reaches <em>p</em>, keep that "nucleus," renormalize, sample. <strong>Solves:</strong> top-k's fixed cutoff &mdash; the set size now <em>adapts</em> to the model's confidence.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Adaptive: small set when confident, large when unsure</li><li class="fragment">The de-facto default for open-ended generation</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">When confident, a fixed <em>p</em> can still admit a long flat tail</li><li class="fragment">Absolute threshold ignores the top token's height</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> top-k always keeps <em>k</em> tokens; top-p keeps however many it takes to cover probability <em>p</em> &mdash; a variable-size nucleus.</p>
+    <p class="small"><a href="https://arxiv.org/abs/1904.09751" target="_blank" rel="noopener noreferrer">The Curious Case of Neural Text Degeneration &#8599;</a></p>
+    <aside class="notes">
+      Nucleus sampling is the single most-used decoder in production chat, so spend time here. The core move: instead of a fixed count, set a probability budget p (say 0.9) and keep the smallest group of top tokens whose probabilities sum to at least p. That makes the candidate-set size <em>adapt</em> to the distribution: when the model is confident and one token holds 0.95, the nucleus is tiny (maybe one token); when the model is uncertain with mass smeared over hundreds of tokens, the nucleus grows to include all the plausible ones. That is the precise fix for top-k's rigidity. The honest limitation, which sets up min-p: top-p uses an <em>absolute</em> cumulative threshold and doesn't look at how tall the top token is &mdash; in a confident-but-not-peaked distribution, reaching 0.9 can still require scooping up a long flat tail of mediocre tokens. Renormalize after selecting the nucleus, same as top-k.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Top-p (nucleus)</p>
+    <h3>Top-p / nucleus &mdash; step by step <span style="font-weight:500;opacity:.6;font-size:.6em;">(p = 0.90)</span></h3>
+    <div class="approach-steps">
+      <span class="anim-node">Sort probs<small>high &#8594; low</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Accumulate<small>running sum</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Stop at &ge; p<small>nucleus</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Renormalize<small>sum &#8594; 1</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Sample<small>draw</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Sort tokens by probability, highest first.</li>
+      <li class="fragment">Walk down, accumulating a running cumulative probability.</li>
+      <li class="fragment">Stop as soon as the running sum reaches <em>p</em> &mdash; those tokens are the nucleus.</li>
+      <li class="fragment">Renormalize the nucleus so it sums to 1.</li>
+      <li class="fragment">Sample one token from the nucleus.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Top-p &mdash; the nucleus grows &amp; shrinks with confidence",
+     "nodes":[["Sort","high &#8594; low"],["Accumulate","running sum"],["Reach p","nucleus set"],["Renormalize","sum &#8594; 1"],["Sample","draw token"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"Sort the full distribution by probability, highest first."},
+       {"on":[1],"done":[0],"cap":"Add probabilities one by one, tracking the <strong>cumulative</strong> total."},
+       {"on":[2],"done":[0,1],"cap":"Stop the moment the sum &ge; <code>p</code> &mdash; the kept tokens are the <strong>nucleus</strong>. Confident &#8594; tiny nucleus; unsure &#8594; large nucleus."},
+       {"on":[3],"done":[0,1,2],"cap":"<strong>Renormalize</strong> the nucleus so its probabilities sum to 1."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Sample one token from the adaptive nucleus &mdash; the production default."}],
+     "interval":1900}
+    </script></div>
+    <aside class="notes">
+      Use the widget to make "adaptive" tangible. Step through once on a peaked distribution &mdash; the nucleus closes after one or two tokens &mdash; then narrate the contrast: on a flat distribution the same p=0.9 walk keeps accumulating and the nucleus swells to cover dozens of tokens. That self-sizing is the whole point and the reason it beat top-k in practice. Reinforce that the cumulative comparison is against the budget p, not against any token's individual height &mdash; that exact blind spot is what the next rung, min-p, attacks by anchoring the threshold to the top token instead. Renormalization is again non-optional.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       6 · MIN-P SAMPLING (recent) — KEY (keyanim)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 6 of 6</p>
+    <h3>Min-p sampling <span class="tag sota">recent</span></h3>
+    <p><strong>What:</strong> keep tokens whose probability is at least a <em>fraction</em> of the top token's probability. <strong>How:</strong> set a <em>relative</em> threshold <code>p &middot; max_prob</code>; keep every token above it, renormalize, sample (Nguyen et al., 2024). <strong>Solves:</strong> top-p's absolute-budget blind spot &mdash; the cutoff now scales with the model's peak confidence.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Robust across peaked vs. flat distributions</li><li class="fragment">Stays coherent even at high temperature</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Newer; another hyperparameter to tune</li><li class="fragment">Less battle-tested than top-p defaults</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> top-p uses an <em>absolute</em> cumulative budget; min-p uses a <em>relative</em> threshold tied to the most likely token.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2407.01082" target="_blank" rel="noopener noreferrer">Min-p Sampling &#8599;</a></p>
+    <aside class="notes">
+      Min-p is the recent rung and a favorite "do you read papers" question. The idea is to make the cutoff <em>relative</em> to the model's confidence rather than an absolute mass budget. You set a base p (e.g. 0.1), compute the threshold as p times the probability of the most likely token, and keep every token clearing that bar. Walk the two regimes: when the model is confident (top token at 0.95), the threshold is 0.095, so only genuinely strong contenders survive &mdash; it stays tight where top-p might still rake in a flat tail. When the model is uncertain (top token at maybe 0.10), the threshold drops to 0.01, so it keeps a broad set &mdash; appropriately permissive. That single relative rule behaves sensibly across both shapes, which is why it pairs especially well with high temperature: even after flattening, the cutoff rescales to whatever the new peak is. The cost is maturity &mdash; it is newer and less defaulted-to than top-p, and it is one more knob.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Min-p</p>
+    <h3>Min-p sampling &mdash; step by step <span style="font-weight:500;opacity:.6;font-size:.6em;">(base p = 0.1)</span></h3>
+    <div class="approach-steps">
+      <span class="anim-node">Find max<small>top prob</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Threshold<small>p &middot; max</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Keep &ge; thresh<small>relative cut</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Renormalize<small>sum &#8594; 1</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Sample<small>draw</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Find <code>max_prob</code> &mdash; the probability of the single most likely token.</li>
+      <li class="fragment">Compute a relative threshold = <code>p &middot; max_prob</code>.</li>
+      <li class="fragment">Keep every token whose probability &ge; that threshold.</li>
+      <li class="fragment">Renormalize the survivors to sum to 1.</li>
+      <li class="fragment">Sample &mdash; the kept set auto-scales with peak confidence.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Min-p &mdash; threshold rides the top token's height",
+     "nodes":[["Max prob","top token"],["Threshold","p &middot; max"],["Keep &ge;","relative cut"],["Renormalize","sum &#8594; 1"],["Sample","draw token"]],
+     "steps":[
+       {"on":[0],"done":[],"cap":"Read off <code>max_prob</code> &mdash; the height of the most likely token."},
+       {"on":[1],"done":[0],"cap":"Set threshold = <code>p &middot; max_prob</code>. Tall peak &#8594; high bar; low peak &#8594; low bar."},
+       {"on":[2],"done":[0,1],"cap":"<strong>Keep</strong> every token at or above the bar. Peaked &#8594; few survive; flat &#8594; many do."},
+       {"on":[3],"done":[0,1,2],"cap":"<strong>Renormalize</strong> the kept set to a valid distribution."},
+       {"on":[4],"done":[0,1,2,3],"cap":"Sample &mdash; robust across peaked &amp; flat shapes, even at high T."}],
+     "interval":1900}
+    </script></div>
+    <aside class="notes">
+      Step the widget and keep contrasting with top-p the whole way. The defining line: top-p's bar is "cumulative mass reaches p," min-p's bar is "individual probability reaches p times the tallest bar." Because the threshold is anchored to max_prob, it automatically tightens when the model is sure and loosens when it isn't &mdash; no fixed budget to mis-set. Land the summary that closes part A: greedy and beam maximize likelihood; temperature reshapes; top-k cuts a fixed count; top-p cuts a fixed mass; min-p cuts relative to the peak &mdash; each one a targeted patch on the previous rung's specific weakness. That arc is exactly the "why X &#8594; Y" story interviewers want.
+    </aside>
+  </section>
+
+</section>
+
+<section>
+
+  <!-- ===== PART B INTRO ===== -->
+  <section>
+    <p class="kicker">The approaches &middot; part B</p>
+    <h2>Six more knobs: shaping, taming, speeding up</h2>
+    <div class="flow" style="font-size:.8em;">
+      <span class="box accent">Typical</span><span class="arrow">&middot;</span>
+      <span class="box accent">Repetition control</span><span class="arrow">&middot;</span>
+      <span class="box accent">Contrastive</span><span class="arrow">&middot;</span>
+      <span class="box green">Mirostat</span><span class="arrow">&middot;</span>
+      <span class="box green">Constrained</span><span class="arrow">&middot;</span>
+      <span class="box green">Speculative</span>
+    </div>
+    <p class="eqnote fragment">Part A reshaped <em>which</em> tokens survive. Part B adds info-theory targets, anti-degeneration fixes, hard structure, and a way to go <strong>faster with no quality loss</strong>.</p>
+    <aside class="notes">
+      Part A covered greedy, beam, temperature, top-k, top-p, min-p. Part B is the second half of the ladder. The first four (typical, repetition control, contrastive, Mirostat) are all about quality: stop the model from degenerating into repetition or blandness, using progressively smarter signals — surprisal, seen-token penalties, contrast against a weak model, and a closed-loop perplexity target. The last two change the game: constrained decoding makes output provably well-formed, and speculative decoding makes it 2-3x faster while preserving the exact target distribution. I teach each with what / how / pros-cons, then a step-by-step, and I save the keyanim widget for the headline mechanism: speculative decoding.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       7 · TYPICAL SAMPLING (info-theoretic)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 7 of 12</p>
+    <h3>Typical sampling <span class="tag modern">info-theoretic</span></h3>
+    <p><strong>What:</strong> keep tokens whose <em>surprisal</em> is close to the distribution's entropy, not just the most probable ones (Meister et al., 2022). <strong>How:</strong> compute entropy H of the step distribution; score each token by <code>|&minus;log p &minus; H|</code>; keep the smallest-deviation set until cumulative mass &ge; &tau;; renormalize &amp; sample. <strong>Solves:</strong> top-p over-keeps boring high-prob tokens; typical aims for "expectedly informative" ones.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Grounded in information theory (target = entropy)</li><li class="fragment">Avoids both the bland peak and the absurd tail</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Less intuitive to tune than top-p</li><li class="fragment">Can drop the single most-likely token</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> top-p/min-p keep tokens by raw probability; typical keeps tokens by how close their surprisal is to <em>expected</em> surprisal.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2202.00666" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      The idea comes from "typicality" in information theory: a sample is typical when its information content (surprisal, &minus;log p) is near the source entropy H. Human text behaves this way — it isn't maximally probable at every token, it's <em>expectedly</em> informative. So instead of keeping the most-probable tokens (top-p) you keep the tokens whose surprisal is closest to H, summing their mass up to threshold &tau;, then renormalize and sample. The payoff: it can skip an over-likely-but-bland token and avoid the absurd long tail at the same time. The cost: it's less intuitive to tune, and because it can drop the argmax, it's a poor fit for factual tasks where you want the safe answer.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Typical sampling</p>
+    <h3>Typical sampling — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Logits<small>&#8594; probs</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Entropy H<small>expected surprisal</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Score<small>|&minus;log p &minus; H|</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Keep &le;&tau;<small>smallest deviation</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Renorm + sample<small>typical token</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Turn logits into a probability distribution as usual.</li>
+      <li class="fragment">Compute the entropy <code>H</code> = expected surprisal of that distribution.</li>
+      <li class="fragment">Score every token by how far its surprisal <code>&minus;log p</code> is from <code>H</code>.</li>
+      <li class="fragment">Sort by that deviation; add tokens until cumulative mass &ge; &tau;.</li>
+      <li class="fragment">Renormalize the kept set and sample — an "expectedly informative" token.</li>
+    </ol>
+    <aside class="notes">
+      Walk it concretely. Suppose H is 3 bits. A token at 0.6 has surprisal ~0.7 bits — far below H, so it's "too predictable" and may be dropped. A token in the deep tail has surprisal of 12 bits — far above H, "too surprising," also dropped. Typical sampling keeps the band around H. The threshold &tau; (often ~0.95) plays a role like top-p's p but on the deviation-sorted list, not the probability-sorted list. That sort key is the whole difference from top-p: top-p sorts by probability descending; typical sorts by |surprisal &minus; H| ascending.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       8 · REPETITION CONTROL (control)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 8 of 12</p>
+    <h3>Repetition control <span class="tag classic">control</span></h3>
+    <p><strong>What:</strong> a family of penalties that push logits down for tokens the model has already produced. <strong>How:</strong> <em>repetition penalty</em> divides/scales the logit of any seen token; <em>frequency</em> penalty subtracts &prop; count, <em>presence</em> penalty subtracts a flat amount once-seen (OpenAI-style); <em>no-repeat-ngram</em> hard-bans any token that would complete a seen n-gram. <strong>Solves:</strong> likelihood-maximizing decoders loop ("the the the&hellip;").</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Cheap, drop-in, no extra model</li><li class="fragment">no-repeat-ngram <em>guarantees</em> no repeated n-gram</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Too aggressive &#8594; breaks valid repetition (code indent, lists)</li><li class="fragment">Divisive penalty is <strong>sign-sensitive</strong> on the logit</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> truncation/typical pick <em>from</em> the distribution; penalties <em>edit the logits first</em> to fight degeneration directly.</p>
+    <p class="small"><a href="https://arxiv.org/abs/1909.05858" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      Three distinct mechanisms people conflate. (1) Repetition penalty (CTRL, Keskar et al.) divides the logit of every previously-seen token by &theta;&gt;1 — but dividing only lowers a <em>positive</em> logit; for a negative logit, dividing makes it less negative, i.e. <em>raises</em> it, so implementations multiply when the logit is negative. That sign sensitivity is the classic gotcha. (2) OpenAI's frequency penalty subtracts an amount proportional to how many times the token appeared; presence penalty subtracts a flat amount the moment it appears once — frequency scales with count, presence is binary. (3) no-repeat-ngram is a hard constraint: it sets the logit of any token that would complete an already-seen n-gram to &minus;&infin;. The contrast to teach: penalties are soft and tunable but can over-penalize; ngram-blocking is a hard guarantee but blindly forbids legitimate repeats like indentation or "New York, New York."
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Repetition control</p>
+    <h3>Repetition control — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Seen tokens<small>history</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Rep penalty<small>divide / scale</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Freq vs presence<small>count vs once</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">no-repeat-ngram<small>hard ban &#8722;&infin;</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Edited logits<small>then sample</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Track which tokens (and n-grams) already appeared.</li>
+      <li class="fragment"><strong>Repetition penalty:</strong> if logit &gt; 0 divide by &theta;, else multiply by &theta; (sign-safe).</li>
+      <li class="fragment"><strong>Frequency</strong> subtracts &alpha;&middot;count; <strong>presence</strong> subtracts &beta; once-seen.</li>
+      <li class="fragment"><strong>no-repeat-ngram:</strong> set logit = &minus;&infin; for tokens completing a seen n-gram.</li>
+      <li class="fragment">Sample from the edited logits — looping is now expensive or impossible.</li>
+    </ol>
+    <aside class="notes">
+      All four operate on the logit vector before softmax. Show the sign-safe rule explicitly: <code>logit = logit/&theta; if logit&gt;0 else logit*&theta;</code> — that's how HuggingFace implements it, because a naive divide would <em>reward</em> negative-logit tokens. Frequency vs presence: with frequency, a token said five times gets penalized five times harder; with presence, the penalty is the same whether it appeared once or five times. no-repeat-ngram is categorical — great for stopping verbatim loops, terrible for code where indentation repeats legitimately. The practical recipe: prefer a mild repetition penalty (~1.1-1.3) plus a small frequency penalty; reach for ngram-blocking only when you truly cannot tolerate any repeated phrase.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       9 · CONTRASTIVE DECODING & CONTRASTIVE SEARCH
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 9 of 12</p>
+    <h3>Contrastive decoding &amp; contrastive search <span class="tag modern">degeneration fixes</span></h3>
+    <p><strong>What:</strong> two <em>different</em> methods that share a name. <strong>Contrastive decoding</strong> (Li et al., 2022): score = strong-model logits &minus; weak/amateur-model logits. <strong>Contrastive search</strong> (Su et al., 2022): pick the token maximizing model confidence minus a <em>degeneration penalty</em> = max similarity to already-generated hidden states. <strong>Solves:</strong> both fight repetitive, bland, degenerate text.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">CD: amplifies what the big model knows that the small one doesn't</li><li class="fragment">CS: single model, directly punishes self-similarity</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">CD: needs a second (amateur) model at decode time</li><li class="fragment">CS: extra hidden-state similarity compute; tune <code>&alpha;</code>, k</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> penalties edit logits by surface history; contrastive methods use a <em>second signal</em> — a weak model (CD) or the model's own representations (CS).</p>
+    <p class="small"><a href="https://arxiv.org/abs/2210.15097" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      The key exam point is distinguishing the two — they're easy to confuse. Contrastive <em>decoding</em> uses two models: subtract a small "amateur" model's log-probs from a large "expert" model's log-probs (with a plausibility filter). The amateur captures the generic, degenerate failure modes both models share; subtracting it leaves the expert's distinctive knowledge, which improves open-ended generation and reasoning. Contrastive <em>search</em> uses one model: at each step take the top-k candidates by probability, then pick the one that maximizes (1&minus;&alpha;)&middot;model_confidence &minus; &alpha;&middot;(max cosine similarity to previous token hidden states). That degeneration penalty directly discourages producing tokens whose representation looks like something already said — isotropy-driven anti-repetition. So: CD = strong minus weak <em>logits</em> (two models); CS = confidence minus self-<em>similarity</em> (one model, hidden states).
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Contrastive — distinguishing the two</p>
+    <h3>Contrastive decoding vs contrastive search</h3>
+    <div class="cols">
+      <div>
+        <h5>Contrastive decoding (two models)</h5>
+        <div class="approach-steps">
+          <span class="anim-node">Expert<small>strong logits</small></span>
+          <span class="anim-arrow fragment fade-in">&minus;</span>
+          <span class="anim-node fragment fade-in">Amateur<small>weak logits</small></span>
+          <span class="anim-arrow fragment fade-in">&#8594;</span>
+          <span class="anim-node fragment fade-in">Diff score<small>sample</small></span>
+        </div>
+        <ul>
+          <li class="fragment">Run both models on the same context.</li>
+          <li class="fragment">Score = <code>log p_expert &minus; log p_amateur</code> (over a plausible set).</li>
+          <li class="fragment">Picks tokens the <em>expert</em> favors but the amateur doesn't.</li>
+        </ul>
+      </div>
+      <div>
+        <h5>Contrastive search (one model)</h5>
+        <div class="approach-steps">
+          <span class="anim-node fragment fade-in">Top-k<small>by prob</small></span>
+          <span class="anim-arrow fragment fade-in">&#8594;</span>
+          <span class="anim-node fragment fade-in">Degen penalty<small>self-similarity</small></span>
+          <span class="anim-arrow fragment fade-in">&#8594;</span>
+          <span class="anim-node fragment fade-in">Pick best<small>conf &minus; &alpha;&middot;sim</small></span>
+        </div>
+        <ul>
+          <li class="fragment">Take top-k candidates from the single model.</li>
+          <li class="fragment">Penalize cosine similarity to prior hidden states.</li>
+          <li class="fragment">Choose <code>(1&minus;&alpha;)&middot;conf &minus; &alpha;&middot;max&nbsp;sim</code>.</li>
+        </ul>
+      </div>
+    </div>
+    <aside class="notes">
+      Teach them side by side because students mix them up. Left: contrastive decoding is a <em>scoring</em> change — two models, subtract the amateur to cancel shared generic behavior; you still sample/argmax from the contrast. Right: contrastive search is a <em>selection</em> change — one model, restrict to top-k by probability, then re-rank by confidence minus a degeneration penalty computed from the cosine similarity of the candidate's hidden state to all previously generated hidden states. The unifying intuition is "contrast against a reference," but the reference differs: an amateur model versus the model's own past representations. CD needs a second forward pass per step; CS needs the hidden-state similarity matrix but only one model.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       10 · MIROSTAT (perplexity target)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 10 of 12</p>
+    <h3>Mirostat <span class="tag modern">perplexity target</span></h3>
+    <p><strong>What:</strong> a feedback controller that holds the <em>output surprisal</em> at a target value instead of fixing a static k/p (Basu et al., 2020). <strong>How:</strong> pick a target surprisal &tau; (a target perplexity); each step, dynamically choose a top-k cutoff; measure the observed surprisal; update an estimate &mu; with the error so the running cross-entropy converges to &tau;. <strong>Solves:</strong> static top-k/top-p let perplexity drift &#8594; either boredom or incoherence.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Directly targets perplexity — stable "interestingness"</li><li class="fragment">Adapts the cutoff per step automatically</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Another knob (&tau;, learning rate &eta;) to set</li><li class="fragment">Feedback lag; less common in mainstream stacks</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> top-k/top-p/typical fix the <em>selection rule</em>; Mirostat fixes the <em>outcome</em> (surprisal) and adapts selection to hit it.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2007.14966" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      Mirostat is a control-theory take on sampling. The observation: with static top-k or top-p, the actual perplexity of the generated text wanders — drift low and you get repetitive boredom, drift high and you get incoherence. Mirostat treats target surprisal &tau; as a setpoint and runs a feedback loop: it maintains an estimate &mu; (roughly 2&tau;, the effective vocabulary mass), at each step truncates using a k derived from &mu; and the local Zipfian decay, observes the actual surprisal of the chosen token, computes the error e = observed &minus; &tau;, and nudges &mu; by &minus;&eta;&middot;e. Over the sequence the running cross-entropy converges to &tau;. So you set the desired "perplexity" once and the controller adjusts truncation every step to maintain it — that's the whole pitch.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Mirostat</p>
+    <h3>Mirostat — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Target &tau;<small>desired surprisal</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Truncate<small>k from &mu;</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Observe<small>actual surprisal</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Error e<small>obs &minus; &tau;</small></span>
+      <span class="anim-arrow fragment fade-in">&#8635;</span>
+      <span class="anim-node fragment fade-in">Update &mu;<small>&minus;&eta;&middot;e, loop</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Set a target surprisal &tau; (equivalently a target perplexity).</li>
+      <li class="fragment">Truncate the vocab using a cutoff derived from current estimate &mu;.</li>
+      <li class="fragment">Sample a token; measure its actual surprisal <code>&minus;log p</code>.</li>
+      <li class="fragment">Compute error <code>e = observed &minus; &tau;</code>.</li>
+      <li class="fragment">Update <code>&mu; &larr; &mu; &minus; &eta;&middot;e</code> &#8594; loop; cross-entropy converges to &tau;.</li>
+    </ol>
+    <aside class="notes">
+      Drive it as a thermostat: &tau; is the temperature you set on the wall, &mu; is the valve position, and the error term opens or closes the valve each step. If the model just emitted a very surprising token (e &gt; 0), &mu; shrinks so the next step truncates harder and calms down; if it emitted something too predictable (e &lt; 0), &mu; grows so the next step admits more candidates. The net effect is a steady, controllable level of surprise across the whole generation — Mirostat v1 estimates the Zipf exponent, v2 (the common one) drops that and just clips on surprisal directly. It's the only method here with an explicit closed feedback loop, which is why it gets the loop arrow.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       11 · CONSTRAINED / STRUCTURED DECODING
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 11 of 12</p>
+    <h3>Constrained / structured decoding <span class="tag sota">structured</span></h3>
+    <p><strong>What:</strong> force output to obey a grammar / JSON schema by masking illegal tokens at every step. <strong>How:</strong> compile the grammar into a finite-state machine (FSM); at each position the FSM says which tokens are legal; set all others' logits to &minus;&infin; before sampling; advance the FSM by the chosen token. <strong>Solves:</strong> free decoding emits malformed JSON / invalid tool calls.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">Output is <em>guaranteed</em> syntactically valid</li><li class="fragment">Precomputed transition masks &#8594; near-zero overhead (Outlines)</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Valid JSON &ne; correct content (right shape, wrong value)</li><li class="fragment">Masking interacts with temperature/top-p; can distort the model</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> every method so far reshaped a soft distribution; constrained decoding imposes a <em>hard</em> validity constraint the FSM enforces.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2307.09702" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      This is how "JSON mode" and grammar-constrained tool calling work under the hood. Compile the schema/grammar (e.g. a regex or CFG) into an FSM whose states map to a set of allowed next tokens. At each decode step, look up the allowed-token mask for the current state, add &minus;&infin; to every disallowed logit, then sample normally from the masked distribution and transition the FSM on the token you picked. Outlines' contribution was precomputing the state&#8594;token-mask map so this costs almost nothing at runtime. Two failure modes survive even with guaranteed-valid JSON: the content can be wrong (correct schema, hallucinated values), and the constraint can <em>distort</em> generation — masking out the model's preferred token can push it toward unnatural continuations, sometimes degrading factuality. And note the ordering interaction: masking happens first, then temperature/top-p operate on the surviving legal tokens — so top-p is computed over the renormalized legal set, not the full vocab.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Constrained decoding</p>
+    <h3>Constrained decoding — step by step</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Grammar / schema<small>JSON, regex, CFG</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Compile FSM<small>state &#8594; legal tokens</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Mask logits<small>illegal &#8594; &minus;&infin;</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Sample legal<small>temp/top-p on rest</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Advance FSM<small>+ repeat</small></span>
+    </div>
+    <ol>
+      <li class="fragment">Specify the target structure: JSON schema, regex, or context-free grammar.</li>
+      <li class="fragment">Compile it into an FSM mapping each state to its set of legal next tokens.</li>
+      <li class="fragment">At this step, set every illegal token's logit to &minus;&infin;.</li>
+      <li class="fragment">Apply temperature/top-p to the <em>surviving legal</em> tokens, then sample.</li>
+      <li class="fragment">Transition the FSM on the chosen token; repeat until the grammar accepts.</li>
+    </ol>
+    <p class="eqnote">Guarantees the <em>shape</em>. It cannot guarantee the <em>content</em> is right.</p>
+    <aside class="notes">
+      Emphasize the order of operations because it's a common interview question: masking comes before temperature and top-p, so those samplers see only the legal tokens and renormalize over them. Walk a tiny JSON example: after an opening brace the FSM allows only a quote (a key must start), so every other token is &minus;&infin;; after the key and colon it allows the value types the schema permits; and so on, so the stream is well-formed by construction. The honest caveats stay on screen: valid shape, possibly wrong value; and aggressive masking can steer the model away from what it actually "wanted" to say, occasionally hurting quality. Precomputed transition masks (Outlines, XGrammar) make the per-step lookup essentially free, which is why structured output is now cheap in production.
+    </aside>
+  </section>
+
+  <!-- ============================================================
+       12 · SPECULATIVE DECODING (SOTA, fast) — KEY (keyanim)
+       ============================================================ -->
+  <section>
+    <p class="kicker">Approaches &middot; 12 of 12</p>
+    <h3>Speculative decoding <span class="tag sota">SOTA &middot; fast</span></h3>
+    <p><strong>What:</strong> a small <em>draft</em> model guesses k tokens cheaply; the big <em>target</em> model verifies all k in one parallel pass; a rejection-sampling rule keeps the target's distribution <strong>exactly</strong> (Leviathan et al., 2023; Chen et al., 2023). <strong>How:</strong> draft proposes; target scores; accept each token with prob <code>min(1, p_target/p_draft)</code>; on first reject, resample from the residual; on all-accept, get a free bonus token. <strong>Solves:</strong> memory-bound autoregression — one token per forward pass is slow.</p>
+    <div class="pcons">
+      <div class="pros"><h5>Pros</h5><ul><li class="fragment">2&ndash;3&times; faster, <em>no</em> change to output distribution</li><li class="fragment">Self-draft variants (Medusa, EAGLE) need no separate model</li></ul></div>
+      <div class="cons"><h5>Cons</h5><ul><li class="fragment">Speedup hinges on draft <strong>acceptance rate</strong> &amp; draft cost</li><li class="fragment">A bad draft can be slower than plain decoding</li></ul></div>
+    </div>
+    <p class="small"><strong>vs previous:</strong> every method above changes <em>what</em> you sample; speculative changes <em>how fast</em> you sample the very same distribution.</p>
+    <p class="small"><a href="https://arxiv.org/abs/2211.17192" target="_blank" rel="noopener noreferrer">Read more &#8599;</a></p>
+    <aside class="notes">
+      The headline efficiency trick and the one to spend the most time on. The bottleneck: decoding is memory-bound — each token needs a full forward pass that's underutilizing the GPU, so verifying many tokens at once is nearly as cheap as verifying one. Speculative decoding exploits this: a cheap draft model autoregressively proposes k tokens, then the target runs <em>one</em> parallel forward pass over all k, giving a probability for each. The accept/reject rule is the magic — accept token i with probability min(1, p_target/p_draft); on the first rejection, sample a corrected token from the normalized positive part of (p_target &minus; p_draft); if every proposed token is accepted, you also get one bonus token from the target for free. Crucially this is provably equivalent to sampling from the target alone — same distribution, just faster. Speedup = expected accepted tokens per target pass, traded against draft cost; a draft that's too weak (low acceptance) or too expensive can erase the gain.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">How it works &middot; Speculative decoding</p>
+    <h3>Speculative decoding — the loop</h3>
+    <div class="approach-steps">
+      <span class="anim-node">Draft<small>small model</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Propose k<small>cheap tokens</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Target verify<small>1 parallel pass</small></span>
+      <span class="anim-arrow fragment fade-in">&#8594;</span>
+      <span class="anim-node fragment fade-in">Accept / Reject<small>rejection sampling</small></span>
+      <span class="anim-arrow fragment fade-in">&#8635;</span>
+      <span class="anim-node fragment fade-in">Commit<small>+ bonus token</small></span>
+    </div>
+    <ol>
+      <li class="fragment"><strong>Draft</strong> a few tokens with the small model, autoregressively.</li>
+      <li class="fragment"><strong>Target verify</strong>: one parallel forward pass scores all k drafted tokens.</li>
+      <li class="fragment"><strong>Accept</strong> token <code>i</code> with prob <code>min(1, p_target/p_draft)</code>.</li>
+      <li class="fragment">On first reject: resample from the residual <code>(p_target &minus; p_draft)&#8314;</code>.</li>
+      <li class="fragment">All accepted &#8594; free <strong>bonus token</strong>; commit &amp; loop.</li>
+    </ol>
+    <div class="keyanim"><script type="application/json">
+    {"title":"Speculative decoding — draft proposes, target verifies, distribution preserved",
+     "nodes":[["Draft","small model"],["Propose k","cheap tokens"],["Target verify","1 parallel pass"],["Accept/Reject","rejection sampling"],["Commit","+ bonus token"]],
+     "loop":"&#8635;","meter":true,"interval":1900,
+     "steps":[
+       {"on":[0],"done":[],"q":15,"cap":"A cheap <strong>draft</strong> model runs ahead of the big one."},
+       {"on":[1],"done":[0],"q":30,"cap":"It <em>proposes</em> <code>k</code> tokens autoregressively — fast, low quality OK."},
+       {"on":[2],"done":[0,1],"q":50,"cap":"The <strong>target</strong> scores all <code>k</code> in <em>one</em> parallel pass (memory-bound &#8594; cheap)."},
+       {"on":[3],"done":[0,1,2],"q":75,"cap":"<strong>Accept/Reject:</strong> keep token with prob <code>min(1, p_target/p_draft)</code>; on reject, resample the residual &#8594; <em>exact</em> target distribution."},
+       {"on":[4],"done":[0,1,2,3],"q":95,"cap":"All accepted &#8594; a <strong>free bonus token</strong>; commit, then <strong>loop</strong>. Speedup &prop; acceptance rate."}],
+     "loop":"&#8635;"}
+    </script></div>
+    <aside class="notes">
+      Drive the whole mechanism off this widget and let the meter stand in for "tokens committed per target pass." Walk each step: the draft sprints ahead proposing k cheap tokens; the target verifies all of them in a single parallel pass — this is why it's not 2x the cost, the GPU was underused anyway. The accept/reject step is the crux of correctness: accept with min(1, p_target/p_draft), and on the first rejection draw a replacement from the normalized positive residual of (p_target &minus; p_draft); this rejection-sampling correction is what makes the output distribution provably identical to sampling from the target alone. If all k are accepted you even harvest one extra token for free. The loop arrow shows it repeats. Then mention self-drafting: Medusa adds extra prediction heads on the target itself so there's no separate draft model, and EAGLE drafts in feature space using the target's own hidden states for higher acceptance — both remove the second-model overhead. Speedup is governed entirely by acceptance rate times draft cheapness.
+    </aside>
+  </section>
+
+  <!-- ===== SEARCH-BASED / RERANKING NOTE ===== -->
+  <section>
+    <p class="kicker">Approaches &middot; aside</p>
+    <h3>Best-of-n, reranking &amp; self-consistency <span class="tag modern">sample &amp; select</span></h3>
+    <div class="cols">
+      <div>
+        <h5>Best-of-n / reranking</h5>
+        <ul>
+          <li class="fragment">Sample <code>n</code> candidates at temperature.</li>
+          <li class="fragment">Score each with a reward / verifier model.</li>
+          <li class="fragment">Return the top-scored — quality &uarr; at <code>n&times;</code> cost.</li>
+          <li class="fragment">Worth it when a good <em>scorer</em> exists &amp; latency budget allows.</li>
+        </ul>
+      </div>
+      <div>
+        <h5>Self-consistency</h5>
+        <ul>
+          <li class="fragment">Sample many reasoning chains (need temperature &gt; 0).</li>
+          <li class="fragment">Take the <strong>majority</strong> final answer, not the best prose.</li>
+          <li class="fragment">Too-low temp &#8594; identical chains (no benefit).</li>
+          <li class="fragment">Too-high temp &#8594; noisy chains, wrong votes.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="small fragment"><strong>vs speculative:</strong> speculative speeds up <em>one</em> sample; these spend <em>more</em> samples to raise answer quality.</p>
+    <aside class="notes">
+      A short closing note because these are search-over-samples, not per-token methods. Best-of-n (a.k.a. reranking) generates n full candidates and keeps the one a reward or verifier model scores highest — it trades n-times the compute for a quality bump, and it's only worth it when you have a trustworthy scorer and the latency headroom. Self-consistency is the reasoning-specific cousin: sample many chains-of-thought and take the <em>majority answer</em> rather than scoring prose, which marginalizes over reasoning paths. The temperature interaction is the teaching point: self-consistency needs temperature above zero or every chain is identical and you gain nothing; but push temperature too high and the chains get noisy and the majority vote degrades. The contrast with speculative decoding: speculative makes a single sample faster at equal quality, whereas these deliberately spend more samples to buy higher quality.
+    </aside>
+  </section>
+
+</section>
+
+<!-- ============================================================
+     SECTION 7 · COMPARE THE STRATEGIES
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Compare the strategies</p>
+    <h2>The decoding cheat-sheet</h2>
+    <table class="cmp">
+      <thead>
+        <tr><th>Strategy</th><th>Rule in one line</th><th>Keeps</th><th>Best for</th><th>Main failure mode</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Greedy</td><td>Pick argmax logit every step</td><td>1 token</td><td>Factual QA, extraction</td><td>Repetition loops; locally-optimal</td></tr>
+        <tr><td>Beam</td><td>Keep top-B partial sequences by sum log-prob</td><td>B hypotheses</td><td>Translation, closed-form</td><td>Bland, short, generic in open text</td></tr>
+        <tr><td>Temperature</td><td>Divide logits by T before softmax</td><td>All (reshaped)</td><td>Global creativity dial</td><td>High T &#8594; incoherent; low T &#8594; dull</td></tr>
+        <tr><td>Top-k</td><td>Keep k highest-prob tokens, renormalize</td><td>Fixed k</td><td>Simple truncation</td><td>k fixed regardless of confidence</td></tr>
+        <tr><td>Top-p (nucleus)</td><td>Smallest set with cumulative prob &#8805; p</td><td>Variable set</td><td>General-purpose default</td><td>Flat dists &#8594; huge tail kept</td></tr>
+        <tr><td>Min-p</td><td>Keep tokens with prob &#8805; p&middot;p<sub>max</sub></td><td>Relative to top</td><td>Robust across shapes</td><td>Needs tuning per model</td></tr>
+        <tr><td>Typical</td><td>Keep tokens near the entropy (typical info)</td><td>Info-typical set</td><td>Human-like surprise</td><td>Less intuitive; rarer support</td></tr>
+        <tr><td>Contrastive</td><td>Strong logits minus weak/amateur logits</td><td>Re-scored set</td><td>Long-form fluency</td><td>Needs 2nd model; tuning</td></tr>
+        <tr><td>Mirostat</td><td>Feedback-control output perplexity to a target</td><td>Adaptive set</td><td>Steady surprise over long text</td><td>Extra state; less common</td></tr>
+        <tr><td>Constrained</td><td>Mask logits to a grammar / schema</td><td>Only valid tokens</td><td>JSON, tool calls</td><td>Valid &#8800; correct; latency</td></tr>
+        <tr><td>Speculative</td><td>Draft proposes, target verifies &amp; accepts</td><td>Same as target</td><td>Faster exact decoding</td><td>Low accept &#8594; little speedup</td></tr>
+      </tbody>
+    </table>
+    <p class="eqnote fragment">Top block = <em>how to pick</em>; middle = <em>how to shape/truncate</em>; bottom = <em>structure &amp; speed</em>. Temperature is orthogonal &#8212; it stacks on any sampler.</p>
+    <aside class="notes">
+      This is the slide students screenshot for interviews. Group it mentally in three tiers. Tier one is the selection rules: greedy and beam are deterministic search, no randomness. Tier two is the stochastic family that reshapes or truncates the distribution before sampling &#8212; temperature, top-k, top-p, min-p, typical, contrastive, Mirostat. Tier three is orthogonal machinery: constrained decoding restricts the support to a grammar, and speculative decoding is purely a speed trick that provably does not change the output distribution. The single most important nuance to say out loud: temperature is not a competitor to top-p; it stacks on top of any truncation method. And note the recurring failure-mode theme &#8212; likelihood-maximizing decoders (greedy, beam) degenerate in open-ended text, which is exactly why sampling methods exist.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 8 · THE MATH
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">The math &middot; (a) temperature softmax</p>
+    <h2>Temperature reshapes the softmax</h2>
+    <p>Divide each logit by T <em>before</em> exponentiating:</p>
+    $$ p_i = \frac{e^{z_i/T}}{\sum_j e^{z_j/T}} $$
+    <p class="eqnote fragment"><b>\(z_i\)</b> = the raw <em>logit</em> for token \(i\) (the model's pre-softmax score); <b>\(p_i\)</b> = its sampling probability after normalization.</p>
+    <p class="eqnote fragment"><b>\(T\)</b> = temperature. The exponent \(z_i/T\) scales every gap between logits by the same factor \(1/T\).</p>
+    <p class="eqnote fragment">Why \(T&lt;1\) <strong>sharpens</strong>: dividing by a number &lt;1 <em>magnifies</em> the gaps \((z_i-z_j)\), so the exponential pulls mass onto the top token. \(T&gt;1\) shrinks the gaps &#8594; flatter, more uniform.</p>
+    <p class="eqnote fragment">Limits: \(T\to 0^+\) &#8594; one-hot on the argmax (= greedy); \(T\to\infty\) &#8594; uniform over the vocabulary.</p>
+    <aside class="notes">
+      Start by naming the pieces: z is the logit vector, the raw scores straight out of the final linear layer, and p is the probability after softmax. Temperature enters in exactly one place &#8212; you divide the logits by T before the exponential, never after softmax. The key reasoning to walk through on the board: softmax only cares about the differences between logits, so multiplying the exponent by one-over-T scales every gap uniformly. When T is below one you are dividing by something less than one, which blows the gaps up, the exponential rewards the largest logit even harder, and the distribution sharpens toward the top token. When T is above one the gaps shrink and the distribution flattens toward uniform. The two limits are clean: T going to zero is one-hot, identical to greedy decoding, and T going to infinity is the uniform distribution. Crucial subtlety for the hard questions: temperature never changes <em>which</em> token is the argmax &#8212; it only rescales how peaked the distribution is around it.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math &middot; (b) nucleus set</p>
+    <h2>Top-p: the smallest set that covers mass p</h2>
+    <p>Sort tokens by probability, then take the smallest prefix whose mass reaches \(p\):</p>
+    $$ V_p = \arg\min_{V'} |V'| \quad \text{s.t.} \sum_{i \in V'} p_i \ge p $$
+    <p class="eqnote fragment"><b>\(p_i\)</b> = probability of token \(i\) (post-temperature); <b>\(p\)</b> = the cumulative-mass threshold (e.g. 0.9).</p>
+    <p class="eqnote fragment"><b>\(V_p\)</b> = the <em>nucleus</em> &#8212; the fewest top tokens whose probabilities sum to at least \(p\). Its size <strong>adapts</strong> to confidence: peaked dist &#8594; tiny \(V_p\); flat dist &#8594; large \(V_p\).</p>
+    <p class="eqnote fragment">Then <strong>renormalize</strong> over the nucleus and sample: \( \tilde p_i = p_i / \sum_{j\in V_p} p_j \) for \(i\in V_p\), else 0.</p>
+    <aside class="notes">
+      Nucleus sampling, from Holtzman et al. 2019, is the workhorse default. The construction: sort the vocabulary by probability descending, walk down accumulating mass, and stop the instant the running sum reaches p. That prefix is the nucleus V-sub-p. The whole point versus top-k is that the set size is dynamic, not fixed: when the model is confident and one token sits at 0.95, the nucleus is just that one token; when the model is unsure and probability is spread over thousands of tokens, the nucleus grows to include many of them. After you truncate you must renormalize &#8212; divide the surviving probabilities by their own sum so they form a valid distribution again &#8212; otherwise you are sampling from something that does not sum to one. That renormalization step is identical for top-k, top-p, and min-p, and it is a common interview gotcha to forget it.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">The math &middot; (c) speculative acceptance</p>
+    <h2>Speculative decoding samples exactly the target</h2>
+    <p>A cheap <em>draft</em> proposes token \(x\) with prob \(q(x)\); the <em>target</em> gives \(p(x)\). Accept \(x\) with probability</p>
+    $$ \alpha = \min\!\left(1,\ \frac{p(x)}{q(x)}\right) $$
+    <p class="eqnote fragment"><b>\(q(x)\)</b> = draft-model probability of the proposed token; <b>\(p(x)\)</b> = target-model probability of the same token.</p>
+    <p class="eqnote fragment">If \(p(x)\ge q(x)\) the draft <em>under</em>-proposed it &#8594; accept ( \(\alpha=1\) ). If \(p(x)&lt;q(x)\) the draft <em>over</em>-proposed &#8594; accept only with prob \(p/q\).</p>
+    <p class="eqnote fragment">On <strong>reject</strong>, resample from the normalized positive residual: \( p'(x) = \dfrac{\max(0,\ p(x)-q(x))}{\sum_{x'}\max(0,\ p(x')-q(x'))} \).</p>
+    <p class="eqnote fragment">Result: the emitted token is distributed <strong>exactly</strong> as \(p\) &#8212; speculative decoding is lossless, only faster.</p>
+    <aside class="notes">
+      This is the most-asked hard question on the topic, so the math has to be airtight. A small fast draft model proposes a token with probability q; the big target model scores that same token with probability p. The accept rule is min of one and p-over-q. Intuition: if the target likes the token at least as much as the draft did, p-over-q is at least one, so you accept outright. If the target likes it less than the draft did, you accept only proportionally, with probability p-over-q, which trims the over-eager draft proposals back down. When you reject, you do not just resample from p &#8212; that would double-count the mass you already accepted. Instead you sample from the normalized positive part of (p minus q): take p-minus-q, clip negatives to zero, renormalize, and draw from that residual. The beautiful result, provable in a couple of lines, is that the token you finally emit is distributed exactly according to the target p. So speculative decoding changes nothing about the output distribution &#8212; it is a pure latency optimization. The speedup comes entirely from verifying several draft tokens in one target forward pass; acceptance rate times draft cost determines the win.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 9 · IN CODE
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">In code &middot; one decode step</p>
+    <h2>Penalty &#8594; temperature &#8594; top-k &#8594; top-p &#8594; sample</h2>
+    <pre><code class="language-python" data-trim data-line-numbers="1-7|8-13|14-20|21-30|31-36">import torch
+
+def decode_step(logits, prev_ids, temperature=0.8, top_k=50,
+                top_p=0.9, rep_penalty=1.1):
+    # logits: (vocab,) raw scores for the NEXT token
+    logits = logits.clone()
+
+    # 1) REPETITION PENALTY: push down tokens already generated
+    for t in set(prev_ids.tolist()):
+        if logits[t] &gt; 0:
+            logits[t] /= rep_penalty      # sign-aware: divide if &gt;0
+        else:
+            logits[t] *= rep_penalty      # multiply (more negative) if &lt;=0
+
+    # 2) TEMPERATURE: scale logits BEFORE softmax
+    logits = logits / max(temperature, 1e-6)
+
+    # 3) TOP-K TRUNCATION: keep only k largest logits
+    if top_k &gt; 0:
+        kth = torch.topk(logits, top_k).values[-1]
+        logits[logits &lt; kth] = float("-inf")
+
+    # 4) TOP-P (NUCLEUS) TRUNCATION
+    probs = torch.softmax(logits, dim=-1)
+    sp, idx = torch.sort(probs, descending=True)
+    cum = torch.cumsum(sp, dim=-1)
+    cutoff = cum &gt; top_p                   # tokens past the mass p
+    cutoff[1:] = cutoff[:-1].clone()       # shift: always keep 1st
+    cutoff[0] = False
+    probs[idx[cutoff]] = 0.0               # drop the tail
+
+    # 5) RENORMALIZE + SAMPLE
+    probs = probs / probs.sum()            # back to a valid distribution
+    return torch.multinomial(probs, num_samples=1)</code></pre>
+    <aside class="notes">
+      Walk the highlighted blocks in order, because order is the whole point. Block one, repetition penalty: for every token already in the context, push its logit toward less likely &#8212; and note the sign-aware trick, you <em>divide</em> a positive logit by the penalty but <em>multiply</em> a negative one, because naively dividing a negative logit would make it larger and reward repetition, the opposite of what you want. Block two, temperature, applied to logits before softmax. Blocks three and four are the truncation steps the line-highlight calls out: top-k masks everything below the k-th largest logit to negative infinity; then top-p sorts the resulting probabilities, accumulates mass, and zeroes out the tail beyond p &#8212; with that shift so the single most likely token is never dropped even if it alone exceeds p. Block five is the step people forget: renormalize so the surviving probabilities sum to one, then draw with multinomial. If you skip the renormalize, multinomial still works because it normalizes internally, but writing it makes the math explicit and avoids surprises if you switch samplers.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">In code &middot; notes on order &amp; edge cases</p>
+    <h2>Why this order, and the gotchas</h2>
+    <ul>
+      <li class="fragment"><strong>Penalty first:</strong> it edits raw logits; doing it after temperature would entangle the two knobs.</li>
+      <li class="fragment"><strong>Temperature before truncation:</strong> T reshapes the distribution that top-k/top-p then measure &#8212; flip the order and the same p keeps a different set.</li>
+      <li class="fragment"><strong>Always keep the top token</strong> in nucleus (<code>cutoff[0]=False</code>): if one token alone exceeds p, you must still allow it.</li>
+      <li class="fragment"><strong>top_k and top_p compose:</strong> applying both = intersection of the two surviving sets, then renormalize once.</li>
+      <li class="fragment"><strong>Greedy = </strong><code>argmax</code>, not <code>T=0</code> in this formula &#8212; division by zero; libraries special-case <code>T=0</code> to argmax.</li>
+    </ul>
+    <aside class="notes">
+      This slide answers the "does order of operations matter" interview question with a yes and the reasons. Repetition penalty operates on raw logits, so it goes first; if you applied it after temperature the penalty strength would silently depend on T. Temperature must come before truncation because top-k and top-p measure the distribution &#8212; if you truncate first and then heat, the same nominal p value selects a different set, which is a real source of "why did changing temperature change my nucleus" confusion. The keep-the-top-token guard in nucleus is essential: when the argmax token already carries more than p of the mass, the naive cumulative-sum cutoff would drop it, leaving you sampling from the tail only. When you stack top-k and top-p you keep the intersection and renormalize exactly once at the end. And the practical note: you can't literally pass T equal to zero into the softmax formula, it divides by zero, so every library detects T equal zero and routes to a plain argmax &#8212; that is what "temperature 0" actually means in practice.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 10 · WORKED EXAMPLE
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Worked example &middot; setup</p>
+    <h2>Six candidate tokens, one logit vector</h2>
+    <p>The model emits these raw logits for the next token. Convert to probabilities with plain softmax (T=1):</p>
+    <table class="cmp">
+      <thead>
+        <tr><th>Token</th><th>" the"</th><th>" a"</th><th>" cat"</th><th>" dog"</th><th>" run"</th><th>" zebra"</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Logit \(z\)</td><td>4.0</td><td>3.0</td><td>2.0</td><td>1.0</td><td>0.0</td><td>&minus;2.0</td></tr>
+        <tr><td>Prob (T=1)</td><td>0.64</td><td>0.23</td><td>0.086</td><td>0.032</td><td>0.012</td><td>0.0016</td></tr>
+      </tbody>
+    </table>
+    <p class="eqnote fragment">Softmax of \([4,3,2,1,0,-2]\): the top token " the" already holds <strong>~64%</strong> of the mass; probabilities fall off roughly \(e\)-fold per logit step.</p>
+    <p class="eqnote fragment">Note the cumulative mass: " the" 0.64 &#8594; +" a" 0.87 &#8594; +" cat" 0.96 &#8594; +" dog" 0.99 &#8230; we'll use these for top-p.</p>
+    <aside class="notes">
+      Set up the numbers slowly because the next slide does all the work on them. Six candidate tokens with logits four, three, two, one, zero, and minus two. Run them through softmax at temperature one: exponentiate each, the values are about fifty-five, twenty, seven-and-a-half, two-point-seven, one, and point-one-four, summing to roughly ninety, so the probabilities come out about sixty-one percent, twenty-two, eight, three, one, and a fifth of a percent. The key features to point at: the distribution is fairly peaked, the top token alone owns sixty-one percent, and because logits are spaced one apart, each step down is about a factor of e, roughly two-point-seven, smaller. Then read the cumulative sums out loud &#8212; point-six-one, point-eight-three, point-nine-one, point-nine-four &#8212; because top-p with p of nine-tenths is going to land right between cat and dog, and having the running totals visible makes that obvious when we get there.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Worked example &middot; same logits, four strategies</p>
+    <h2>What each decoder picks</h2>
+    <table class="cmp">
+      <thead>
+        <tr><th>Strategy</th><th>Candidate set</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Greedy</td><td>{ " the" }</td><td>Argmax &#8594; always picks " the" (0.64). Deterministic.</td></tr>
+        <tr><td>T = 0.7</td><td>all 6, sharpened</td><td>" the" rises ~0.64&#8594;0.76; tail shrinks. Picks " the" most of the time.</td></tr>
+        <tr><td>T = 1.5</td><td>all 6, flattened</td><td>" the" falls ~0.64&#8594;0.50; " zebra" &#8593;. Rare words get a real chance.</td></tr>
+        <tr><td>Top-p = 0.9</td><td>{ " the", " a", " cat" }</td><td>Cumulative 0.64&#8594;0.87&#8594;0.96 &#8805; 0.9, stop. Renormalize over 3.</td></tr>
+      </tbody>
+    </table>
+    <ul style="margin-top:.5em;">
+      <li class="fragment"><strong>Greedy</strong> &#8212; zero randomness; " the" forever (the source of repetition loops).</li>
+      <li class="fragment"><strong>T=0.7</strong> &#8212; gaps magnified \(1/0.7\times\); same ranking, more peaked &#8594; safe creativity.</li>
+      <li class="fragment"><strong>T=1.5</strong> &#8212; gaps shrunk; " zebra" jumps from 0.0015 toward ~1% &#8594; more surprise, more risk.</li>
+      <li class="fragment"><strong>Top-p=0.9</strong> &#8212; drops " dog/run/zebra" entirely; samples only among the top 3, renormalized to (0.67, 0.24, 0.09).</li>
+    </ul>
+    <p class="eqnote fragment">Same logits, four very different behaviors &#8212; and top-p's set <em>adapts</em>: on a flatter distribution it would keep far more tokens.</p>
+    <aside class="notes">
+      Now run the four decoders on those identical numbers. Greedy is trivial: argmax, it emits " the" every single time, and because the context never changes its mind that is exactly how greedy falls into repetition loops. Temperature point-seven divides the logits by point-seven, which magnifies every gap by about one-point-four times, so the ranking is unchanged but the peak sharpens &#8212; " the" climbs from sixty-one to roughly seventy-two percent and the tail thins; this is the safe-creativity setting. Temperature one-point-five does the opposite, shrinking the gaps, so " the" drops to about forty-four percent and " zebra" climbs from a fifth of a percent toward a full percent &#8212; you have bought surprise at the cost of coherence. Top-p at nine-tenths walks the cumulative sum: point-six-one, then point-eight-three, then point-nine-one which crosses the threshold, so the nucleus is exactly the top three tokens, " the", " a", " cat"; " dog", " run", and " zebra" are dropped to zero, and you renormalize the survivors to roughly point-six-seven, point-two-four, point-zero-nine before sampling. The closing point is the one interviewers want: the temperature methods reshape but keep all tokens, while top-p truncates &#8212; and crucially the nucleus size is adaptive, so on a flatter distribution top-p would have kept many more than three.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 11 · DECISION GUIDE
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">When to use what</p>
+    <h2>Decision guide — route by the task</h2>
+    <div class="mermaid">
+flowchart TD
+  Q1{"What is the task?"} --&gt;|"Factual QA · extraction"| A["Greedy / T&#8776;0<br/>one supported answer, reproducible"]
+  Q1 --&gt;|"Structured · JSON"| B["Constrained decode + low temp<br/>grammar mask = valid by construction"]
+  Q1 --&gt;|"Creative · brainstorm"| C["T&#8776;0.8&#8211;1.0 + top_p&#8776;0.9<br/>diverse, surprising"]
+  Q1 --&gt;|"Need it fast"| D["Speculative decoding<br/>same distribution, fewer target passes"]
+  Q1 --&gt;|"Need the best of many"| E["Sample N + verifier / self-consistency<br/>spend compute, rerank"]
+    </div>
+    <p class="eqnote fragment">One picture, the whole module: the <em>task</em> decides the knobs, not the other way round.</p>
+    <aside class="notes">
+      This is the cheat-sheet interviewers love. Walk the five branches. Factual QA and extraction: you want the single best-supported answer and reproducibility, so greedy or temperature near zero. Structured/JSON: low temperature plus constrained decoding so the output is valid by construction. Creative and brainstorming: crank temperature to roughly 0.8&#8211;1.0 with top-p around 0.9 for variety. Need speed: speculative decoding, which is exact &#8212; same output distribution, just fewer expensive target passes. Need the best of many: sample N candidates and rerank with a verifier or take a self-consistency majority vote. The meta-point worth repeating out loud: pick the decoder from the task's tolerance for diversity versus its demand for correctness.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">When to use what · knobs cheat-sheet</p>
+    <h2>Which knob do I turn?</h2>
+    <div class="cols">
+      <div>
+        <h5>Output is repetitive / bland</h5>
+        <ul>
+          <li class="fragment"><strong>Raise temperature</strong> &#8212; flatten the distribution</li>
+          <li class="fragment"><strong>Widen top_p / top_k</strong> &#8212; admit more candidates</li>
+          <li class="fragment"><strong>Add frequency / presence penalty</strong> or no-repeat-n-gram &#8212; break loops</li>
+        </ul>
+      </div>
+      <div>
+        <h5>Output is incoherent / off-topic</h5>
+        <ul>
+          <li class="fragment"><strong>Lower temperature</strong> &#8212; sharpen the distribution</li>
+          <li class="fragment"><strong>Shrink top_p / top_k</strong> (or use min_p) &#8212; cut the noisy tail</li>
+          <li class="fragment"><strong>Ease over-aggressive penalties</strong> forcing odd word choices</li>
+        </ul>
+      </div>
+    </div>
+    <p class="fragment" style="margin-top:.5em;">Every knob tunes one axis: <strong>coherence &amp; factuality &#8596; diversity &amp; creativity.</strong></p>
+    <aside class="notes">
+      The whole panel of sampling knobs navigates one trade-off &#8212; coherence and factuality on one side, diversity and creativity on the other. Two failure directions, two opposite responses. If it's boringly repetitive, you're too conservative: raise temperature, widen top-p or top-k, and add a frequency or presence penalty (or no-repeat-n-gram) to break loops &#8212; start with the penalty since repetition is the specific symptom. If it's creative but incoherent or off-topic, you're too permissive: lower temperature, shrink top-p/top-k or switch to min-p to clip the noisy tail, and check that a too-strong penalty isn't forcing weird word choices. Tune one knob at a time and incrementally, or you'll overshoot to the opposite failure.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 12 · PITFALLS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Pitfalls · misconceptions</p>
+    <h2>People think X, but actually Y (1/2)</h2>
+    <div class="callout warn"><span class="t">&#9888; Pitfall</span>
+      <ul>
+        <li class="fragment"><strong>Think:</strong> temperature 0 is bitwise-deterministic. <strong>Actually:</strong> on GPU, floating-point reduction order, batch size, and kernel choice can flip a near-tie argmax &#8212; same prompt, different token.</li>
+        <li class="fragment"><strong>Think:</strong> top_k=1 is something other than greedy. <strong>Actually:</strong> keeping one token then "sampling" is exactly argmax &#8212; greedy decoding by another name.</li>
+        <li class="fragment"><strong>Think:</strong> raising temperature can change the chosen token. <strong>Actually:</strong> temperature is a monotonic, order-preserving rescale &#8212; it never changes which token has the highest probability (the argmax).</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      First three. One: "temperature 0 guarantees identical bits every run." It does not on GPU. Floating-point addition is non-associative, so the reduction order in matmuls changes the low-order bits of the logits; different batch sizes/padding and kernel autotuning shift it too. When two top logits are nearly tied, those tiny differences can flip the argmax and emit a different token even at temperature 0. Two: top_k=1 keeps only the single highest-probability token, renormalizes to mass 1, and "samples" &#8212; that's literally argmax, i.e. greedy. Three: temperature divides every logit by the same T, which only compresses or expands the gaps between logits; the ordering never changes, so the top token stays the top token for any finite positive T. Temperature changes the odds of the runners-up, never the winner of the argmax.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Pitfalls · misconceptions</p>
+    <h2>People think X, but actually Y (2/2)</h2>
+    <div class="callout warn"><span class="t">&#9888; Pitfall</span>
+      <ul>
+        <li class="fragment"><strong>Think:</strong> a strong repetition penalty is always safe. <strong>Actually:</strong> it's blind to legitimate structure &#8212; it breaks code indentation, list bullets, and necessary function words.</li>
+        <li class="fragment"><strong>Think:</strong> constrained decoding guarantees a correct answer. <strong>Actually:</strong> it guarantees <em>syntax</em> &#8212; valid JSON can still carry hallucinated or wrong field values.</li>
+        <li class="fragment"><strong>Think:</strong> beam search is the best decoder everywhere. <strong>Actually:</strong> it hurts open-ended generation &#8212; maximizing likelihood lands on bland, repetitive, degenerate text (the "likelihood trap").</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Three more. One: an aggressive repetition penalty is blind to structure that <em>should</em> repeat &#8212; code needs repeated indentation and keywords, lists need repeated bullets/numbers, prose reuses "the" and "and." Push it too hard and you get broken syntax and awkward phrasing because the model is forced to avoid tokens it genuinely needs. Two: grammar/JSON-constrained decoding masks invalid tokens, so the output always parses &#8212; but syntactic validity is not semantic correctness; the values can be hallucinated, mistyped-but-plausible, or factually wrong, and forcing structure can even crowd out chain-of-thought. Three: beam search shines in machine translation, where there's essentially one correct rendering, but in open-ended generation the single most-likely sequence is bland and repetitive &#8212; the likelihood trap says human-quality text sits in a moderate-probability band, not at the maximum, so sampling beats search there.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 13 · WHAT'S NEW + PAPERS
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">What's new</p>
+    <h2>Decoding is an active research frontier</h2>
+    <div class="callout whatsnew"><span class="t">&#128640; What's new</span>
+      <ul>
+        <li class="fragment"><strong>Speculative decoding went mainstream.</strong> A small draft proposes, the big target verifies in parallel &#8212; <em>exact</em> same distribution, 2&#8211;3&times; faster. Now standard in vLLM, TensorRT-LLM, llama.cpp.</li>
+        <li class="fragment"><strong>Self-drafting beats separate drafts.</strong> Medusa adds extra heads to the model itself; EAGLE / EAGLE-2 draft at the <em>feature</em> level with dynamic trees &#8212; no second model to host.</li>
+        <li class="fragment"><strong>Better truncation samplers.</strong> min-p gates relative to the top token, staying coherent at higher temperatures than top-p.</li>
+        <li class="fragment"><strong>Degeneration-aware decoders.</strong> Contrastive search and Mirostat fight repetition/blandness without pure likelihood maximization.</li>
+      </ul>
+    </div>
+    <aside class="notes">
+      Where decoding is right now. Speculative decoding is the headline win &#8212; a cheap draft model proposes a block of tokens, the big target verifies them all in one parallel pass, and a rejection-sampling correction makes it provably exact (same output distribution as the target). It's shipped in every major serving stack for a 2&#8211;3&times; latency cut. The frontier moved to self-drafting: Medusa bolts extra prediction heads onto the target model so there's no separate draft to host; EAGLE and EAGLE-2 draft at the hidden-feature level with dynamic draft trees, pushing acceptance rates higher still. On the sampling side, min-p anchors its threshold to the top token's probability, which stays coherent at higher temperatures than top-p &#8212; useful for creative work. And degeneration-aware decoders &#8212; contrastive search (a degeneration penalty over the model's own representations) and Mirostat (feedback control on surprisal) &#8212; attack repetition and blandness directly instead of just maximizing likelihood.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">What's new · papers</p>
+    <h2>Papers &#8212; verified links</h2>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2211.17192" target="_blank" rel="noopener noreferrer">Fast Inference from Transformers via Speculative Decoding</a> <span class="meta">&#8212; Leviathan, Kalman &amp; Matias, 2023. Draft + parallel verify, distribution-preserving.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2401.10774" target="_blank" rel="noopener noreferrer">Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads</a> <span class="meta">&#8212; Cai et al., 2024. Extra heads on the model, tree verification.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2401.15077" target="_blank" rel="noopener noreferrer">EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty</a> <span class="meta">&#8212; Li et al., 2024. Feature-level drafting.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2406.16858" target="_blank" rel="noopener noreferrer">EAGLE-2: Faster Inference with Dynamic Draft Trees</a> <span class="meta">&#8212; Li et al., 2024. Context-aware dynamic draft trees.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2407.01082" target="_blank" rel="noopener noreferrer">Turning Up the Heat: Min-p Sampling for Creative and Coherent LLM Outputs</a> <span class="meta">&#8212; Nguyen et al., 2024. Top-token-relative truncation.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2202.06417" target="_blank" rel="noopener noreferrer">A Contrastive Framework for Neural Text Generation (SimCTG / contrastive search)</a> <span class="meta">&#8212; Su et al., 2022. Degeneration penalty over representations.</span></div>
+    <div class="paper fragment"><a href="https://arxiv.org/abs/2007.14966" target="_blank" rel="noopener noreferrer">Mirostat: A Neural Text Decoding Algorithm that Directly Controls Perplexity</a> <span class="meta">&#8212; Basu et al., 2020. Feedback control on surprisal.</span></div>
+    <aside class="notes">
+      These are the primary sources, all link-verified. Leviathan et al. is the speculative-decoding paper to cite &#8212; the rejection-sampling correction that makes it exact. Medusa (Cai et al.) and the two EAGLE papers (Li et al.) are the self-drafting lineage: heads-on-the-model versus feature-level draft trees. Min-p (Nguyen et al.) is the modern truncation sampler. SimCTG / contrastive search (Su et al., 2022) and Mirostat (Basu et al., 2020) are the degeneration-aware decoders. If a student reads only two, I'd send them to Leviathan for speculative decoding and the min-p paper for the modern sampling intuition.
+    </aside>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 14 · PRACTICE
+     ============================================================ -->
+<section>
+  <p class="kicker">Practice</p>
+  <h2>Practice &#8212; click a question to reveal the answer</h2>
+  <p class="small muted">Full bank: <a href="../../interview-prep/10-decoding-and-sampling.md">10 &middot; Decoding &amp; Sampling</a> &#8212; from the answer key, condensed.</p>
+
+  <!-- ===== SET 1 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">What is greedy decoding, and why doesn't it guarantee the globally most probable sequence? <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Greedy picks the argmax token at each step &#8212; locally optimal, no lookahead. A high-probability first token can lead into a region where every continuation is poor, while a slightly lower-probability start opens a higher-probability overall path. The true global argmax is intractable, so greedy is just a cheap heuristic. <span class="watch">Beam search is also a heuristic, not a global optimizer.</span></div></li>
+
+      <li class="qa"><span class="q">A teammate sets <code>top_k=1</code>. What decoding strategy did they reproduce? <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Greedy decoding. Keeping only the single highest-probability token and "sampling" from a one-element set is identical to taking the argmax every step.</div></li>
+
+      <li class="qa"><span class="q">What does temperature do, and where in the pipeline is it applied? <span class="diff easy">Easy</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Temperature rescales the distribution's peakiness: T&lt;1 sharpens (more deterministic), T&gt;1 flattens (more random). It divides the <em>logits</em> by T <em>before</em> softmax (<code>z_i/T</code>), not the output probabilities. <span class="watch">It scales logits before softmax, not probabilities after.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 2 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Explain top-p (nucleus) sampling and its advantage over top-k when confidence varies. <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Sort tokens by probability, accumulate until cumulative mass reaches p (e.g. 0.9), keep that nucleus, renormalize, sample. The set size is dynamic: small when the model is peaked, large when uncertain. A fixed k can't adapt &#8212; too permissive on peaked steps, too restrictive on flat ones.</div></li>
+
+      <li class="qa"><span class="q">What is min-p sampling, and why is it robust across peaked vs. flat distributions? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Keep every token with probability &#8805; <code>p_min &times; P(top token)</code>, then renormalize. Because the bar is anchored to the top token, a confident step sets a high absolute cutoff (few junk tokens survive) and a flat step lowers it (generation isn't strangled). That relative gate handles both shapes, allowing higher usable temperatures than top-p.</div></li>
+
+      <li class="qa"><span class="q">After truncating to a top-k / nucleus set, what must you do before sampling, and why? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Renormalize the survivors so they sum to 1 (divide each by the kept sum). After zeroing the discarded tokens the remaining mass is &lt;1, so the multinomial sampler would misbehave or implicitly reserve mass for dropped tokens. <span class="watch">Order matters: usual pipeline is temperature &#8594; truncate &#8594; renormalize &#8594; sample.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 3 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Why can an aggressive repetition penalty degrade quality? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">It's blind to legitimate repetition. Code needs repeated indentation/keywords, lists need repeated bullets, prose reuses function words. Penalizing all previously-seen tokens too hard breaks indentation and syntax and produces awkward phrasing the model was right to repeat.</div></li>
+
+      <li class="qa"><span class="q">When you force valid JSON via grammar-constrained decoding, what failure modes remain? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Syntactic validity &#8800; semantic correctness. The JSON can still hold hallucinated or wrong field values, omit needed info, or be plausibly-typed but factually wrong; forcing structure can even crowd out chain-of-thought. <span class="watch">Validity guarantees shape, not truth.</span></div></li>
+
+      <li class="qa"><span class="q">Distinguish frequency penalty from presence penalty (OpenAI-style). <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Both subtract from a token's logit by prior occurrence. Frequency penalty scales with the <em>count</em> &#8212; grows with overuse. Presence penalty is a flat, one-time hit applied as soon as a token appears <em>at all</em>, nudging toward new tokens/topics. <span class="watch">Frequency = count-scaled; presence = binary "has it appeared."</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 4 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Explain speculative decoding: roles of draft and target, and does it change the output distribution? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">A small draft proposes &#947; tokens; the large target scores them all in one parallel pass and accepts/rejects each via a rejection-sampling check, resampling from a corrected residual on the first reject. It's provably <em>distribution-preserving</em> &#8212; identical to sampling from the target. <span class="watch">It only speeds things up; it is not a quality-for-speed approximation.</span></div></li>
+
+      <li class="qa"><span class="q">What determines speculative speedup, and how do Medusa / EAGLE extend the basic scheme? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Speedup grows with acceptance rate and block length &#947;, dragged down by draft cost &#8212; there's an optimal &#947;. Medusa adds extra prediction heads to the target itself (no separate draft) verified as a tree; EAGLE drafts at the feature level with dynamic draft trees, raising accepted tokens per pass.</div></li>
+
+      <li class="qa"><span class="q">Why does temperature 0 not guarantee identical outputs on GPU? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Floating-point addition is non-associative, so parallel reduction order changes the low-order bits of the logits; batch size/padding and kernel autotuning vary it too. When the top two logits are nearly tied, those tiny differences flip the argmax &#8212; different token despite greedy. <span class="watch">Greedy is deterministic only modulo floating-point nondeterminism.</span></div></li>
+    </ul>
+  </section>
+
+  <!-- ===== SET 5 ===== -->
+  <section>
+    <ul class="qlist">
+      <li class="qa"><span class="q">Why does beam search suit machine translation but hurt open-ended chat? <span class="diff hard">Hard</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">MT output is tightly constrained by the source &#8212; one high-probability correct rendering &#8212; so maximizing likelihood lands on it. Open-ended generation has many valid continuations; the single most-likely sequence is bland and repetitive (the "likelihood trap"). Human-quality text isn't max-probability text, so search optimizes the wrong objective there.</div></li>
+
+      <li class="qa"><span class="q">How do self-consistency and temperature interact for reasoning tasks? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Self-consistency samples many chains at nonzero temperature and majority-votes the final answer. Temperature must be high enough for diverse paths &#8212; at T=0 all chains are identical and voting is pointless &#8212; but not so high they go incoherent; ~0.5&#8211;0.8 with top-p works well. <span class="watch">Running self-consistency at T=0 makes the vote meaningless.</span></div></li>
+
+      <li class="qa"><span class="q">For factual QA vs. creative brainstorming, what decoding settings would you choose? <span class="diff med">Med</span><span class="reveal-hint">&#9656; reveal</span></span>
+        <div class="answer">Factual QA: favor determinism/faithfulness &#8212; T=0 (greedy) or very low (&#8804;0.3) with tight top-p, optionally constrained output. Creative: favor diversity &#8212; T&#8776;0.8&#8211;1.2, top-p&#8776;0.9&#8211;0.95 (or min-p), modest repetition/frequency penalties; generating best-of-n helps surface interesting options.</div></li>
+    </ul>
+  </section>
+</section>
+
+<!-- ============================================================
+     SECTION 15 · TAKEAWAYS + CLOSING
+     ============================================================ -->
+<section>
+  <section>
+    <p class="kicker">Takeaways</p>
+    <h2>What to remember</h2>
+    <div class="takeaways"><ul>
+      <li class="fragment"><strong>Logits &#8594; softmax &#8594; token.</strong> Every strategy is just a different way to pick from that distribution.</li>
+      <li class="fragment"><strong>Greedy/beam maximize likelihood</strong> &#8212; great for one-answer tasks, degenerate for open-ended (the likelihood trap).</li>
+      <li class="fragment"><strong>Temperature rescales gaps</strong> (before softmax); it never reorders the argmax. top_k=1 = greedy.</li>
+      <li class="fragment"><strong>Truncation samplers:</strong> top-k (fixed), top-p (adaptive mass), min-p (top-relative) &#8212; then renormalize.</li>
+      <li class="fragment"><strong>One trade-off:</strong> coherence &amp; factuality &#8596; diversity &amp; creativity &#8212; the task picks the point.</li>
+      <li class="fragment"><strong>Speculative decoding is free speed</strong> &#8212; exact distribution; Medusa/EAGLE remove the separate draft.</li>
+      <li class="fragment"><strong>Determinism is fragile:</strong> only greedy is reproducible, and even then only modulo GPU floating-point order.</li>
+    </ul></div>
+    <aside class="notes">
+      The recap as a through-line. The pipeline is always logits &#8594; softmax &#8594; token, and decoding is just <em>how</em> you pick. Likelihood maximizers (greedy, beam) win where there's one right answer and degenerate on open-ended text. Temperature only compresses or expands the logit gaps before softmax &#8212; it never reorders the top token &#8212; and top_k=1 is literally greedy. The truncation family is top-k (fixed cap), top-p (adaptive cumulative mass), and min-p (threshold relative to the top token), always followed by renormalization. Every knob navigates the same coherence-versus-diversity axis, and the task chooses where you sit. Speculative decoding buys speed for free because it's exact, and self-drafting (Medusa, EAGLE) drops the separate model. Finally, "deterministic" is fragile &#8212; only greedy, and even that only up to GPU floating-point reduction order.
+    </aside>
+  </section>
+
+  <section>
+    <p class="kicker">Further reading &middot; closing</p>
+    <h2>Go deeper</h2>
+    <div class="paper"><a href="https://arxiv.org/abs/2211.17192" target="_blank" rel="noopener noreferrer">Fast Inference from Transformers via Speculative Decoding</a> <span class="meta">&#8212; Leviathan, Kalman &amp; Matias, 2023.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2407.01082" target="_blank" rel="noopener noreferrer">Turning Up the Heat: Min-p Sampling</a> <span class="meta">&#8212; Nguyen et al., 2024.</span></div>
+    <div class="paper"><a href="https://arxiv.org/abs/2202.06417" target="_blank" rel="noopener noreferrer">A Contrastive Framework for Neural Text Generation (contrastive search)</a> <span class="meta">&#8212; Su et al., 2022.</span></div>
+    <p style="margin-top:1em;text-align:center;font-size:1.1em;"><strong>Same logits, different selection. The task picks the knobs.</strong></p>
+    <p style="text-align:center;opacity:.6;font-size:.85em;">End of module &#8212; thank you. Press <kbd>O</kbd> for overview.</p>
+    <aside class="notes">
+      Closing. Three reads to go deeper: Leviathan for speculative decoding's exactness proof, the min-p paper for modern truncation sampling, and SimCTG / contrastive search for degeneration-aware decoding. The one-line crystallization: it's the same logit distribution every time &#8212; decoding strategy is just how you select from it, and the task's tolerance for diversity versus its demand for correctness picks the knobs. Thank them and offer the overview or a jump back to any approach.
+    </aside>
+  </section>
+</section>
+
+    </div>
+  </div>
+  <!-- reveal.js core + plugins + mermaid (CDN), then shared deck runtime -->
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/math/math.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+  <script src="../assets/deck.js?v=2"></script>
+</body>
+</html>
